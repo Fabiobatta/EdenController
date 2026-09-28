@@ -67,7 +67,9 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y libsdl2-dev cmake build-essential python3-tk
         git clone https://github.com/libsdl-org/SDL.git --branch "release-$SDL3_VERSION" --depth 1
-        cd SDL && cmake -B build -DSDL_SHARED=ON -DSDL_STATIC=OFF
+        # The launcher only needs SDL's joystick/gamepad subsystems
+        cd SDL && cmake -B build -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
+          -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_AUDIO=OFF -DSDL_GPU=OFF -DSDL_RENDER=OFF -DSDL_CAMERA=OFF
         cmake --build build --parallel
         sudo cmake --install build
 

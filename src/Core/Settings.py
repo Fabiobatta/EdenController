@@ -15,6 +15,7 @@ things like the last game played; losing it is harmless.
 
 import json
 import os
+import threading
 
 from .Log import log
 
@@ -45,9 +46,17 @@ kill_combo = {DEFAULT_KILL_COMBO}
 ; launcher), chiamate con il Title ID o il nome del gioco, es.
 ;   covers\\0100152000022000.png   oppure   covers\\Mario Kart 8 Deluxe.jpg
 covers_dir = covers
+; Scarica dall'eShop i banner (sfondi) e le icone mancanti: true / false
+download_art = true
 ; Chiave API di SteamGridDB (gratuita: steamgriddb.com > Preferences > API)
 ; per scaricare da sole le copertine mancanti. Vuoto = nessun download.
 steamgriddb_api_key =
+
+; Numero di giocatori mostrato sulle copertine, se quello dell'eShop e'
+; sbagliato: togli il ';' e scrivi Title ID o nome del gioco = giocatori
+; [Players]
+; 0100A8E016236000 = 4
+; Kirby's Dream Buffet = 4
 """
 
 
@@ -116,6 +125,7 @@ class Settings:
         self.path = path
         self.state_path = None
         self.state = {}
+        self._state_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Typed getters
@@ -137,14 +147,44 @@ class Settings:
     # State (last game, ...) - best effort
     # ------------------------------------------------------------------
     def save_state(self, **values):
-        self.state.update(values)
+        """Merge values into the state file. Safe to call from any thread."""
+        with self._state_lock:
+            self.state.update(values)
+            if self.state_path:
+                _write_json(self.state_path, self.state)
+
+    # ------------------------------------------------------------------
+    # Caches (library scan results, ...) - disposable, best effort
+    # ------------------------------------------------------------------
+    def _cache_path(self, name):
         if not self.state_path:
-            return
+            return None
+        return self.state_path.replace(".state.json", f".{name}.json")
+
+    def load_cache(self, name):
+        path = self._cache_path(name)
         try:
-            with open(self.state_path, "w", encoding="utf-8") as f:
-                json.dump(self.state, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            log("WARNING", "Could not save launcher state", e)
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def save_cache(self, name, data):
+        path = self._cache_path(name)
+        if path:
+            _write_json(path, data, indent=None)
+
+
+def _write_json(path, data, indent=2):
+    """Write JSON atomically; failures are logged, never raised."""
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=indent)
+        os.replace(tmp, path)
+    except Exception as e:
+        log("WARNING", "Could not write", f"{path}: {e}")
 
 
 def load_settings(directory, launcher_name, emulator_defaults=""):

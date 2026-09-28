@@ -59,7 +59,7 @@ echo [1/3] Using environment %VENV_DIR%
 rem An existing environment may predate requirements.txt - verify every build
 rem and runtime dependency is present. find_spec locates them without
 rem importing: importing sdl3 does network and binary resolution work.
-"%PY%" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','customtkinter','sdl2','sdl3','PIL','Crypto')))" >nul 2>&1
+"%PY%" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','sdl2','sdl3','PIL','Crypto')))" >nul 2>&1
 if not errorlevel 1 goto :venv_done
 echo       Build dependencies missing - installing requirements...
 "%PY%" -m pip install -r requirements.txt
@@ -93,6 +93,13 @@ if exist "sdl\*.dll" (
 set "ASSETARG="
 if exist "assets\" set "ASSETARG=--add-data assets;assets"
 
+rem Player counts and eShop art index (optional: the launcher works without it)
+if not exist "assets\titledb.json.gz" (
+    echo       Building assets\titledb.json.gz ^(player counts^)...
+    "%PY%" tools\build_titledb_index.py
+    if errorlevel 1 echo       WARNING: index not built - no player badges
+)
+
 echo [3/3] Building %NAME%Launcher.exe from %ENTRY%...
 echo.
 "%PY%" -m PyInstaller ^
@@ -103,7 +110,6 @@ echo.
     %ICONARG% ^
     %ASSETARG% ^
     %SDLARG% ^
-    --collect-all customtkinter ^
     --paths src ^
     --hidden-import Core.ControllerManagerSDL2 ^
     --hidden-import Core.ControllerManagerSDL3 ^

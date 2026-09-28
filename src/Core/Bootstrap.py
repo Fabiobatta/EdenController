@@ -14,8 +14,6 @@ The order below is not cosmetic - each step depends on the previous one:
     profiles    discovered once, then owned by the emulator instance
 """
 
-import customtkinter as ctk
-
 from .I18n import set_language
 from .Log import init_log, log
 from .Paths import base_dir
@@ -59,14 +57,13 @@ def run(emulator):
     sdl = load_sdl(emulator.sdl_backend(), emulator.sdl_dir())
 
     # 5. UI
-    # Import App (and transitively Ui) BEFORE creating the CTk window.
-    # Ui.py's module-level code disables automatic DPI awareness; if the
-    # window is created first, it registers with the monitor's real DPI
-    # scale, and the later set_window_scaling() call applies a geometry()
-    # that breaks fullscreen.
+    # Import App (and transitively Ui) BEFORE creating the window: Ui.py
+    # makes the process DPI-aware at import time, which must happen before
+    # any window exists or Windows scales the fullscreen window twice.
+    import tkinter as tk
     from .App import LauncherApp
 
-    root = ctk.CTk()
+    root = tk.Tk()
     emulator.profiles = emulator.load_profiles()
 
     LauncherApp(root, emulator, sdl)

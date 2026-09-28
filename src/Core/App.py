@@ -7,9 +7,14 @@ Emulator-agnostic. Everything emulator-specific arrives through the Emulator
 instance handed in by Core/Bootstrap.py.
 
 Screens (self.mode):
-    PLAYERS   the 8-slot grid - press A to take the next player slot
-    GAMES     the game list - only when the emulator offers games and no game
+    PLAYERS   the 8 player cards - press A to take the next player slot
+    GAMES     the game grid - only when the emulator offers games and no game
               was passed on the command line
+
+Work kept off the 16 ms loop:
+    - controllers are opened once, when they appear (sync_pads)
+    - the game library is scanned on a background thread while players join
+    - pictures are downloaded on a background thread (Core/Art.py)
 """
 
 import ctypes
@@ -17,11 +22,12 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from tkinter import messagebox
 
+from .Art import ArtLibrary
 from .I18n import t
-from .Covers import CoverDownloader, find_cover
 from .Log import log
 from .Paths import base_dir
 from .Process import launch
@@ -36,10 +42,14 @@ RUMBLE_STRENGTH = 0.75
 RUMBLE_PULSE_MS = 160
 RUMBLE_GAP_MS = 170
 
-# Game list navigation: first repeat after a short hold, then continuous
+# Game grid navigation: first repeat after a short hold, then continuous
 NAV_REPEAT_DELAY = 0.35
 NAV_REPEAT_RATE = 0.07
 STICK_THRESHOLD = 0.6
+
+# kill_combo button names -> button picture
+COMBO_GLYPHS = {"select": "back", "up": "dpad", "down": "dpad", "left": "dpad", "right": "dpad"}
+
 
 class LauncherApp:
     """
@@ -52,7 +62,7 @@ class LauncherApp:
     def __init__(self, root, emulator, sdl):
         """
         Args:
-            root     (ctk.CTk):  The root window.
+            root     (tk.Tk):    The root window.
             emulator (Emulator): Located and prepared emulator, profiles and
                                  settings loaded.
             sdl      (type):     SDLManager class from Core.Sdl.load_sdl().
@@ -64,34 +74,27 @@ class LauncherApp:
 
         # Frontend arguments (Playnite, LaunchBox, Moonlight...) mean we are
         # launching a specific game rather than the emulator's own UI.
-        # Without them the emulator may offer a game list instead.
+        # Without them the emulator may offer a game grid instead.
         self.has_game_args = len(sys.argv) > 1
-        self.games = [] if self.has_game_args else emulator.list_games()
-        log("INFO", "Game picker", f"{len(self.games)} game(s)" if self.games else "off")
+        self.picker = not self.has_game_args and emulator.game_picker_enabled()
+        self.games = []                     # every game, once scanned
+        self.shown_games = []               # games on screen (after the players filter)
+        self.games_loaded = not self.picker
+        self._scan_result = None            # handed over by the scan thread
+        self.waiting_for_games = False      # START pressed while still scanning
 
-        # Portrait covers: the covers folder, plus SteamGridDB if configured
-        covers_dir = os.path.join(base_dir(), settings.get(LAUNCHER_SECTION, "covers_dir", "covers"))
-        for game in self.games:
-            game["cover"] = find_cover(covers_dir, game)
-        self.cover_downloader = None
-        api_key = settings.get(LAUNCHER_SECTION, "steamgriddb_api_key", "")
-        if self.games and api_key:
-            tried = (settings.state or {}).get("covers_not_found", [])
-            self.cover_downloader = CoverDownloader(api_key, covers_dir, tried)
-            self.cover_tried_saved = set(tried)
-            self.cover_downloader.start(self.games)
-
-        if self.has_game_args:
-            launch_text = t("footer_launch_game")
-        elif self.games:
-            launch_text = t("footer_choose")
-        else:
-            launch_text = t("footer_launch", name=emulator.name.upper())
-        self.ui = LauncherUi(root, emulator.name, launch_text, self.refresh_grid)
+        self.ui = LauncherUi(root, emulator.name)
 
         # Launcher options
         self.rumble_enabled = settings.get_bool(LAUNCHER_SECTION, "rumble", True)
-        self.kill_buttons = parse_combo(settings.get(LAUNCHER_SECTION, "kill_combo", DEFAULT_KILL_COMBO), sdl)
+        combo = settings.get(LAUNCHER_SECTION, "kill_combo", DEFAULT_KILL_COMBO)
+        self.kill_buttons = parse_combo(combo, sdl)
+        self.art = ArtLibrary(
+            os.path.join(base_dir(), settings.get(LAUNCHER_SECTION, "covers_dir", "covers")),
+            eshop=settings.get_bool(LAUNCHER_SECTION, "download_art", True),
+            sgdb_key=settings.get(LAUNCHER_SECTION, "steamgriddb_api_key", ""),
+            sgdb_missing=(settings.state or {}).get("covers_not_found", []))
+        self._sgdb_missing_saved = set(self.art.sgdb_missing)
 
         # Keyboard shortcuts for accessibility
         self.root.bind("<Return>", lambda e: self.handle_enter_key())
@@ -104,19 +107,21 @@ class LauncherApp:
         self.sdl.SDL_Init()
 
         # State management
-        self.controllers = {}               # {instance_id: SDL_GameController}
-        self.assignments = []               # [{"path", "name", "profile_key", "is_editing"}, ...] - Player order
-        self.hardware_map = {}              # {instance_id: (hid_path, display_name)} - Currently connected
-        self.color_pool = list(COLOR_POOL)  # Copy the pool to modify it locally
-        random.shuffle(self.color_pool)     # Shuffle the color pool
-        self.hid_colors = {}                # Dictionary to remember {hid_path: color_hex}
-        self.hid_profiles = {}              # Dictionary to remember {hid_path: profile_key} across reconnects
+        self.pads = {}                      # {instance_id: {"ctrl", "path", "raw_path", "guid", "name"}}
+        self._pad_order = []                # instance ids in SDL enumeration order
+        self._not_gamepads = set()          # joysticks that are not gamepads (flight sticks...)
+        self.assignments = []               # [{"path", "name", "profile_key", "is_editing"}] - player order
+        self.color_pool = list(COLOR_POOL)
+        random.shuffle(self.color_pool)
+        self.hid_colors = {}                # {path: color} for the session
+        self.hid_profiles = {}              # {path: profile_key} across reconnects
         self.process = None                 # Emulator subprocess handle
         self.returning_to_launcher = False  # Flag for kill -> restart flow
 
-        # Game list state
+        # Game grid state
         self.mode = "PLAYERS"
-        self.game_index = self._initial_game_index()
+        self.filter_on = False
+        self.game_index = 0
         self.nav_direction = None           # Held navigation action ("up", "left", ...)
         self.nav_next_repeat = 0.0
 
@@ -124,8 +129,20 @@ class LauncherApp:
         self.profile_keys = list(self.emu.profiles.keys())
         self.default_profile = self.profile_keys[0] if self.profile_keys else ""
 
-        # Start main loop
+        combo_markup = " + ".join(f"[{COMBO_GLYPHS.get(n, n)}]" for n in self._combo_names(combo))
+        self.ui.set_tip(t("tip_kill", combo=combo_markup, name=emulator.name))
+        self.update_hints()
+
+        if self.picker:
+            threading.Thread(target=self._scan_games, daemon=True).start()
+
         self.update_loop()
+
+    @staticmethod
+    def _combo_names(text):
+        names = [n.strip().lower() for n in (text or "").split("+") if n.strip()]
+        from .Settings import BUTTON_NAMES
+        return names if names and all(n in BUTTON_NAMES for n in names) else DEFAULT_KILL_COMBO.split("+")
 
     # ========================================================================
     # KEYBOARD INPUT HANDLERS
@@ -136,8 +153,7 @@ class LauncherApp:
             self.ui.close_alert()
             self.proceed()
         elif self.ui.alert_mode == "EXIT":
-            self.emu.cleanup()
-            self.root.destroy()
+            self.quit()
         elif self.ui.alert_mode == "KILL_CONFIRM":
             self.kill_and_quit()
         elif self.mode == "GAMES" and not self.process:
@@ -157,6 +173,10 @@ class LauncherApp:
     # ========================================================================
     # PROCESS MANAGEMENT
     # ========================================================================
+    def quit(self):
+        self.emu.cleanup()
+        self.root.destroy()
+
     def kill_and_quit(self):
         """Kill the emulator and exit the launcher (kill menu -> Desktop)."""
         if self.process:
@@ -173,7 +193,6 @@ class LauncherApp:
         Sets a flag to prevent automatic exit when the process terminates.
         """
         self.returning_to_launcher = True
-        time.sleep(0.005)  # 5ms delay for flag to propagate
         if self.process:
             self.process.kill()
             log("INFO", f"{self.emu.name} killed - returning to launcher")
@@ -181,62 +200,130 @@ class LauncherApp:
 
         # Reset launcher state for fresh assignment
         self.assignments = []
-        self.show_players()
         self.ui.close_alert()
+        self.show_players()
         self.root.deiconify()
-        self.root.state('normal')
+
+    def _check_process(self):
+        """React to the emulator exiting. Returns True if the loop should stop here."""
+        if self.process.poll() is None:
+            return False
+        self.process = None
+        self.root.deiconify()
+        if self.returning_to_launcher:
+            # User chose "Launcher" from the kill menu - fresh assignment
+            log("INFO", f"{self.emu.name} exited - returning to launcher")
+            self.returning_to_launcher = False
+            self.assignments = []
+            self.show_players()
+        elif self.picker and self.games:
+            # Picked from the game grid: offer it again, same players
+            log("INFO", f"{self.emu.name} exited - back to the game grid")
+            self.show_games()
+        else:
+            # Emulator closed normally or crashed - exit launcher
+            log("INFO", f"{self.emu.name} exited - closing launcher")
+            self.emu.cleanup()
+            self.root.quit()
+            sys.exit()
+        return False
 
     # ========================================================================
-    # CONTROLLER ENUMERATION
+    # CONTROLLERS
     # ========================================================================
-    def enumerate_pads(self):
+    def _describe(self, ctrl):
+        """Name, GUID and device path of an open gamepad."""
+        sdl = self.sdl
+        joy = sdl.SDL_GameControllerGetJoystick(ctrl)
+        psz_guid = (ctypes.c_char * 33)()
+        sdl.SDL_JoystickGetGUIDString(sdl.SDL_JoystickGetGUID(joy), psz_guid, 33)
+        try:
+            raw = sdl.SDL_GameControllerPath(ctrl)
+            raw_path = raw.decode() if raw else ""
+        except Exception:
+            raw_path = ""  # Unsupported platform / SDL version
+        name = sdl.SDL_GameControllerName(ctrl)
+        return {"ctrl": ctrl, "raw_path": raw_path, "guid": psz_guid.value.decode(),
+                "name": name.decode() if name else "Controller"}
+
+    @staticmethod
+    def _assign_keys(pads, order):
         """
-        Open every connected gamepad and describe it.
+        The key identifying each pad ("path"): its device path, or - for
+        pads the OS gives no path - its GUID plus its order among path-less
+        pads with that GUID. Computed the same way on every scan, so a pad
+        keeps its key across the SDL re-initialisation in scan_hardware().
+        """
+        pathless = {}
+        for instance_id in order:
+            pad = pads[instance_id]
+            if pad["raw_path"]:
+                pad["path"] = pad["raw_path"]
+            else:
+                n = pathless.get(pad["guid"], 0)
+                pathless[pad["guid"]] = n + 1
+                pad["path"] = f"UNK_{pad['guid']}_{n}"
 
-        Pads the OS gives no device path for get a key built from their GUID
-        and their order among path-less pads with that GUID, so the same pad
-        keeps the same key across the SDL re-initialisation in scan_hardware().
+    def sync_pads(self):
+        """
+        Open controllers that just appeared and forget those that left.
+        Cheap when nothing changed (one ID list from SDL).
 
         Returns:
-            list[dict]: {"instance_id", "ctrl", "path", "guid", "name"}
-                        in SDL enumeration order.
+            bool: True if the set of controllers changed.
         """
         sdl = self.sdl
-        pads = []
-        pathless = {}
-        for joystick_id in sdl.SDL_GetJoystickIDs():
-            if not sdl.SDL_IsGameController(joystick_id):
-                continue  # Skip non-gamepad devices (e.g., flight sticks)
+        devices = sdl.SDL_GetJoystickInstanceIDs()      # [(open id, instance id)]
+        order = [instance_id for _, instance_id in devices if instance_id not in self._not_gamepads]
+        if order == self._pad_order:
+            return False
 
-            ctrl = sdl.SDL_GameControllerOpen(joystick_id)
-            if not ctrl:
-                continue
-
-            joy = sdl.SDL_GameControllerGetJoystick(ctrl)
-            psz_guid = (ctypes.c_char * 33)()
-            sdl.SDL_JoystickGetGUIDString(sdl.SDL_JoystickGetGUID(joy), psz_guid, 33)
-            guid = psz_guid.value.decode()
-
-            # HID path (hardware-specific, persists across reconnects)
+        for instance_id in [i for i in self.pads if i not in order]:
+            pad = self.pads.pop(instance_id)
             try:
-                path_bytes = sdl.SDL_GameControllerPath(ctrl)
-                path = path_bytes.decode() if path_bytes else ""
+                sdl.SDL_GameControllerClose(pad["ctrl"])
             except Exception:
-                path = ""  # Unsupported platform / SDL version
-            if not path:
-                n = pathless.get(guid, 0)
-                pathless[guid] = n + 1
-                path = f"UNK_{guid}_{n}"
+                pass
 
-            name = sdl.SDL_GameControllerName(ctrl)
-            pads.append({
-                "instance_id": sdl.SDL_JoystickInstanceID(joy),
-                "ctrl": ctrl,
-                "path": path,
-                "guid": guid,
-                "name": name.decode() if name else "Controller",
-            })
-        return pads
+        for open_id, instance_id in devices:
+            if instance_id in self.pads or instance_id in self._not_gamepads:
+                continue
+            if not sdl.SDL_IsGameController(open_id):
+                self._not_gamepads.add(instance_id)     # e.g. flight sticks
+                continue
+            ctrl = sdl.SDL_GameControllerOpen(open_id)
+            if ctrl:
+                self.pads[instance_id] = self._describe(ctrl)
+                log("INFO", "Controller connected", self.pads[instance_id]["name"])
+
+        self._pad_order = [i for i in order if i in self.pads]
+        self._assign_keys(self.pads, self._pad_order)
+        return True
+
+    def on_pads_changed(self):
+        """Update the counter and drop players whose controller disconnected."""
+        self.ui.set_pads(len(self.pads))
+        connected = {pad["path"] for pad in self.pads.values()}
+        dropped = [a for a in self.assignments if a["path"] not in connected]
+        if not dropped:
+            return
+        self.assignments = [a for a in self.assignments if a["path"] in connected]
+        self.ui.show_toast(t("toast_disconnected", name=dropped[0]["name"]),
+                           self.hid_colors.get(dropped[0]["path"], COLOR["NEON_RED"]))
+        for assignment in dropped:
+            log("INFO", "Controller disconnected", assignment["name"])
+            color = self.hid_colors.pop(assignment["path"], None)
+            if color:
+                self.color_pool.append(color)
+            self.hid_profiles.pop(assignment["path"], None)  # Clear profile on hardware disconnect
+        self.refresh_grid()
+        if self.mode == "GAMES":
+            self.show_games()                   # badges depend on the number of players
+
+    def kill_combo_pressed(self):
+        sdl = self.sdl
+        return any(all(sdl.SDL_GameControllerGetButton(pad["ctrl"], b) for b in self.kill_buttons)
+                   for pad in self.pads.values())
 
     # ========================================================================
     # MAIN EVENT LOOP
@@ -246,112 +333,47 @@ class LauncherApp:
         Main event processing loop (runs every 16ms).
 
         Handles:
-        - Emulator process monitoring
-        - Kill combo detection
-        - Controller hot-plug detection
+        - Emulator process monitoring and the kill combo
+        - Controller hot-plug
+        - Game scan results and downloaded pictures
+        - Game grid navigation
         - Gamepad button events
-        - Game list navigation
         """
         sdl = self.sdl
 
+        if self._scan_result is not None:
+            games, self._scan_result = self._scan_result, None
+            self.on_games_scanned(games)
+
         # ====================================================================
-        # EMULATOR PROCESS MONITORING
+        # EMULATOR PROCESS MONITORING / KILL COMBO (ANY CONTROLLER)
         # ====================================================================
         if self.process and not self.ui.alert_mode:
-            # Check if the emulator has exited
-            if self.process.poll() is not None:
-                if self.returning_to_launcher:
-                    # User chose "Launcher" from kill menu - reset and show UI
-                    log("INFO", f"{self.emu.name} exited - returning to launcher")
-                    self.assignments = []
-                    self.show_players()
-                    self.root.deiconify()
-                    self.root.state('normal')
-                    self.process = None
-                    self.returning_to_launcher = False
-                elif self.games:
-                    # Picked from the game list: offer the list again, same players
-                    log("INFO", f"{self.emu.name} exited - back to the game list")
-                    self.process = None
-                    self.root.deiconify()
-                    self.root.state('normal')
-                    self.show_games()
-                else:
-                    # Emulator closed normally or crashed - exit launcher
-                    log("INFO", f"{self.emu.name} exited - closing launcher")
-                    self.emu.cleanup()
-                    self.root.quit()
-                    sys.exit()
-
-            # ================================================================
-            # GLOBAL KILL COMBO DETECTION (ANY CONTROLLER)
-            # ================================================================
-            # Checks all connected controllers for the configured combo.
-            # Global approach allows recovery if Player 1's controller fails
-            elif any(all(sdl.SDL_GameControllerGetButton(ctrl, b) for b in self.kill_buttons)
-                     for ctrl in self.controllers.values()):
+            self._check_process()
+            if self.process and self.kill_combo_pressed():
                 self.root.deiconify()  # Bring launcher to foreground
                 log("INFO", "Kill combo detected - showing menu")
                 self.ui.show_alert("KILL_CONFIRM")
-                self.root.after(POLL_INTERVAL_MS, self.update_loop)
-                return
 
         # ====================================================================
-        # CONTROLLER HARDWARE DETECTION (HOT-PLUG SUPPORT)
+        # HOT-PLUG
         # ====================================================================
-        self.hardware_map.clear()
-
-        # Scan all connected controllers and build current hardware map
-        for pad in self.enumerate_pads():
-            # Cache controller handle for button polling
-            if pad["instance_id"] not in self.controllers:
-                self.controllers[pad["instance_id"]] = pad["ctrl"]
-            self.hardware_map[pad["instance_id"]] = (pad["path"], pad["name"])
-
-        # Forget handles of pads that are gone
-        for instance_id in [i for i in self.controllers if i not in self.hardware_map]:
-            self.controllers.pop(instance_id, None)
+        if self.sync_pads():
+            self.on_pads_changed()
 
         # ====================================================================
-        # HOT-PLUG DISCONNECT DETECTION
+        # BACKGROUND WORK RESULTS
         # ====================================================================
-        # Compare current hardware against assigned controllers
-        # Remove assignments for disconnected controllers
-        new_assignments = []
-        dropped_names = []
-        current_connected_paths = set(path for path, _ in self.hardware_map.values())
+        for game in self.art.take_finished():
+            self.ui.games_art_changed(game)
+            if self.mode == "PLAYERS" and game is self._last_game():
+                self.ui.set_background(self._art_of(game))
+        if self.art.sgdb_missing != self._sgdb_missing_saved:
+            self._sgdb_missing_saved = set(self.art.sgdb_missing)
+            self.emu.settings.save_state(covers_not_found=sorted(self._sgdb_missing_saved))
 
-        for assignment in self.assignments:
-            if assignment["path"] in current_connected_paths:
-                new_assignments.append(assignment)  # Still connected, keep assignment
-            else:
-                dropped_names.append((assignment["path"], assignment["name"]))  # Disconnected
-
-        # Update state if any controllers were removed
-        if len(new_assignments) != len(self.assignments):
-            self.assignments = new_assignments
-            self.refresh_grid()
-
-            # Show toast notification for first disconnected controller
-            if dropped_names:
-                self.ui.show_toast(
-                    t("toast_disconnected", name=dropped_names[0][1]),
-                    self.hid_colors.get(dropped_names[0][0], COLOR['NEON_RED'])
-                )
-                for path, name in dropped_names:
-                    log("INFO", "Controller disconnected", name)
-                    color = self.hid_colors.pop(path, None)
-                    if color:
-                        self.color_pool.append(color)
-                    self.hid_profiles.pop(path, None)  # Clear profile on hardware disconnect
-
-        # ====================================================================
-        # GAME LIST NAVIGATION (held D-pad / stick / LB-RB, with repeat)
-        # ====================================================================
         if self.mode == "GAMES" and not self.ui.alert_mode and not self.process:
             self.poll_game_navigation()
-        if self.cover_downloader:
-            self.poll_covers()
 
         # ====================================================================
         # GAMEPAD BUTTON EVENT PROCESSING
@@ -360,82 +382,17 @@ class LauncherApp:
         while sdl.SDL_PollEvent(ctypes.byref(event)) != 0:
             if event.type == sdl.SDL_CONTROLLERBUTTONDOWN:
                 button, which = sdl.get_button_info(event)
-
-                # ============================================================
-                # ALERT MODE HANDLERS
-                # ============================================================
                 if self.ui.alert_mode:
-                    if self.ui.alert_mode == "KILL_CONFIRM":
-                        # Three-option kill menu
-                        if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                            self.kill_and_restart()  # Return to launcher
-                        elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
-                            self.kill_and_quit()  # Exit to desktop
-                        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
-                            self.ui.close_alert()
-                            self.root.withdraw()  # Cancel, resume game
-                    else:
-                        # Standard two-option alerts (launch/exit confirmations)
-                        if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                            if self.ui.alert_mode == "LAUNCH":
-                                self.ui.close_alert()
-                                self.proceed()
-                            elif self.ui.alert_mode == "EXIT":
-                                self.emu.cleanup()
-                                self.root.destroy()
-                        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
-                            self.ui.close_alert()
-
-                # ============================================================
-                # GAME LIST HANDLERS
-                # ============================================================
+                    self.on_alert_button(button)
+                elif self.process:
+                    continue    # Ignore input while a game runs (no mid-game reassignment)
                 elif self.mode == "GAMES":
-                    if self.process:
-                        continue
-                    if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                        self.launch_selected_game()
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_B:
-                        self.show_players()
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
-                        self.ui.show_alert("EXIT")
-                    # D-pad, stick and LB/RB are polled in poll_game_navigation()
-
-                # ============================================================
-                # PLAYER GRID HANDLERS
-                # ============================================================
+                    self.on_games_button(button)
                 else:
-                    # Ignore input if game is running (prevent mid-game reassignment)
-                    if self.process:
-                        continue
-
-                    if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                        # Confirm profile edit if active, otherwise assign
-                        slot_idx = self.find_slot_by_instance(which)
-                        if slot_idx != -1 and self.assignments[slot_idx]["is_editing"]:
-                            self.toggle_profile_edit(which)
-                        else:
-                            self.assign_player(which)   # Assign controller
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_B:
-                        # Cancel profile edit if active, otherwise disconnect
-                        slot_idx = self.find_slot_by_instance(which)
-                        if slot_idx != -1 and self.assignments[slot_idx]["is_editing"]:
-                            self.assignments[slot_idx]["is_editing"] = False
-                            self.refresh_grid()
-                        else:
-                            self.remove_player(which)   # Remove assignment
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_X:
-                        self.toggle_profile_edit(which) # Enter/exit profile selection
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-                        self.cycle_profile(which, -1)   # Previous profile
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-                        self.cycle_profile(which, 1)    # Next profile
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_START:
-                        self.check_launch()             # Launch / choose a game
-                    elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
-                        self.ui.show_alert("EXIT")      # Exit launcher
+                    self.on_players_button(button, which)
 
             elif event.type == sdl.SDL_CONTROLLERAXISMOTION:
-                if self.mode != "PLAYERS":
+                if self.mode != "PLAYERS" or self.process:
                     continue
                 direction, which = sdl.get_axis_motion_info(event)
                 if which is not None:
@@ -446,48 +403,94 @@ class LauncherApp:
                         sdl.axis_engaged[which] = False  # reset when stick returns to center
 
             elif event.type == sdl.SDL_QUIT:
-                self.emu.cleanup()
-                self.root.destroy()
+                self.quit()
+                return
 
         # Schedule next update
         self.root.after(POLL_INTERVAL_MS, self.update_loop)
+
+    def on_alert_button(self, button):
+        sdl = self.sdl
+        mode = self.ui.alert_mode
+        if mode == "KILL_CONFIRM":
+            if button == sdl.SDL_CONTROLLER_BUTTON_A:
+                self.kill_and_restart()             # Return to launcher
+            elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
+                self.kill_and_quit()                # Exit to desktop
+            elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+                self.ui.close_alert()
+                self.root.withdraw()                # Cancel, resume game
+        elif button == sdl.SDL_CONTROLLER_BUTTON_A:
+            if mode == "LAUNCH":
+                self.ui.close_alert()
+                self.proceed()
+            elif mode == "EXIT":
+                self.quit()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+            self.ui.close_alert()
+
+    def on_games_button(self, button):
+        sdl = self.sdl
+        if button == sdl.SDL_CONTROLLER_BUTTON_A:
+            self.launch_selected_game()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+            self.show_players()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
+            self.toggle_filter()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
+            self.ui.show_alert("EXIT")
+        # D-pad, stick and LB/RB are polled in poll_game_navigation()
+
+    def on_players_button(self, button, which):
+        sdl = self.sdl
+        slot_idx = self.find_slot_by_instance(which)
+        editing = slot_idx != -1 and self.assignments[slot_idx]["is_editing"]
+        if button == sdl.SDL_CONTROLLER_BUTTON_A:
+            if editing:
+                self.toggle_profile_edit(which)     # Confirm profile
+            else:
+                self.assign_player(which)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+            if editing:
+                self.assignments[slot_idx]["is_editing"] = False
+                self.refresh_grid()
+            else:
+                self.remove_player(which)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_X:
+            self.toggle_profile_edit(which)         # Enter/exit profile selection
+        elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
+            self.cycle_profile(which, -1)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
+            self.cycle_profile(which, 1)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_START:
+            self.check_launch()                     # Launch / choose a game
+        elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
+            self.ui.show_alert("EXIT")
 
     # ========================================================================
     # CONTROLLER ASSIGNMENT LOGIC
     # ========================================================================
     def assign_player(self, instance_id):
-        """
-        Assign a controller to the next available player slot.
-
-        Args:
-            instance_id (int): SDL2/SDL3 instance ID of the controller
-        """
-        if instance_id not in self.hardware_map:
-            return  # Controller disconnected before assignment
-
-        target_path, display_name = self.hardware_map[instance_id]
-
-        # Prevent duplicate assignments (same controller can't be multiple players)
-        for assignment in self.assignments:
-            if assignment["path"] == target_path:
-                return
-
-        # Enforce player maximum
-        if len(self.assignments) >= MAX_PLAYERS:
+        """Give the controller the next free player slot."""
+        pad = self.pads.get(instance_id)
+        if not pad or len(self.assignments) >= MAX_PLAYERS:
             return
+        if any(a["path"] == pad["path"] for a in self.assignments):
+            return  # Same controller can't be two players
 
-        # Restore previously selected profile for this HID, default to the first one
-        profile_key = self.hid_profiles.get(target_path, self.default_profile)
-
+        # Restore previously selected profile for this controller, default to the first one
+        profile_key = self.hid_profiles.get(pad["path"], self.default_profile)
         self.assignments.append({
-            "path": target_path,
-            "name": display_name,
+            "path": pad["path"],
+            "name": pad["name"],
             "profile_key": profile_key,
-            "is_editing": False
+            "is_editing": False,
         })
         player = len(self.assignments)
-        log("INFO", f"Assigned {display_name} -> Player {player} | Profile: {profile_key}")
+        log("INFO", f"Assigned {pad['name']} -> Player {player} | Profile: {profile_key}")
         self.refresh_grid()
+        self.ui.flash_slot(player - 1)
+        self.update_hints()
         self.rumble_player_number(instance_id, player)
 
     def rumble_player_number(self, instance_id, count):
@@ -500,155 +503,196 @@ class LauncherApp:
 
         def pulse():
             # Looked up at pulse time: a launch may have closed the handle since
-            ctrl = self.controllers.get(instance_id)
-            if ctrl and not self.process:
-                self.sdl.rumble(ctrl, RUMBLE_STRENGTH, RUMBLE_PULSE_MS)
+            pad = self.pads.get(instance_id)
+            if pad and not self.process:
+                self.sdl.rumble(pad["ctrl"], RUMBLE_STRENGTH, RUMBLE_PULSE_MS)
 
         period = RUMBLE_PULSE_MS + RUMBLE_GAP_MS
         for n in range(count):
             self.root.after(n * period, pulse)
 
     def remove_player(self, instance_id):
-        """
-        Remove a controller's player assignment.
-
-        Args:
-            instance_id (int): SDL2/SDL3 instance ID of the controller to remove
-        """
-        if instance_id not in self.hardware_map:
-            return
-
-        target_path, _ = self.hardware_map[instance_id]
-
-        # Find and remove assignment by HID path
-        found_index = -1
-        for i, assignment in enumerate(self.assignments):
-            if assignment["path"] == target_path:
-                found_index = i
-                break
-
-        if found_index != -1:
-            self.assignments.pop(found_index)
-            log("INFO", f"Removed {target_path} from Player {found_index + 1}")
+        slot_idx = self.find_slot_by_instance(instance_id)
+        if slot_idx != -1:
+            removed = self.assignments.pop(slot_idx)
+            log("INFO", f"Removed {removed['name']} from Player {slot_idx + 1}")
             self.refresh_grid()
+            self.update_hints()
 
     # ========================================================================
     # PROFILE SELECTION LOGIC
     # ========================================================================
     def find_slot_by_instance(self, instance_id):
-        """
-        Find the assignments index for a given controller instance ID.
-
-        Returns:
-            int: Index into self.assignments, or -1 if not found
-        """
-        if instance_id not in self.hardware_map:
+        """Index into self.assignments for a controller, or -1."""
+        pad = self.pads.get(instance_id)
+        if not pad:
             return -1
-        target_path, _ = self.hardware_map[instance_id]
         for i, assignment in enumerate(self.assignments):
-            if assignment["path"] == target_path:
+            if assignment["path"] == pad["path"]:
                 return i
         return -1
 
     def toggle_profile_edit(self, instance_id):
         """
-        Toggle profile selection mode (State A <-> State B) for a controller's slot.
-        X in State A -> enters edit mode.
-        A (or X) in State B -> confirms current selection and exits edit mode.
+        X on an assigned slot enters profile selection; A (or X) confirms.
         """
         slot_idx = self.find_slot_by_instance(instance_id)
         if slot_idx == -1:
-            return  # Controller not assigned to any slot
-
-        self.assignments[slot_idx]["is_editing"] = not self.assignments[slot_idx]["is_editing"]
-
-        if not self.assignments[slot_idx]["is_editing"]:
-            # Selection confirmed
-            log("INFO", f"Player {slot_idx + 1} profile confirmed -> {self.assignments[slot_idx]['profile_key']}")
-
+            return
+        assignment = self.assignments[slot_idx]
+        assignment["is_editing"] = not assignment["is_editing"]
+        if not assignment["is_editing"]:
+            log("INFO", f"Player {slot_idx + 1} profile confirmed -> {assignment['profile_key']}")
         self.refresh_grid()
 
     def cycle_profile(self, instance_id, direction):
-        """
-        Cycle through available profiles for a controller's slot.
-        Only acts when that slot is in edit mode (is_editing == True).
-
-        Args:
-            instance_id (int): SDL2/SDL3 instance ID of the controller
-            direction   (int): +1 for next, -1 for previous
-        """
+        """D-pad / stick left-right while a slot is in profile selection."""
         slot_idx = self.find_slot_by_instance(instance_id)
-        if slot_idx == -1:
+        if slot_idx == -1 or not self.profile_keys:
             return
-
         assignment = self.assignments[slot_idx]
         if not assignment["is_editing"]:
-            return  # D-Pad ignored unless in profile selection mode
-
-        if not self.profile_keys:
             return
-
-        current_idx = self.profile_keys.index(assignment["profile_key"])
-        new_key = self.profile_keys[(current_idx + direction) % len(self.profile_keys)]
-        assignment["profile_key"] = new_key
-        self.hid_profiles[assignment["path"]] = new_key
-
+        current = self.profile_keys.index(assignment["profile_key"])
+        assignment["profile_key"] = self.profile_keys[(current + direction) % len(self.profile_keys)]
+        self.hid_profiles[assignment["path"]] = assignment["profile_key"]
         self.refresh_grid()
 
     # ========================================================================
     # UI UPDATE METHODS
     # ========================================================================
-    def get_assigned_color(self, hid_path):
-        """
-        Returns the persistent color for a specific controller HID.
-        If the controller hasn't been seen before, assigns a new color from the pool.
-        """
-        # 1. Check if we already assigned a color to this HID earlier in the session
-        if hid_path in self.hid_colors:
-            return self.hid_colors[hid_path]
-
-        # 2. If the pool is empty (more than 20 controllers?), recycle the list
-        if not self.color_pool:
-            self.color_pool = list(COLOR_POOL)
-
-        # 3. Assign the next available color
-        new_color = self.color_pool.pop(0)
-        self.hid_colors[hid_path] = new_color
-        return new_color
+    def get_assigned_color(self, path):
+        """Persistent colour for a controller during the session."""
+        if path not in self.hid_colors:
+            if not self.color_pool:
+                self.color_pool = list(COLOR_POOL)
+            self.hid_colors[path] = self.color_pool.pop(0)
+        return self.hid_colors[path]
 
     def refresh_grid(self):
-        """Build the view models for the player grid and hand them to the UI."""
-        slots = []
-        for assignment in self.assignments:
-            slots.append({
-                # Remove trailing index suffix, e.g. "Pro Controller (2)"
-                "name": re.sub(r'\s*\(\d+\)$', '', assignment["name"]),
-                "color": self.get_assigned_color(assignment["path"]),
-                "profile": assignment["profile_key"],
-                "editing": assignment["is_editing"],
-            })
-        self.ui.refresh(slots)
+        """Build the view models for the player cards and hand them to the UI."""
+        self.ui.refresh([{
+            # Remove trailing index suffix, e.g. "Pro Controller (2)"
+            "name": re.sub(r'\s*\(\d+\)$', '', a["name"]),
+            "color": self.get_assigned_color(a["path"]),
+            "profile": a["profile_key"],
+            "editing": a["is_editing"],
+        } for a in self.assignments])
+
+    def update_hints(self):
+        """Footer button hints for the current screen."""
+        if self.mode == "GAMES":
+            hints = [("dpad", t("hint_browse")), (("lb", "rb"), t("hint_page"))]
+            joined = len(self.assignments)
+            if joined >= 2:
+                hints.append(("y", t("hint_filter_off") if self.filter_on else t("hint_filter_on", n=joined)))
+            hints += [("a", t("hint_play")), ("b", t("hint_back"))]
+        else:
+            if self.has_game_args:
+                start = t("hint_launch_game")
+            elif self.picker:
+                start = t("hint_choose")
+            else:
+                start = t("hint_launch", name=self.emu.name)
+            hints = [("a", t("hint_join")), ("start", start), ("back", t("hint_quit"))]
+        self.ui.set_hints(hints)
 
     # ========================================================================
-    # GAME LIST
+    # GAME LIBRARY
     # ========================================================================
-    def _initial_game_index(self):
-        """Start on the last game played, if it is still in the list."""
+    def _scan_games(self):
+        """Background thread: list the games and find their pictures on disk."""
+        try:
+            games = self.emu.list_games()
+            # [Players] in the settings file corrects the eShop player counts
+            overrides = self.emu.settings.sections.get("players", {})
+            for game in games:
+                self.art.resolve(game)
+                value = overrides.get((game.get("title_id") or "").lower()) or overrides.get(game["title"].lower())
+                if value and value.strip().isdigit():
+                    game["players"] = int(value)
+        except Exception as e:
+            log("EXCEPTION", "Game scan failed", e)
+            games = []
+        self._scan_result = games               # picked up by update_loop
+
+    def on_games_scanned(self, games):
+        self.games = games
+        self.games_loaded = True
+        log("INFO", "Game picker", f"{len(games)} game(s)")
+        if not games:
+            self.picker = False                 # nothing to pick: START starts the emulator
+            self.update_hints()
+        else:
+            self.art.start(games)               # fetch missing pictures in the background
+            last = self._last_game()
+            if last:
+                self.game_index = games.index(last)
+                if self.mode == "PLAYERS":
+                    self.ui.set_background(self._art_of(last))
+        if self.waiting_for_games:
+            self.waiting_for_games = False
+            if games:
+                self.show_games()
+            else:
+                self.force_launch()
+
+    def _last_game(self):
         last = (self.emu.settings.state or {}).get("last_game")
-        for i, game in enumerate(self.games):
-            if game["path"] == last:
-                return i
-        return 0
+        return next((g for g in self.games if g["path"] == last), None)
+
+    @staticmethod
+    def _art_of(game):
+        return game.get("background") or game.get("cover") or game.get("image")
+
+    # ========================================================================
+    # GAME GRID
+    # ========================================================================
+    def _apply_filter(self):
+        """Games on screen: all, or only those that take every joined player."""
+        joined = len(self.assignments)
+        if joined < 2:
+            self.filter_on = False
+        selected = self.shown_games[self.game_index] if 0 <= self.game_index < len(self.shown_games) else None
+        if self.filter_on:
+            self.shown_games = [g for g in self.games if (g.get("players") or 0) >= joined]
+        else:
+            self.shown_games = self.games
+        if selected in self.shown_games:
+            self.game_index = self.shown_games.index(selected)
+        else:
+            self.game_index = min(self.game_index, max(0, len(self.shown_games) - 1))
 
     def show_games(self):
         self.mode = "GAMES"
         self.nav_direction = None
-        self.ui.show_games(self.games, self.game_index)
+        if not self.games_loaded:
+            self.waiting_for_games = True
+            self.ui.show_games_loading()
+        else:
+            if not self.shown_games:
+                self.shown_games = self.games
+            self._apply_filter()
+            joined = len(self.assignments)
+            self.ui.show_games(self.shown_games, self.game_index, players=joined,
+                               filter_players=joined if self.filter_on else 0)
+        self.update_hints()
 
     def show_players(self):
         self.mode = "PLAYERS"
+        self.waiting_for_games = False
         self.ui.hide_games()
+        last = self._last_game()
+        if last:
+            self.ui.set_background(self._art_of(last))
         self.refresh_grid()
+        self.update_hints()
+
+    def toggle_filter(self):
+        if len(self.assignments) < 2 or not self.games_loaded:
+            return
+        self.filter_on = not self.filter_on
+        self.show_games()
 
     def move_game_selection(self, action):
         """
@@ -658,9 +702,9 @@ class LauncherApp:
             action (str): "left"/"right" (one game, wrapping), "up"/"down"
                           (one row), "page_up"/"page_down" (one screen).
         """
-        if self.mode != "GAMES" or not self.games or self.ui.alert_mode or self.process:
+        if self.mode != "GAMES" or not self.shown_games or self.ui.alert_mode or self.process:
             return
-        count = len(self.games)
+        count = len(self.shown_games)
         columns = self.ui.games_columns()
         index = self.game_index
         if action == "left":
@@ -680,7 +724,9 @@ class LauncherApp:
             index = min(count - 1, index + self.ui.games_page())
         if index != self.game_index:
             self.game_index = index
-            self.ui.show_games(self.games, self.game_index)
+            joined = len(self.assignments)
+            self.ui.show_games(self.shown_games, index, players=joined,
+                               filter_players=joined if self.filter_on else 0)
 
     def poll_game_navigation(self):
         """
@@ -689,7 +735,8 @@ class LauncherApp:
         """
         sdl = self.sdl
         action = None
-        for ctrl in self.controllers.values():
+        for pad in self.pads.values():
+            ctrl = pad["ctrl"]
             try:
                 stick_x, stick_y = sdl.get_left_x(ctrl), sdl.get_left_y(ctrl)
             except Exception:
@@ -721,20 +768,10 @@ class LauncherApp:
             self.nav_next_repeat = now + NAV_REPEAT_RATE
             self.move_game_selection(action)
 
-    def poll_covers(self):
-        """Show covers the background downloader has finished."""
-        done = self.cover_downloader.take_finished()
-        if done:
-            for game in done:
-                self.ui.games_art_changed(game)
-        if not self.cover_downloader.tried.issubset(self.cover_tried_saved):
-            self.cover_tried_saved = set(self.cover_downloader.tried)
-            self.emu.settings.save_state(covers_not_found=sorted(self.cover_tried_saved))
-
     def launch_selected_game(self):
-        if not self.games:
+        if not self.shown_games:
             return
-        game = self.games[self.game_index]
+        game = self.shown_games[self.game_index]
         log("INFO", "Game selected", game["path"])
         self.emu.settings.save_state(last_game=game["path"])
         self.force_launch(self.emu.game_command(game["path"]))
@@ -757,17 +794,31 @@ class LauncherApp:
         """
         sdl = self.sdl
 
-        # Close all existing controller handles
-        for ctrl in self.controllers.values():
-            sdl.SDL_GameControllerClose(ctrl)
-        self.controllers.clear()
+        # Close all existing controller handles; sync_pads() reopens them later
+        for pad in self.pads.values():
+            sdl.SDL_GameControllerClose(pad["ctrl"])
+        self.pads.clear()
+        self._pad_order = []
+        self._not_gamepads.clear()
 
         # Reinitialize SDL2/SDL3 for fresh enumeration
         sdl.SDL_QuitSubSystem(sdl.SDL_INIT_JOYSTICK | sdl.SDL_INIT_GAMECONTROLLER)
         sdl.SDL_Init()
 
+        pads, order = {}, []
+        for open_id, instance_id in sdl.SDL_GetJoystickInstanceIDs():
+            if not sdl.SDL_IsGameController(open_id):
+                continue
+            ctrl = sdl.SDL_GameControllerOpen(open_id)
+            if not ctrl:
+                continue
+            pads[instance_id] = self._describe(ctrl)
+            order.append(instance_id)
+        self._assign_keys(pads, order)
+
         hardware = []
-        for pad in self.enumerate_pads():
+        for instance_id in order:
+            pad = pads[instance_id]
             try:
                 face = sdl.face_buttons(pad["ctrl"])
             except Exception as e:
@@ -786,8 +837,8 @@ class LauncherApp:
             self.proceed()
 
     def proceed(self):
-        """After the player grid: the game list if there is one, else launch."""
-        if self.games:
+        """After the player cards: the game grid if there is one, else launch."""
+        if self.picker:
             self.show_games()
         else:
             self.force_launch()

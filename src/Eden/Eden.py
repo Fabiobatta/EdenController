@@ -17,6 +17,7 @@ from Core.Paths import find_appimage, read_path_override, resource_path
 from Core.Process import mount_appimage, unmount_appimage
 
 from . import Config, Games, Switch
+from .TitleDb import TitleDb
 from .Ini import IniFile, read_bool
 
 # Environment overrides
@@ -320,8 +321,12 @@ class Eden(Emulator):
     # ------------------------------------------------------------------
     # 6. Game picker
     # ------------------------------------------------------------------
+    def game_picker_enabled(self):
+        return self.settings.get_bool(SETTINGS_SECTION, "game_picker", True)
+
     def list_games(self):
-        if not self.settings.get_bool(SETTINGS_SECTION, "game_picker", True):
+        """Runs on a background thread (see Core/App.py)."""
+        if not self.game_picker_enabled():
             return []
 
         folders = [(os.path.expandvars(os.path.expanduser(d)), True)
@@ -338,7 +343,11 @@ class Eden(Emulator):
         header_key = Switch.load_header_key(keys_file)
         if not header_key:
             log("WARNING", "No header_key in prod.keys - updates/DLC recognised by name only", keys_file)
-        return Games.find_games(folders, header_key=header_key, cache_dir=self.cache_dir)
+        known = self.settings.load_cache("library")
+        games = Games.find_games(folders, header_key=header_key, cache_dir=self.cache_dir,
+                                 titledb=TitleDb.load(), known=known)
+        self.settings.save_cache("library", known)
+        return games
 
     def game_command(self, path):
         command = [self.exe]

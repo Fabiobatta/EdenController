@@ -206,6 +206,14 @@ class SDLManager:
         return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTY) / 32767.0
 
     @staticmethod
+    def SDL_GetJoystickInstanceIDs():
+        """
+        [(open id, instance id)] of connected joysticks, in enumeration order.
+        SDL3 opens joysticks by instance ID, so both are the same.
+        """
+        return [(i, i) for i in SDLManager.SDL_GetJoystickIDs()]
+
+    @staticmethod
     def get_button_info(event):
         """Returns (button, which) from a gamepad button event."""
         return event.gbutton.button, event.gbutton.which

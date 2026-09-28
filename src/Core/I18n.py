@@ -4,8 +4,11 @@ Translations for every string the launcher shows.
 
     from Core.I18n import t, set_language
     set_language("auto")          # "it", "en" or "auto" (follow the OS)
-    t("slot_empty")               # -> "PREMI Ⓐ PER GIOCARE"
-    t("footer_launch", name="Eden")
+    t("title_players")            # -> "Chi gioca?"
+    t("hint_launch", name="Eden")
+
+Strings may embed controller buttons as "[a]", "[b]", "[lb]", "[start]",
+"[dpad]"...: the UI draws them as button pictures (Core/Glyphs.py).
 
 Emulator packages add their own strings with register(); a key missing in
 the current language falls back to English, then to the key itself.
@@ -19,37 +22,49 @@ DEFAULT_LANGUAGE = "en"
 STRINGS = {
     "en": {
         # Player grid
-        "title_players":        "CONTROLLER SETUP",
-        "slot_empty":           "PRESS Ⓐ TO JOIN",
-        "slot_hint":            "Ⓑ LEAVE   |   Ⓧ PROFILE",
-        "slot_profile":         "◄   Profile: {name}   ►",
-        "slot_profile_hint":    "Ⓐ CONFIRM   |   Ⓑ CANCEL",
-        # Footer
-        "footer_launch_game":   "☰ LAUNCH GAME",
-        "footer_launch":        "☰ LAUNCH {name}",
-        "footer_choose":        "☰ CHOOSE GAME",
-        "footer_quit":          "⧉ QUIT",
-        "footer_play":          "Ⓐ PLAY",
-        "footer_back":          "Ⓑ BACK",
-        # Game list
-        "title_games":          "CHOOSE A GAME",
-        "games_position":       "{index} / {total}     ◄ LB  page  RB ►",
+        "title_players":        "Who's playing?",
+        "subtitle_players":     "Press [a] on your controller to join",
+        "slot_empty":           "Press [a]",
+        "slot_profile":         "Layout: {name}",
+        "slot_hints":           "[x] Layout    [b] Leave",
+        "slot_editing_hints":   "[dpad] Change    [a] OK    [b] Cancel",
+        "tip_kill":             "During a game, press {combo} to close {name}",
+        # Footer hints
+        "hint_join":            "Join",
+        "hint_choose":          "Choose game",
+        "hint_launch_game":     "Play",
+        "hint_launch":          "Start {name}",
+        "hint_quit":            "Quit",
+        "hint_browse":          "Browse",
+        "hint_page":            "Page",
+        "hint_play":            "Play",
+        "hint_back":            "Back",
+        "hint_filter_on":       "Only {n}+ players",
+        "hint_filter_off":      "All games",
+        # Game grid
+        "games_loading":        "Loading games…",
+        "players_one":          "1 player",
+        "players_range":        "1–{n} players",
+        "players_fit":          "Good for {n} players",
+        "players_too_many":     "Max {max} · you are {n}",
+        "games_filter":         "Filter: {n}+ players",
+        "games_none_for":       "No game supports {n} players",
         # Alerts
-        "alert_no_pads_title":  "⚠️ NO CONTROLLERS",
+        "alert_no_pads_title":  "NO CONTROLLERS",
         "alert_no_pads_text":   "{name} will keep its current input settings.",
-        "alert_continue":       "Ⓐ CONTINUE",
-        "alert_back":           "Ⓑ BACK",
+        "alert_continue":       "Continue",
+        "alert_back":           "Back",
         "alert_exit_title":     "EXIT LAUNCHER?",
         "alert_exit_text":      "Are you sure you want to quit?",
-        "alert_yes":            "Ⓐ YES",
-        "alert_no":             "Ⓑ NO",
+        "alert_yes":            "Yes",
+        "alert_no":             "No",
         "alert_kill_title":     "CLOSE GAME?",
         "alert_kill_text":      "How would you like to proceed?",
-        "alert_kill_launcher":  "Ⓐ LAUNCHER",
-        "alert_kill_desktop":   "Ⓨ DESKTOP",
-        "alert_kill_cancel":    "Ⓑ CANCEL",
+        "alert_kill_launcher":  "Launcher",
+        "alert_kill_desktop":   "Desktop",
+        "alert_kill_cancel":    "Cancel",
         # Toasts
-        "toast_disconnected":   "⚠️ {name} disconnected!",
+        "toast_disconnected":   "{name} disconnected",
         # Error dialogs
         "error_launch_title":   "Launch Error",
         "error_launch_text":    "Failed to start {name}.\n{error}",
@@ -57,33 +72,45 @@ STRINGS = {
         "error_missing_text":   "Could not find {path}",
     },
     "it": {
-        "title_players":        "ASSEGNA I CONTROLLER",
-        "slot_empty":           "PREMI Ⓐ PER GIOCARE",
-        "slot_hint":            "Ⓑ ESCI   |   Ⓧ PROFILO",
-        "slot_profile":         "◄   Profilo: {name}   ►",
-        "slot_profile_hint":    "Ⓐ CONFERMA   |   Ⓑ ANNULLA",
-        "footer_launch_game":   "☰ AVVIA GIOCO",
-        "footer_launch":        "☰ AVVIA {name}",
-        "footer_choose":        "☰ SCEGLI GIOCO",
-        "footer_quit":          "⧉ ESCI",
-        "footer_play":          "Ⓐ GIOCA",
-        "footer_back":          "Ⓑ INDIETRO",
-        "title_games":          "SCEGLI UN GIOCO",
-        "games_position":       "{index} / {total}     ◄ LB  pagina  RB ►",
-        "alert_no_pads_title":  "⚠️ NESSUN CONTROLLER",
+        "title_players":        "Chi gioca?",
+        "subtitle_players":     "Premi [a] sul tuo controller per unirti",
+        "slot_empty":           "Premi [a]",
+        "slot_profile":         "Layout: {name}",
+        "slot_hints":           "[x] Layout    [b] Esci",
+        "slot_editing_hints":   "[dpad] Cambia    [a] OK    [b] Annulla",
+        "tip_kill":             "Durante il gioco premi {combo} per chiudere {name}",
+        "hint_join":            "Unisciti",
+        "hint_choose":          "Scegli gioco",
+        "hint_launch_game":     "Gioca",
+        "hint_launch":          "Avvia {name}",
+        "hint_quit":            "Esci",
+        "hint_browse":          "Sfoglia",
+        "hint_page":            "Pagina",
+        "hint_play":            "Gioca",
+        "hint_back":            "Indietro",
+        "hint_filter_on":       "Solo per {n}+ giocatori",
+        "hint_filter_off":      "Tutti i giochi",
+        "games_loading":        "Caricamento giochi…",
+        "players_one":          "1 giocatore",
+        "players_range":        "1–{n} giocatori",
+        "players_fit":          "Va bene per {n} giocatori",
+        "players_too_many":     "Max {max} · siete in {n}",
+        "games_filter":         "Filtro: {n}+ giocatori",
+        "games_none_for":       "Nessun gioco supporta {n} giocatori",
+        "alert_no_pads_title":  "NESSUN CONTROLLER",
         "alert_no_pads_text":   "{name} userà le impostazioni dei controlli attuali.",
-        "alert_continue":       "Ⓐ CONTINUA",
-        "alert_back":           "Ⓑ INDIETRO",
+        "alert_continue":       "Continua",
+        "alert_back":           "Indietro",
         "alert_exit_title":     "USCIRE DAL LAUNCHER?",
         "alert_exit_text":      "Vuoi davvero uscire?",
-        "alert_yes":            "Ⓐ SÌ",
-        "alert_no":             "Ⓑ NO",
+        "alert_yes":            "Sì",
+        "alert_no":             "No",
         "alert_kill_title":     "CHIUDERE IL GIOCO?",
         "alert_kill_text":      "Cosa vuoi fare?",
-        "alert_kill_launcher":  "Ⓐ LAUNCHER",
-        "alert_kill_desktop":   "Ⓨ DESKTOP",
-        "alert_kill_cancel":    "Ⓑ ANNULLA",
-        "toast_disconnected":   "⚠️ {name} scollegato!",
+        "alert_kill_launcher":  "Launcher",
+        "alert_kill_desktop":   "Desktop",
+        "alert_kill_cancel":    "Annulla",
+        "toast_disconnected":   "{name} scollegato",
         "error_launch_title":   "Errore di avvio",
         "error_launch_text":    "Impossibile avviare {name}.\n{error}",
         "error_missing_title":  "File mancante",
@@ -131,3 +158,8 @@ def get_language():
 def t(key, **values):
     text = STRINGS.get(_language, {}).get(key) or STRINGS[DEFAULT_LANGUAGE].get(key) or key
     return text.format(**values) if values else text
+
+
+def players_label(count):
+    """ "1 giocatore" / "1–4 giocatori" for a game's max player count."""
+    return t("players_one") if count <= 1 else t("players_range", n=count)

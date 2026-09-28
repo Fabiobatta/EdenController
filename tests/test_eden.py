@@ -21,6 +21,8 @@ except ImportError:
     sys.modules["tkinter"] = tk_stub
     sys.modules["tkinter.messagebox"] = tk_stub.messagebox
 
+HAS_TK = hasattr(sys.modules.get("tkinter"), "Tk")
+
 from Eden import Config  # noqa: E402
 from Eden.Ini import IniFile, quote, read_bool, unquote  # noqa: E402
 
@@ -511,7 +513,9 @@ class I18nTests(unittest.TestCase):
         from Core import I18n
         try:
             self.assertEqual(I18n.set_language("it"), "it")
-            self.assertEqual(I18n.t("slot_profile", name="Xbox"), "◄   Profilo: Xbox   ►")
+            self.assertEqual(I18n.t("title_players"), "Chi gioca?")
+            self.assertEqual(I18n.players_label(1), "1 giocatore")
+            self.assertEqual(I18n.players_label(4), "1–4 giocatori")
             self.assertEqual(I18n.set_language("xx"), "en")
             self.assertEqual(I18n.t("missing_key"), "missing_key")
         finally:
@@ -605,6 +609,142 @@ class DockedTests(unittest.TestCase):
             system = IniFile.load(path).items("System")
         self.assertEqual(system["use_docked_mode"], "1")
         self.assertEqual(system["use_docked_mode\\default"], "true")
+
+
+class TitleDbTests(unittest.TestCase):
+    def test_lookup(self):
+        import gzip
+        import json
+        from Eden.TitleDb import CDN, TitleDb
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "titledb.json.gz")
+            with gzip.open(path, "wt", encoding="utf-8") as f:
+                json.dump({"v": 1, "games": {"0100152000022000": [4, "Mario Kart 8 Deluxe", "i.jpg", "b.jpg"],
+                                             "0100AAAA00000000": [None, "No Count", None, None]}}, f)
+            db = TitleDb.load(path)
+        self.assertEqual(db.get("0100152000022000"), {"players": 4, "name": "Mario Kart 8 Deluxe",
+                                                      "icon_url": CDN + "i.jpg", "banner_url": CDN + "b.jpg"})
+        self.assertIsNone(db.get("0100AAAA00000000")["players"])
+        self.assertIsNone(db.get("0100BBBB00000000"))
+        self.assertEqual(TitleDb.load(os.path.join("nope", "missing.gz")).games, {})
+
+    def test_index_builder_keeps_base_games_only(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
+        from build_titledb_index import build
+        cdn = "https://img-eshop.cdn.nintendo.net/i/" + "a" * 64 + ".jpg"
+        us = {"1": {"id": "0100152000022000", "name": "Mario Kart™ 8 Deluxe", "numberOfPlayers": 4,
+                    "iconUrl": cdn, "bannerUrl": None},
+              "2": {"id": "0100152000022800", "name": "Update", "numberOfPlayers": 4},
+              "3": {"id": "0100AAAA00000000", "name": "Demo", "isDemo": True, "numberOfPlayers": 2}}
+        gb = {"1": {"id": "0100152000022000", "name": "Other name", "numberOfPlayers": 8,
+                    "bannerUrl": cdn}}
+        self.assertEqual(build([us, gb]), {"0100152000022000": [4, "Mario Kart 8 Deluxe", "a" * 64 + ".jpg",
+                                                                 "a" * 64 + ".jpg"]})
+
+
+class LibraryCacheTests(unittest.TestCase):
+    def test_identify_runs_once_per_file_version(self):
+        from Eden.Games import cached_identify
+        calls = []
+        identify = cached_identify(lambda p: calls.append(p) or ("0100152000022000", "base"), known := {})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "game.nsp")
+            with open(path, "w") as f:
+                f.write("x")
+            self.assertEqual(identify(path), ("0100152000022000", "base"))
+            self.assertEqual(identify(path), ("0100152000022000", "base"))
+            self.assertEqual(len(calls), 1)
+            with open(path, "w") as f:
+                f.write("changed")                       # size changes -> read again
+            identify(path)
+            self.assertEqual(len(calls), 2)
+        self.assertIn(path, known)
+
+    def test_settings_cache_roundtrip(self):
+        from Core.Settings import load_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(tmp, "TestLauncher")
+            self.assertEqual(settings.load_cache("library"), {})
+            settings.save_cache("library", {"a.nsp": [1, 2, "0100152000022000", "base"]})
+            self.assertEqual(load_settings(tmp, "TestLauncher").load_cache("library"),
+                             {"a.nsp": [1, 2, "0100152000022000", "base"]})
+
+
+class ArtTests(unittest.TestCase):
+    def test_resolve_prefers_local_files(self):
+        from Core.Art import ArtLibrary
+        with tempfile.TemporaryDirectory() as tmp:
+            art = ArtLibrary(tmp, eshop=True)
+            os.makedirs(os.path.join(tmp, "backgrounds"))
+            os.makedirs(os.path.join(tmp, "eshop"))
+            open(os.path.join(tmp, "0100152000022000.png"), "w").close()
+            open(os.path.join(tmp, "eshop", "icon123.jpg"), "w").close()
+            game = {"title": "Mario Kart 8 Deluxe", "title_id": "0100152000022000", "image": None,
+                    "icon_url": "https://img-eshop.cdn.nintendo.net/i/icon123.jpg",
+                    "banner_url": "https://img-eshop.cdn.nintendo.net/i/banner456.jpg"}
+            art.resolve(game)
+            self.assertTrue(game["cover"].endswith("0100152000022000.png"))
+            self.assertTrue(game["image"].endswith(os.path.join("eshop", "icon123.jpg")))  # cached download
+            self.assertIsNone(game["background"])                                       # not downloaded yet
+            jobs = art._jobs([game])
+            self.assertEqual([key for _, key, _ in jobs], ["background"])
+
+            open(os.path.join(tmp, "backgrounds", "Mario Kart 8 Deluxe.jpg"), "w").close()
+            art.resolve(game)
+            self.assertTrue(game["background"].endswith("Mario Kart 8 Deluxe.jpg"))   # user file by title
+
+    def test_downloads_run_in_background(self):
+        import http.server
+        import threading
+        from Core.Art import ArtLibrary
+        with tempfile.TemporaryDirectory() as tmp:
+            served = os.path.join(tmp, "www")
+            os.makedirs(served)
+            with open(os.path.join(served, "banner.jpg"), "wb") as f:
+                f.write(b"jpegdata")
+            handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=served, **k)  # noqa: E731
+            http.server.SimpleHTTPRequestHandler.log_message = lambda *a: None
+            server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                art = ArtLibrary(os.path.join(tmp, "covers"))
+                game = {"title": "Game", "title_id": "0100AAAA00000000", "image": None,
+                        "banner_url": f"http://127.0.0.1:{server.server_port}/banner.jpg"}
+                art.resolve(game)
+                art.start([game])
+                for _ in range(100):
+                    done = art.take_finished()
+                    if done:
+                        break
+                    threading.Event().wait(0.05)
+            finally:
+                server.shutdown()
+            self.assertEqual(done, [game])
+            with open(game["background"], "rb") as f:
+                self.assertEqual(f.read(), b"jpegdata")
+
+
+class GlyphTests(unittest.TestCase):
+    def test_every_glyph_renders(self):
+        from Core import Glyphs
+        for name in ("a", "b", "x", "y", "lb", "rb", "ls", "rs", "start", "back", "dpad"):
+            image = Glyphs.button(name, 24)
+            self.assertEqual(image.height, 24)
+            self.assertEqual(image.mode, "RGBA")
+        self.assertEqual(Glyphs.people(2, 20, "#FFFFFF").height, 20)
+        self.assertEqual(Glyphs.panel(100, 40, 8, (0, 0, 0, 128), glow=("#FF0000", 6)).size, (112, 52))
+        with self.assertRaises(ValueError):
+            Glyphs.button("nope", 24)
+
+
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class BadgeTests(unittest.TestCase):
+    def test_badge_colours(self):
+        from Core.GameGrid import badge_state
+        self.assertEqual(badge_state(4, 3), "ok")
+        self.assertEqual(badge_state(2, 3), "bad")
+        self.assertEqual(badge_state(4, 1), "neutral")       # one player: nothing to compare
+        self.assertEqual(badge_state(None, 3), "neutral")    # unknown count
 
 
 if __name__ == "__main__":

@@ -140,13 +140,21 @@ class Emulator:
     # ------------------------------------------------------------------
     # 6. Game picker (optional)
     # ------------------------------------------------------------------
+    def game_picker_enabled(self):
+        """True if list_games() may offer games (START then opens the game grid)."""
+        return False
+
     def list_games(self):
         """
         Games offered by the launcher's game picker when no game was passed
-        on the command line.
+        on the command line. Runs on a background thread: it must not touch
+        the UI.
 
         Returns:
-            list[dict]: [{"title": str, "path": str}, ...] in display order.
+            list[dict]: in display order, with at least {"title", "path"}.
+                        Optional: "title_id", "image" (square icon path),
+                        "players" (max players on one console), "icon_url",
+                        "banner_url" (downloaded by Core/Art.py).
                         An empty list disables the picker.
         """
         return []

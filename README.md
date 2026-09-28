@@ -55,9 +55,9 @@ L'interfaccia è in **italiano** (o inglese, in base alla lingua di Windows o a
 
 | Azione | Tasto (Xbox) |
 | :--- | :--- |
-| Diventare il giocatore successivo | `Ⓐ` |
+| Diventare il giocatore successivo | `Ⓐ` (il controller vibra 1 volta per P1, 2 per P2...) |
 | Liberare il proprio slot | `Ⓑ` |
-| Scegliere il profilo di mappatura | `Ⓧ`, poi `◄ ►` e `Ⓐ` per confermare |
+| Scegliere il layout dei tasti | `Ⓧ`, poi `◄ ►` e `Ⓐ` per confermare (`Ⓑ` annulla) |
 | Avviare il gioco / aprire la lista giochi | `☰` (Start) |
 | Uscire dal launcher | `⧉` (Back) |
 | **Chiudere Eden bloccato** | Premi insieme `⧉` + `LB` + `RB` su *qualsiasi* controller (combinazione configurabile) |
@@ -69,6 +69,7 @@ Nella **lista giochi**:
 | Muoversi nella griglia (tenere premuto per scorrere) | Croce direzionale o levetta sinistra |
 | Pagina precedente / successiva | `LB` / `RB` |
 | Avviare il gioco selezionato | `Ⓐ` |
+| Mostrare solo i giochi adatti a tutti i giocatori (con 2+ giocatori) | `Ⓨ` |
 | Tornare ai controller | `Ⓑ` |
 
 Quando chiudi un gioco avviato dalla lista torni alla lista, con gli stessi
@@ -180,6 +181,7 @@ language = auto
 rumble = true
 kill_combo = back+lb+rb
 covers_dir = covers
+download_art = true
 steamgriddb_api_key =
 
 [Eden]
@@ -204,6 +206,8 @@ fullscreen = true
 | `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
 | `covers_dir` | cartella | Dove cercare le copertine (predefinito `covers` accanto al launcher) |
 | `steamgriddb_api_key` | chiave API | Se impostata, scarica da sola le copertine mancanti da SteamGridDB |
+| `download_art` | `true`, `false` | Scarica dall'eShop banner (sfondi) e icone mancanti |
+| `[Players]` | `<Title ID o nome> = <numero>` | Corregge il numero di giocatori mostrato su un gioco |
 
 I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
 separa le cartelle in `game_dirs`.
@@ -211,6 +215,14 @@ separa le cartelle in `game_dirs`.
 * **kill_combo**: tasti disponibili `a b x y back start lb rb ls rs up down left
   right`, uniti da `+` (es. `back+start`). Se scrivi un nome sbagliato si usa
   `back+lb+rb`, così un errore non ti lascia senza modo di chiudere Eden.
+* **[Players]**: il numero di giocatori viene dall'eShop, che a volte sbaglia.
+  Per correggerlo aggiungi in fondo al file, ad esempio:
+
+  ```ini
+  [Players]
+  0100A8E016236000 = 4
+  Kirby's Dream Buffet = 4
+  ```
 * **controller_applet**: alcuni giochi, all'avvio o prima del multigiocatore,
   chiedono di "collegare i controller": Eden apre allora una sua finestra che si
   usa solo con il mouse. Con `off` (predefinito) il launcher attiva l'opzione di
@@ -231,7 +243,26 @@ giocato): si può cancellare senza problemi.
 ## Lista giochi
 
 Una griglia di copertine in stile Playnite. Lo sfondo è l'immagine del gioco
-selezionato, sfocata e scurita.
+selezionato (il banner dell'eShop, se disponibile), sfocata e scurita.
+
+**Quanti possono giocare.** Ogni copertina ha un badge con l'icona delle persone e
+il numero massimo di giocatori sulla stessa console (es. `1-4`), preso dai dati
+dell'eShop. Il colore dice subito se il gioco va bene per il vostro gruppo:
+
+| Badge | Significato |
+| :--- | :--- |
+| **verde** | il gioco supporta tutti i giocatori che si sono uniti |
+| **rosso** | il gioco ne supporta meno di quanti siete (es. `1-2` con 3 controller) |
+| grigio | un solo giocatore, o numero sconosciuto |
+
+In alto, accanto al titolo del gioco selezionato, compare anche "✓ Va bene per 3
+giocatori" oppure "✕ Max 2 · siete in 3". Con 2 o più giocatori, `Ⓨ` mostra solo i
+giochi adatti a tutti.
+
+I dati vengono da un indice compatto (~2 MB) costruito da
+[titledb](https://github.com/blawar/titledb) durante la build e incluso nell'exe:
+nessun download all'avvio. Se un numero è sbagliato lo correggi nella sezione
+`[Players]` di `EdenLauncher.ini` (vedi sotto).
 
 **Quali giochi.** I file `.nsp`, `.xci` e `.nro` nelle cartelle dei giochi. Per ogni
 NSP/XCI il launcher legge il **Title ID dentro il file** (dal ticket, dal CNMT o
@@ -252,12 +283,20 @@ in più file compare una volta sola. Senza `prod.keys` si torna a indovinare dal
    *API*);
 3. l'**icona ufficiale** che Eden ha già salvato nella sua cache
    (`cache\game_list\<TitleID>.jpeg`, opzione di Eden "Salva in cache i metadati
-   della lista giochi", attiva di default): basta aver aperto Eden una volta con
-   quei giochi in lista;
+   della lista giochi", attiva di default), oppure quella dell'eShop scaricata una
+   volta;
 4. altrimenti un riquadro colorato con il titolo.
 
-Il nome viene dalla cache di Eden (nome ufficiale del gioco) o, in mancanza, dal
-nome del file ripulito.
+**Sfondo**: `covers\backgrounds\<Title ID o nome>.jpg` se lo metti tu, altrimenti il
+banner dell'eShop, scaricato in background una volta sola in `covers\eshop`
+(`download_art = false` per disattivare i download).
+
+Il nome viene dalla cache di Eden (nome ufficiale del gioco), dall'eShop o, in
+mancanza, dal nome del file ripulito.
+
+La ricerca dei giochi avviene in background mentre i giocatori si uniscono, e il
+risultato viene ricordato in `EdenLauncher.library.json`: dal secondo avvio i file
+non vengono più riletti, a meno che non cambino.
 
 ---
 
@@ -348,14 +387,23 @@ Struttura:
 ```text
 src/
 ├── EdenLauncher.py      # entry point
-├── Core/                # motore generico (UI, SDL, hot-plug, kill combo, lista giochi,
-│                        #   impostazioni, traduzioni) - derivato da RyujinxLauncher
+├── Core/                # motore generico, derivato da RyujinxLauncher
+│   ├── App.py           #   logica: controller, giocatori, lista giochi, avvio
+│   ├── Ui.py            #   schermo (una tela Tk): sfondo, schede, barra tasti, dialoghi
+│   ├── GameGrid.py      #   griglia giochi con badge dei giocatori
+│   ├── Glyphs.py        #   tasti Xbox disegnati, icone, pannelli
+│   ├── Art.py           #   copertine, sfondi, download in background
+│   ├── Settings.py      #   EdenLauncher.ini, stato, cache
+│   ├── I18n.py          #   testi IT/EN
+│   └── ...              #   SDL, processi, log
 └── Eden/
     ├── Eden.py          # percorsi, backend SDL, hint SDL identici a Eden
     ├── Config.py        # GUID/port, layout Xbox/Nintendo, modalità TV, scrittura di qt-config.ini
     ├── Games.py         # cartelle dei giochi di Eden, ricerca, nomi e icone dalla cache di Eden
+    ├── TitleDb.py       # giocatori, nomi e immagini eShop dall'indice incluso
     ├── Switch.py        # Title ID da NSP/XCI (ticket, CNMT, intestazioni NCA)
     └── Ini.py           # editor INI che non altera il resto del file
+tools/build_titledb_index.py   # genera assets/titledb.json.gz (lo fanno gli script di build)
 tests/test_eden.py
 ```
 

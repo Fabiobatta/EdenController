@@ -21,3 +21,6 @@ dist/
 
 # SDL library bundled by the build scripts (downloaded, not committed)
 sdl/
+
+# Generated at build time by tools/build_titledb_index.py
+assets/titledb.json.gz

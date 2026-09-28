@@ -14,15 +14,19 @@ This project is an adaptation of
 [Ryujinx Launcher](https://github.com/Artomos-dev/RyujinxLauncher)
 by **Artomos**, licensed under CC BY-NC 4.0.
 
-* `src/Core/`, `build.sh` and `build.bat` are taken from Ryujinx Launcher
-  (commit `e9caa6c`). Changes: the window icon is picked per emulator name, SDL
-  error messages no longer mention Ryujinx, all UI text is translatable
-  (`Core/I18n.py`, English and Italian), a settings file (`Core/Settings.py`),
-  a game picker grid (`Core/GameGrid.py`, `Core/Covers.py`), confirmation rumble, a configurable kill combo, stable
-  keys for controllers without a device path, and the build scripts default to
-  the Eden launcher and can bundle an SDL library from `sdl/`.
-* `src/Eden/`, `src/EdenLauncher.py`, `tests/`, the assets and the CI workflow
-  were written for this project.
+* `src/Core/` started from Ryujinx Launcher (commit `e9caa6c`), as did
+  `build.sh` and `build.bat`. The engine structure (Emulator contract, SDL
+  wrappers, process handling, logging, startup sequence, assignment logic)
+  comes from there. Changed or added here: the whole UI (`Ui.py`,
+  `GameGrid.py`, `Glyphs.py`: one Tk canvas instead of customtkinter),
+  translations (`I18n.py`), the settings file (`Settings.py`), pictures
+  (`Art.py`), the game picker, confirmation rumble, a configurable kill combo,
+  incremental controller detection and stable keys for controllers without a
+  device path, face-button bindings, and the build scripts' Eden defaults.
+* `src/Eden/`, `src/EdenLauncher.py`, `tools/`, `tests/`, the assets and the CI
+  workflow were written for this project.
+* Player counts, names and eShop picture addresses in the generated
+  `assets/titledb.json.gz` come from [blawar/titledb](https://github.com/blawar/titledb).
 
 No warranties are given. This project is not affiliated with the Eden
 emulator project, the Ryujinx team or Nintendo.

@@ -1,700 +1,592 @@
 """
 Core/Ui.py
-All rendering for the launcher: theme, scaling, the 8-slot player grid,
-the game grid (Core/GameGrid.py), modal alerts and toasts. Every visible string comes from
-Core/I18n.py.
+Everything on screen, drawn on one full-window tk.Canvas.
 
-Emulator-agnostic. The UI is fed plain view-model dicts by Core/App.py and
-never reads launcher state directly.
+Layers, bottom to top (canvas tags):
+    bg        blurred, darkened art (the selected / last played game)
+    players   the 8 player cards            } one of the two
+    games     the game grid (Core/GameGrid) }
+    header    title, clock, connected controllers
+    footer    button hints ("[a] Play  [b] Back")
+    toast     transient message
+    alert     modal dialog
 
-Layout is authored against a 1280x720 baseline and scaled uniformly to the
-actual screen resolution, so the same numbers work from 720p to 4K.
+Pictures come from Pillow (Core/Glyphs.py) and are cached per size, so a
+redraw only re-places cached images. Layout is authored for 1280x720 and
+scaled uniformly (px()). Emulator-agnostic: Core/App.py feeds plain
+view models and never touches widgets.
 """
 
 import ctypes
 import os
+import re
 import sys
+import time
 import tkinter as tk
+import tkinter.font as tkfont
+from collections import OrderedDict
 
-import customtkinter as ctk
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 
+from . import Glyphs
 from .I18n import t
 from .Paths import resource_path
 
 # ============================================================================
-# SECTION 1: HI-DPI DISPLAY SUPPORT
+# HI-DPI: physical pixels on Windows (must run before the window exists)
 # ============================================================================
-# Enables proper scaling on high-resolution displays (4K, 1440p).
-# Runs at import time - it must happen before any window is created.
 if sys.platform == "win32":
-    # 1. Stop Windows from double-scaling
-    ctk.deactivate_automatic_dpi_awareness()
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # Windows 8.1+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)      # Windows 8.1+
     except Exception:
         try:
-            ctypes.windll.user32.SetProcessDPIAware()  # Windows Vista-8
+            ctypes.windll.user32.SetProcessDPIAware()       # Vista-8
         except Exception:
-            pass  # Unsupported
-else:
-    # 2. Stop Linux from double-scaling
-    os.environ.setdefault('GDK_SCALE', '1')
-    os.environ.setdefault('GDK_DPI_SCALE', '1')
+            pass
 
-# ============================================================================
-# SECTION 2: UI DESIGN VARIABLES (720p BASELINE - 1280x720)
-# ============================================================================
-# All measurements are for 1280x720 resolution at 100% DPI
-# These will be automatically scaled for other resolutions
+BASE_W, BASE_H = 1280, 720
+FONT_FAMILY = "Segoe UI" if sys.platform == "win32" else "DejaVu Sans"
+MARGIN = 64
+FOOTER_H = 64
+ART_MAX = 720           # art is kept in memory at most this big
+ART_CACHE = 48          # pictures kept decoded
+BG_CACHE = 16           # blurred backgrounds kept
 
-UI = {
-    # === FONTS ===
-    'FONT_FAMILY': 'Segoe UI',
-    'FONT_TITLE_SIZE': 39,          # Main title
-    'FONT_CARD_SIZE': 21,           # Player card text
-    'FONT_FOOTER_SIZE': 22,         # Footer buttons
-    'FONT_ALERT_TITLE_SIZE': 33,    # Alert dialog title
-    'FONT_ALERT_TEXT_SIZE': 22,     # Alert dialog text
-    'FONT_ALERT_BTN_SIZE': 21,      # Alert dialog buttons
-    'FONT_TOAST_SIZE': 21,          # Toast notification
-
-    # === SPACING ===
-    'PADDING_MAIN': 40,             # Main container padding
-    'PADDING_TITLE_TOP': 15,        # Title top margin
-    'PADDING_TITLE_BOTTOM': 20,     # Title bottom margin
-
-    # === PLAYER CARDS ===
-    'CARD_WIDTH': 400,              # Player card width
-    'CARD_HEIGHT': 85,              # Player card height
-    'CARD_PADDING_X': 15,           # Horizontal gap between cards
-    'CARD_PADDING_Y': 10,           # Vertical gap between cards
-    'CARD_BORDER': 2,               # Card border thickness
-    'CARD_CORNER_RADIUS': 12,       # Card corner radius
-    'CARD_PLAYER_NUM_X': 12,        # Player number X position
-    'CARD_PLAYER_NUM_Y': 8,         # Player number Y position
-
-    # === FOOTER ===
-    'FOOTER_HEIGHT': 60,            # Footer bar height
-    'FOOTER_GAP': 12,               # Gap between footer elements
-
-    # === ALERT DIALOG ===
-    'ALERT_BOX_WIDTH': 500,         # Alert dialog width
-    'ALERT_BOX_HEIGHT': 240,        # Alert dialog height
-    'ALERT_BOX_BORDER': 2,          # Alert dialog border
-    'ALERT_BOX_CORNER_RADIUS': 12,  # Alert box corner radius
-    'ALERT_TITLE_PADDING_TOP': 30,  # Alert title top padding
-    'ALERT_TITLE_PADDING_BOTTOM': 8,# Alert title bottom padding
-    'ALERT_TEXT_PADDING': 4,        # Alert text padding
-    'ALERT_BTN_PADDING_TOP': 30,    # Alert buttons top padding
-    'ALERT_BTN_PADDING_X': 15,      # Alert buttons horizontal padding
-
-    # === TOAST ===
-    'TOAST_POSITION_Y': 0.95,       # Toast Y position (relative)
-}
-
-# ============================================================================
-# SECTION 3: COLOR THEME
-# ============================================================================
 COLOR = {
-    'BG_DARK': '#0F0F0F',
-    'BG_CARD': '#1A1A1A',
-    'NEON_BLUE': '#0AB9E6',
-    'NEON_RED': '#FF3C28',
-    'TEXT_WHITE': '#EDEDED',
-    'TEXT_DIM': '#666666',
-    'FOOTER_BG': '#111111',
-    'ALERT_BG': '#000000',
-    'ALERT_BOX_BG': '#1E1E1E',
-    'ALERT_TEXT_DIM': '#BBBBBB',
-    'ALERT_YELLOW': '#FFCC00',
+    "BG": "#0B0D12",
+    "TEXT": "#F4F5F7",
+    "TEXT_DIM": "#A9AFBB",
+    "TEXT_FAINT": "#6B7280",
+    "ACCENT": "#F5D90A",
+    "OK": "#3FB950",
+    "BAD": "#E5534B",
+    "NEON_RED": "#FF6B61",
+    "WARN": "#F5BE28",
 }
 
+# Controller colours (Material 300 palette: bright, distinct, easy on the eyes)
 COLOR_POOL = [
-    "#00FF00", "#00FA9A", "#ADFF2F", "#7FFFD4", "#40E0D0",  # Lime, SpringGreen, GreenYellow, Aqua, Turquoise
-    "#00FFFF", "#1E90FF", "#87CEFA", "#4169E1", "#00BFFF",  # Cyan, DodgerBlue, SkyBlue, RoyalBlue, DeepSkyBlue
-    "#FF00FF", "#DA70D6", "#9370DB", "#FF69B4", "#D8BFD8",  # Magenta, Orchid, MedPurple, HotPink, Thistle
-    "#FFFF00", "#FFD700", "#F0E68C", "#FFC200", "#FFFFFF"   # Yellow, Gold, Khaki, Amber, White
+    "#4FC3F7", "#FF8A65", "#AED581", "#BA68C8", "#FFD54F", "#4DB6AC", "#F06292",
+    "#7986CB", "#E57373", "#81C784", "#64B5F6", "#FFB74D", "#9575CD", "#4DD0E1",
+    "#DCE775", "#F48FB1", "#FFF176", "#80CBC4", "#A1887F", "#90A4AE",
 ]
 
-# set dark mode once before any window is created
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
+_TOKEN = re.compile(r"\[(\w+)\]")
 
 
-# ============================================================================
-# SECTION 4: DYNAMIC SCALING UTILITY
-# ============================================================================
-def calculate_scale(screen_width, screen_height):
-    """
-    Calculate uniform scale factor based on screen resolution.
-    Baseline: 1280x720 (720p, 16:9)
-
-    Returns uniform scale that maintains aspect ratio
-    """
-    BASE_WIDTH = 1280
-    BASE_HEIGHT = 720
-
-    # Calculate scale based on both dimensions
-    width_scale = screen_width / BASE_WIDTH
-    height_scale = screen_height / BASE_HEIGHT
-
-    # Use the smaller scale to ensure everything fits
-    scale = min(width_scale, height_scale)
-
-    # Minimum scale for very small screens
-    if scale < 0.2:
-        scale = 0.2
-
-    return scale
-
-
-# ============================================================================
-# SECTION 5: LAUNCHER UI
-# ============================================================================
 class LauncherUi:
     """
-    Owns every widget, the alert state, and the resolution-change rebuild.
+    Owns the canvas. Core/App.py drives it through:
 
-    Core/App.py drives it through four calls:
-        refresh(slots)          - redraw the player grid
-        show_toast(msg, color)  - transient message
-        show_alert(mode)        - modal dialog, mode readable via .alert_mode
-        close_alert()
-        show_games(games, i)    - cover the player grid with the game grid
-        hide_games()
+        refresh(slots) / flash_slot(i)        player cards
+        set_hints([...]) / set_tip(markup)    footer hints, tip line
+        set_pads(n)                           connected controllers
+        set_background(path, delay_ms)        blurred backdrop
+        show_games(...) / show_games_loading() / hide_games()
+        show_toast(msg, color)
+        show_alert(mode) / close_alert() / alert_mode
     """
 
-    def __init__(self, root, emulator_name, launch_text, on_rebuild):
-        """
-        Args:
-            root          (ctk.CTk): The root window.
-            emulator_name (str):     "Eden" - window title and alert copy.
-            launch_text   (str):     Footer hint for START, e.g. "☰ AVVIA GIOCO".
-            on_rebuild    (callable): Called after a resolution change rebuilds
-                                      the widgets, so App can repaint the grid.
-        """
+    def __init__(self, root, emulator_name):
         self.root = root
         self.emulator_name = emulator_name
-        self.launch_text_value = launch_text
-        self.on_rebuild = on_rebuild
-        self.games_view = None      # (games, index) while the game grid is shown
-        self.games_grid = None
 
-        self.alert_mode = None      # Current alert type (if any)
-        self.alert_frame = None     # Alert dialog container
-        self.toast_job = None       # Toast notification timer
-        self.resize_job = None      # Debounce timer for resolution changes
-
-        self.root.title(f"{emulator_name} Launcher")
-        self.root.configure(fg_color=COLOR['BG_DARK'])
-        self.root.attributes('-fullscreen', True)
-
+        root.title(f"{emulator_name} Launcher")
+        root.configure(bg=COLOR["BG"])
+        try:
+            root.configure(cursor="none")       # controller-only UI: hide the mouse
+        except tk.TclError:
+            pass
+        root.attributes("-fullscreen", True)
         self._load_icon()
 
-        # Calculate UI scaling based on screen resolution
-        self.root.update_idletasks()
-        self.screen_width = self.root.winfo_screenwidth()
-        self.screen_height = self.root.winfo_screenheight()
-        self.scale = calculate_scale(self.screen_width, self.screen_height)
+        self.canvas = tk.Canvas(root, bg=COLOR["BG"], highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
 
-        ctk.set_window_scaling(self.scale)  # Scales the window size
-        ctk.set_widget_scaling(self.scale)  # Scales the buttons, fonts, and elements inside
+        self.width = self.height = 0
+        self.scale = 1.0
+        self.alert_mode = None
+        self.view = "players"
+        self.slots = []
+        self.flashing = set()
+        self.hints = []
+        self.tip = ""
+        self.pads = 0
 
-        # Bind the configure event to detect resolution/scale changes
-        self.root.bind("<Configure>", self._on_window_configure)
+        self._fonts = {}
+        self._photos = {}
+        self._art = OrderedDict()
+        self._backgrounds = OrderedDict()
+        self._bg_wanted = None
+        self._bg_job = None
+        self._toast_job = None
+        self._toast = None
 
-        self.build()
+        from .GameGrid import GameGrid
+        self.grid = GameGrid(self)
+
+        self.canvas.bind("<Configure>", self._on_configure)
+        self._tick_clock()
 
     def _load_icon(self):
         """Window/taskbar icon: .ico on Windows, .png elsewhere."""
-        ico_path = resource_path(os.path.join("assets", f"{self.emulator_name}LauncherIcon.ico"))
-        png_path = resource_path(os.path.join("assets", f"{self.emulator_name}LauncherPNG.png"))
-
-        # Windows prefers .ico for the taskbar
-        if os.path.exists(ico_path):
-            try:
-                self.root.iconbitmap(default=ico_path)
-            except Exception:
-                pass
-
-        # Linux/macOS often prefer .png (iconphoto)
-        # We try this if the .ico didn't work, or as a secondary measure
-        elif os.path.exists(png_path):
-            try:
-                icon_img = tk.PhotoImage(file=png_path)
-                self.root.iconphoto(True, icon_img)
-            except Exception:
-                pass
+        ico = resource_path(os.path.join("assets", f"{self.emulator_name}LauncherIcon.ico"))
+        png = resource_path(os.path.join("assets", f"{self.emulator_name}LauncherPNG.png"))
+        try:
+            if sys.platform == "win32" and os.path.exists(ico):
+                self.root.iconbitmap(default=ico)
+            elif os.path.exists(png):
+                self._icon = tk.PhotoImage(file=png)
+                self.root.iconphoto(True, self._icon)
+        except Exception:
+            pass
 
     # ========================================================================
-    # RESOLUTION CHANGE HANDLING
+    # SIZE / SCALE
     # ========================================================================
-    def _on_window_configure(self, event):
-        """
-        Handle window resize events (resolution or scale change).
-        Uses a timer (debounce) to wait for the resize to finish before rebuilding UI.
-        """
-        if event.widget != self.root:
+    def _on_configure(self, event):
+        if event.widget is not self.canvas or (event.width, event.height) == (self.width, self.height):
             return
+        self.width, self.height = event.width, event.height
+        self.scale = max(0.3, min(self.width / BASE_W, self.height / BASE_H))
+        # Everything sized in pixels must be made again
+        self._fonts.clear()
+        self._photos.clear()
+        self._backgrounds.clear()
+        self.grid.reset()
+        self.redraw()
 
-        new_w = self.root.winfo_screenwidth()
-        new_h = self.root.winfo_screenheight()
+    def px(self, value):
+        return max(1, int(round(value * self.scale)))
 
-        # Only trigger if dimensions actually changed
-        if new_w != self.screen_width or new_h != self.screen_height:
-            # Cancel previous timer if user is still resizing/changing settings
-            if self.resize_job:
-                self.root.after_cancel(self.resize_job)
+    def font(self, size, bold=True):
+        key = (self.px(size), bold)
+        if key not in self._fonts:
+            self._fonts[key] = tkfont.Font(family=FONT_FAMILY, size=-key[0],
+                                           weight="bold" if bold else "normal")
+        return self._fonts[key]
 
-            # Schedule a rebuild in 100ms
-            self.resize_job = self.root.after(100, self._perform_resize)
+    def photo(self, key, make):
+        """PhotoImage cached under `key`; make() returns a PIL image."""
+        image = self._photos.get(key)
+        if image is None:
+            image = self._photos[key] = ImageTk.PhotoImage(make())
+        return image
 
-    def _perform_resize(self):
-        """Rebuild the UI with the new scale factor."""
-        self.screen_width = self.root.winfo_screenwidth()
-        self.screen_height = self.root.winfo_screenheight()
+    def load_art(self, path):
+        """Decoded picture (RGB, at most ART_MAX px), LRU-cached; None if unreadable."""
+        if not path:
+            return None
+        if path in self._art:
+            self._art.move_to_end(path)
+            return self._art[path]
+        try:
+            with Image.open(path) as image:
+                image.draft("RGB", (ART_MAX, ART_MAX))      # fast JPEG downscale
+                art = image.convert("RGB")
+                art.thumbnail((ART_MAX, ART_MAX), Image.LANCZOS)
+        except Exception:
+            art = None
+        self._art[path] = art
+        if len(self._art) > ART_CACHE:
+            self._art.popitem(last=False)
+        return art
 
-        # Recalculate scale
-        self.scale = calculate_scale(self.screen_width, self.screen_height)
-
-        ctk.set_window_scaling(self.scale)  # Scales the window size
-        ctk.set_widget_scaling(self.scale)  # Scales the buttons, fonts, and elements inside
-
-        # Destroy old UI
-        if hasattr(self, 'main_container'):
-            self.main_container.destroy()
-
-        # Destroy footer separately as it is packed to bottom
-        if hasattr(self, 'footer_frame'):
-            self.footer_frame.destroy()
-
-        # Rebuild UI elements
-        self.build()
-
-        # Restore controller assignment visuals onto the new UI
-        self.on_rebuild()
-
-        if self.alert_mode:
-            # 1. Capture current mode
-            mode = self.alert_mode
-
-            # 2. Destroy the old, wrongly scaled/positioned alert frame
-            if self.alert_frame:
-                self.alert_frame.destroy()
-                self.alert_frame = None
-
-            # 3. Re-draw the alert (This forces it to the top of the stack)
-            self.show_alert(mode)
-
-    # ========================================================================
-    # WIDGET CONSTRUCTION
-    # ========================================================================
-    def build(self):
-        """Build the entire UI using scaled values"""
-
-        # Main container
-        self.main_container = ctk.CTkFrame(
-            self.root,
-            fg_color=COLOR['BG_DARK'],
-            corner_radius=0
-        )
-        self.main_container.pack(
-            expand=True,
-            fill="both",
-            padx=(UI['PADDING_MAIN']),
-            pady=(UI['PADDING_MAIN'])
-        )
-
-        # Header: Title
-        self.lbl_title = ctk.CTkLabel(
-            self.main_container,
-            text=t("title_players"),
-            font=(UI['FONT_FAMILY'], UI['FONT_TITLE_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=COLOR['TEXT_WHITE']
-        )
-        self.lbl_title.pack(
-            pady=(
-                (UI['PADDING_TITLE_TOP']),
-                (UI['PADDING_TITLE_BOTTOM'])
-            )
-        )
-
-        # Player grid: 8 slots in 4x2 layout
-        self.grid_frame = ctk.CTkFrame(self.main_container, fg_color=COLOR['BG_DARK'], corner_radius=0)
-        self.grid_frame.pack()
-
-        self.slot_cards = []
-        for i in range(8):
-            row = i // 2
-            col = i % 2
-
-            # Card frame with border highlight
-            card = ctk.CTkFrame(
-                self.grid_frame,
-                fg_color=COLOR['BG_CARD'],
-                width=UI['CARD_WIDTH'],
-                height=UI['CARD_HEIGHT'],
-                border_color=COLOR['BG_CARD'],
-                border_width=UI['CARD_BORDER'],
-                corner_radius=UI['CARD_CORNER_RADIUS']
-            )
-            card.grid_propagate(False)
-            card.grid(
-                row=row,
-                column=col,
-                padx=(UI['CARD_PADDING_X']),
-                pady=(UI['CARD_PADDING_Y'])
-            )
-
-            # Player number label (top-left corner)
-            lbl_num = ctk.CTkLabel(
-                card,
-                text=f"P{i+1}",
-                font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
-                fg_color="transparent",
-                text_color="#444444"
-            )
-            lbl_num.place(
-                x=UI['CARD_PLAYER_NUM_X'],
-                y=UI['CARD_PLAYER_NUM_Y']
-            )
-
-            # Status/name label (center)
-            lbl_status = ctk.CTkLabel(
-                card,
-                text=t("slot_empty"),
-                font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
-                fg_color="transparent",
-                text_color=COLOR['TEXT_DIM']
-            )
-            lbl_status.place(relx=0.5, rely=0.5, anchor="center")
-
-            # Disconnect hint label (bottom, initially hidden)
-            lbl_disc = ctk.CTkLabel(
-                card,
-                text=t("slot_hint"),
-                font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
-                fg_color="transparent",
-                text_color=COLOR['NEON_RED']
-            )
-
-            # Profile selector label (center, hidden by default - shown in State B)
-            lbl_profile = ctk.CTkLabel(
-                card,
-                text=t("slot_profile", name=""),
-                font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
-                fg_color="transparent",
-                text_color=COLOR['TEXT_DIM']
-            )
-
-            self.slot_cards.append((card, lbl_num, lbl_status, lbl_disc, lbl_profile))
-
-        # Footer: Button hints
-        self.footer_frame = ctk.CTkFrame(
-            self.root,
-            fg_color=COLOR['FOOTER_BG'],
-            height=UI['FOOTER_HEIGHT'],
-            corner_radius=0
-        )
-        self.footer_frame.pack(side="bottom", fill="x")
-        self.footer_frame.pack_propagate(False)
-
-        self.separator_text = ctk.CTkLabel(
-            self.footer_frame,
-            text="|",
-            font=(UI['FONT_FAMILY'], UI['FONT_FOOTER_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=COLOR['TEXT_WHITE']
-        )
-        self.launch_text = ctk.CTkLabel(
-            self.footer_frame,
-            text=self.launch_text_value,
-            font=(UI['FONT_FAMILY'], UI['FONT_FOOTER_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=COLOR['TEXT_WHITE']
-        )
-        self.quit_text = ctk.CTkLabel(
-            self.footer_frame,
-            text=t("footer_quit"),
-            font=(UI['FONT_FAMILY'], UI['FONT_FOOTER_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=COLOR['TEXT_WHITE']
-        )
-
-        gap = UI['FOOTER_GAP']
-        self.separator_text.place(relx=0.5, rely=0.5, anchor="center")
-        self.launch_text.place(relx=0.5, rely=0.5, anchor="e", x=-gap)
-        self.quit_text.place(relx=0.5, rely=0.5, anchor="w", x=gap)
-
-        # Toast notification label (hidden by default)
-        self.lbl_toast = ctk.CTkLabel(
-            self.main_container,
-            text="",
-            font=(UI['FONT_FAMILY'], UI['FONT_TOAST_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=COLOR['NEON_RED']
-        )
-        self.lbl_toast.place(relx=0.5, rely=UI['TOAST_POSITION_Y'], anchor="center")
-        self.lbl_toast.place_forget()
-
-        # A rebuild (resolution change) redraws the game grid at the new scale
-        if self.games_grid is not None:
-            self.games_grid.destroy()
-            self.games_grid = None
-        if self.games_view:
-            self.show_games(*self.games_view)
+    def forget_art(self, path):
+        self._art.pop(path, None)
+        for key in [k for k in self._backgrounds if k[0] == path]:
+            del self._backgrounds[key]
 
     # ========================================================================
-    # PLAYER GRID
+    # TEXT HELPERS
     # ========================================================================
-    def refresh(self, slots):
+    def truncate(self, text, font, width):
+        if font.measure(text) <= width:
+            return text
+        while text and font.measure(text + "…") > width:
+            text = text[:-1]
+        return text.rstrip() + "…"
+
+    def rich(self, x, y, markup, size, fill, bold=True, anchor="w", tags=()):
         """
-        Update all player slot cards.
+        Draw text with inline button pictures ("Press [a] to join").
 
         Args:
-            slots (list[dict]): One entry per assigned controller, in player
-                order, at most 8:
-                    {"name": str, "color": "#RRGGBB",
-                     "profile": str, "editing": bool}
-                Remaining cards render as empty slots.
+            anchor: "w", "center" or "e" - horizontal alignment; y is the
+                    vertical centre.
+        Returns:
+            int: total width in pixels.
         """
-        for i in range(8):
-            card, lbl_num, lbl_status, lbl_disc, lbl_profile = self.slot_cards[i]
-
-            if i < len(slots):
-                # ============================================================
-                # ACTIVE SLOT (Controller assigned)
-                # ============================================================
-                slot = slots[i]
-                active_color = slot["color"]
-
-                # Update Card Border (Use active_color)
-                card.configure(
-                    fg_color=COLOR['BG_CARD'],
-                    border_color=active_color
-                )
-
-                # Update Player Number Color (Use active_color)
-                lbl_num.configure(fg_color="transparent", text_color=active_color)
-
-                if slot["editing"]:
-                    # ========================================================
-                    # STATE B: Profile Selection Mode
-                    # ========================================================
-                    lbl_status.place_forget()
-
-                    lbl_profile.configure(
-                        text=t("slot_profile", name=slot['profile']),
-                        fg_color="transparent",
-                        text_color=active_color,
-                        font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold")
-                    )
-                    lbl_profile.place(relx=0.5, rely=0.35, anchor="center")
-
-                    lbl_disc.place(relx=0.5, rely=0.75, anchor="center")
-                    lbl_disc.configure(
-                        text=t("slot_profile_hint"),
-                        fg_color="transparent",
-                        text_color=COLOR['NEON_RED']
-                    )
-
-                else:
-                    # ========================================================
-                    # STATE A: Normal Mode
-                    # ========================================================
-                    lbl_profile.place_forget()
-
-                    lbl_status.place(relx=0.5, rely=0.25, anchor="center")
-                    lbl_status.configure(
-                        text=slot["name"],
-                        fg_color="transparent",
-                        text_color=active_color,
-                        font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold")
-                    )
-
-                    lbl_disc.place(relx=0.5, rely=0.75, anchor="center")
-                    lbl_disc.configure(
-                        text=t("slot_hint"),
-                        fg_color="transparent",
-                        text_color=COLOR['NEON_RED']
-                    )
-
+        font = self.font(size, bold)
+        glyph_h = int(self.px(size) * 1.5)
+        gap = self.px(size * 0.3)
+        parts = []
+        for i, piece in enumerate(_TOKEN.split(markup)):
+            if i % 2:
+                image = self.photo(("glyph", piece, glyph_h), lambda p=piece: Glyphs.button(p, glyph_h))
+                parts.append(("image", image, image.width()))
+            elif piece:
+                parts.append(("text", piece, font.measure(piece)))
+        total = sum(w for _, _, w in parts) + gap * sum(1 for p in parts if p[0] == "image") * 2
+        cx = {"w": x, "center": x - total // 2, "e": x - total}[anchor]
+        for kind, value, w in parts:
+            if kind == "image":
+                cx += gap
+                self.canvas.create_image(cx, y, image=value, anchor="w", tags=tags)
+                cx += w + gap
             else:
-                # ============================================================
-                # INACTIVE SLOT (No controller assigned)
-                # ============================================================
-                card.configure(
-                    fg_color=COLOR['BG_CARD'],
-                    border_color=COLOR['BG_CARD']
-                )
-                lbl_num.configure(fg_color="transparent", text_color="#444444")
-                lbl_status.place(relx=0.5, rely=0.5, anchor="center")
-                lbl_status.configure(
-                    text=t("slot_empty"),
-                    fg_color="transparent",
-                    text_color=COLOR['TEXT_DIM'],
-                    font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold")
-                )
-                lbl_disc.place_forget()
-                lbl_profile.place_forget()
+                self.canvas.create_text(cx, y, text=value, anchor="w", fill=fill, font=font, tags=tags)
+                cx += w
+        return total
+
+    # ========================================================================
+    # WHOLE-SCREEN REDRAW
+    # ========================================================================
+    def redraw(self):
+        if not self.width:
+            return
+        self._apply_background()
+        self._draw_content()
+        self._draw_header()
+        self._draw_footer()
+        if self._toast:
+            self._draw_toast(*self._toast)
+        if self.alert_mode:
+            self._draw_alert(self.alert_mode)
+
+    def _draw_content(self):
+        if self.view == "players":
+            self.canvas.delete("games")
+            self._draw_players()
+        else:
+            self.canvas.delete("players")
+            self.grid.draw(full=True)
+
+    def _raise_overlays(self):
+        for tag in ("header", "footer", "toast", "alert"):
+            self.canvas.tag_raise(tag)
+
+    # ========================================================================
+    # BACKGROUND
+    # ========================================================================
+    def set_background(self, path, delay_ms=0):
+        """Blurred backdrop from `path` (None: default); delay_ms debounces fast scrolling."""
+        self._bg_wanted = path
+        if self._bg_job:
+            self.root.after_cancel(self._bg_job)
+            self._bg_job = None
+        if delay_ms:
+            self._bg_job = self.root.after(delay_ms, self._apply_background)
+        else:
+            self._apply_background()
+
+    def _shade(self):
+        """Brightness map: dim overall, darker at the edges and at the bottom."""
+        key = ("shade", self.width, self.height)
+        if key not in self._photos:           # stored as a PIL image
+            w, h = 160, 90
+            mask = Image.new("L", (w, h), 0)
+            ImageDraw.Draw(mask).ellipse((-w * 0.25, -h * 0.35, w * 1.25, h * 1.2), fill=255)
+            mask = mask.filter(ImageFilter.GaussianBlur(18))
+            vignette = mask.point(lambda v: int(55 + v * 0.42))            # 55..162
+            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.45))
+            shade = ImageChops.multiply(vignette, bottom).resize((self.width, self.height), Image.BILINEAR)
+            self._photos[key] = Image.merge("RGB", (shade, shade, shade))
+        return self._photos[key]
+
+    def _background_photo(self, path):
+        key = (path, self.width, self.height)
+        if key in self._backgrounds:
+            self._backgrounds.move_to_end(key)
+            return self._backgrounds[key]
+        art = self.load_art(path)
+        if art is not None:
+            small = Glyphs.cover_crop(art, 96, max(1, round(96 * self.height / self.width)))
+            image = small.filter(ImageFilter.GaussianBlur(2.2)).resize((self.width, self.height), Image.BILINEAR)
+        else:
+            # Default backdrop: deep blue with a soft teal glow
+            image = Image.new("RGB", (64, 36), (13, 17, 30))
+            ImageDraw.Draw(image).ellipse((-10, -18, 44, 30), fill=(24, 70, 92))
+            image = image.filter(ImageFilter.GaussianBlur(9)).resize((self.width, self.height), Image.BILINEAR)
+        photo = ImageTk.PhotoImage(ImageChops.multiply(image, self._shade()))
+        self._backgrounds[key] = photo
+        if len(self._backgrounds) > BG_CACHE:
+            self._backgrounds.popitem(last=False)
+        return photo
+
+    def _apply_background(self):
+        self._bg_job = None
+        if not self.width:
+            return
+        photo = self._background_photo(self._bg_wanted)
+        item = self.canvas.find_withtag("bg")
+        if item:
+            self.canvas.itemconfigure(item[0], image=photo)
+        else:
+            self.canvas.create_image(0, 0, image=photo, anchor="nw", tags="bg")
+        self.canvas.tag_lower("bg")
+
+    # ========================================================================
+    # HEADER
+    # ========================================================================
+    def _tick_clock(self):
+        if self.width:
+            self.canvas.itemconfigure("clock", text=time.strftime("%H:%M"))
+        self.root.after(15000, self._tick_clock)
+
+    def set_pads(self, count):
+        if count != self.pads:
+            self.pads = count
+            self._draw_header()
+
+    def _draw_header(self):
+        c = self.canvas
+        c.delete("header")
+        if not self.width:
+            return
+        right = self.width - self.px(MARGIN)
+        y = self.px(46)
+        c.create_text(right, y, text=time.strftime("%H:%M"), anchor="e", fill=COLOR["TEXT"],
+                      font=self.font(22), tags=("header", "clock"))
+        x = right - self.font(22).measure("00:00") - self.px(34)
+        count = c.create_text(x, y, text=str(self.pads), anchor="e", fill=COLOR["TEXT_DIM"],
+                              font=self.font(18), tags="header")
+        pad_h = self.px(20)
+        icon = self.photo(("pad", pad_h), lambda: Glyphs.gamepad(pad_h, COLOR["TEXT_DIM"]))
+        c.create_image(c.bbox(count)[0] - self.px(8), y, image=icon, anchor="e", tags="header")
+
+        if self.view == "players":
+            left = self.px(MARGIN)
+            c.create_text(left, y, text=t("title_players"), anchor="w", fill=COLOR["TEXT"],
+                          font=self.font(32), tags="header")
+            self.rich(left, self.px(88), t("subtitle_players"), 15, COLOR["TEXT_DIM"],
+                      bold=False, tags="header")
+        self._raise_overlays()
+
+    # ========================================================================
+    # FOOTER
+    # ========================================================================
+    def set_hints(self, hints):
+        """hints: [(button or (buttons...), label)], drawn right to left from the edge."""
+        if hints != self.hints:
+            self.hints = list(hints)
+            self._draw_footer()
+
+    def _draw_footer(self):
+        c = self.canvas
+        c.delete("footer")
+        if not self.width:
+            return
+        band_h = self.px(FOOTER_H + 40)
+        band = self.photo(("fade", self.width, band_h),
+                          lambda: Glyphs.vertical_fade(self.width, band_h, 0, 215))
+        c.create_image(0, self.height, image=band, anchor="sw", tags="footer")
+        y = self.height - self.px(FOOTER_H / 2)
+        c.create_text(self.px(MARGIN), y, text=f"{self.emulator_name.upper()} LAUNCHER", anchor="w",
+                      fill=COLOR["TEXT_FAINT"], font=self.font(12), tags="footer")
+        x = self.width - self.px(MARGIN)
+        for buttons, label in reversed(self.hints):
+            if isinstance(buttons, str):
+                buttons = (buttons,)
+            markup = "".join(f"[{b}]" for b in buttons) + " " + label
+            x -= self.rich(x, y, markup, 15, COLOR["TEXT"], anchor="e", tags="footer") + self.px(30)
+        self._raise_overlays()
+
+    # ========================================================================
+    # PLAYER CARDS
+    # ========================================================================
+    def set_tip(self, markup):
+        self.tip = markup
+        if self.view == "players":
+            self._draw_players()
+
+    def refresh(self, slots):
+        """
+        Args:
+            slots (list[dict]): assigned controllers in player order, at most 8:
+                {"name", "color", "profile", "editing"}
+        """
+        self.slots = slots
+        if self.view == "players":
+            self._draw_players()
+
+    def flash_slot(self, index, duration_ms=700):
+        """Glow a card briefly (a controller just joined)."""
+        self.flashing.add(index)
+        self.refresh(self.slots)
+
+        def stop():
+            self.flashing.discard(index)
+            self.refresh(self.slots)
+        self.root.after(duration_ms, stop)
+
+    def _draw_players(self):
+        c = self.canvas
+        c.delete("players")
+        if not self.width:
+            return
+        cw, ch, gap = self.px(262), self.px(150), self.px(20)
+        left = (self.width - (4 * cw + 3 * gap)) // 2
+        top = self.px(132)
+        radius = self.px(16)
+        for i in range(8):
+            x = left + (i % 4) * (cw + gap)
+            y = top + (i // 4) * (ch + gap)
+            slot = self.slots[i] if i < len(self.slots) else None
+            if slot is None:
+                image = self.photo(("card-empty", cw, ch), lambda: Glyphs.panel(
+                    cw, ch, radius, (255, 255, 255, 16), outline=("#3A3F4B", max(1, self.px(1.5)))))
+                c.create_image(x, y, image=image, anchor="nw", tags="players")
+                c.create_text(x + cw // 2, y + self.px(56), text=f"P{i + 1}", fill=COLOR["TEXT_FAINT"],
+                              font=self.font(30), tags="players")
+                self.rich(x + cw // 2, y + self.px(104), t("slot_empty"), 14, COLOR["TEXT_FAINT"],
+                          anchor="center", tags="players")
+                continue
+
+            color = slot["color"]
+            glow = i in self.flashing
+            pad = self.px(16) if glow else 0
+            image = self.photo(("card", cw, ch, color, glow), lambda: Glyphs.panel(
+                cw, ch, radius, (10, 12, 18, 196), outline=(color, self.px(3)),
+                glow=(color, pad) if glow else None))
+            c.create_image(x - pad, y - pad, image=image, anchor="nw", tags="players")
+
+            if slot["editing"]:
+                c.create_text(x + cw // 2, y + self.px(34), text=f"P{i + 1}", fill=color,
+                              font=self.font(15), tags="players")
+                c.create_text(x + cw // 2, y + self.px(72), text=f"◀   {slot['profile']}   ▶",
+                              fill=color, font=self.font(22), tags="players")
+                self.rich(x + cw // 2, y + ch - self.px(26), t("slot_editing_hints"), 11,
+                          COLOR["TEXT_DIM"], anchor="center", tags="players")
+                continue
+
+            size = self.px(52)
+            disc = self.photo(("disc", i, size, color), lambda: Glyphs.disc(f"P{i + 1}", size, color))
+            c.create_image(x + self.px(18), y + self.px(18), image=disc, anchor="nw", tags="players")
+            text_x = x + self.px(84)
+            name_font = self.font(15)
+            c.create_text(text_x, y + self.px(34), anchor="w", fill=COLOR["TEXT"], font=name_font,
+                          text=self.truncate(slot["name"], name_font, cw - self.px(98)), tags="players")
+            c.create_text(text_x, y + self.px(58), anchor="w", fill=color, font=self.font(13, False),
+                          text=t("slot_profile", name=slot["profile"]), tags="players")
+            self.rich(x + self.px(18), y + ch - self.px(26), t("slot_hints"), 11, COLOR["TEXT_DIM"],
+                      tags="players")
+
+        if self.tip:
+            self.rich(self.width // 2, top + 2 * ch + gap + self.px(58), self.tip, 14,
+                      COLOR["TEXT_DIM"], bold=False, anchor="center", tags="players")
+        self._raise_overlays()
+
+    # ========================================================================
+    # GAME GRID
+    # ========================================================================
+    def show_games(self, games, index, players=0, filter_players=0):
+        """Show (or update) the game grid; see Core/GameGrid.py."""
+        entering = self.view != "games"
+        self.view = "games"
+        self.grid.set(games, index, players, filter_players)
+        if entering:
+            self.redraw()
+        else:
+            self.grid.draw()
+            self._raise_overlays()
+
+    def show_games_loading(self):
+        self.view = "games"
+        self.grid.set_loading()
+        self.redraw()
+
+    def hide_games(self):
+        """Back to the player cards."""
+        if self.view == "players":
+            return
+        self.view = "players"
+        self.redraw()
+
+    def games_columns(self):
+        return self.grid.columns
+
+    def games_page(self):
+        return self.grid.page_size()
+
+    def games_art_changed(self, game):
+        """A picture arrived for `game`: redraw what shows it."""
+        for key in ("cover", "image", "background"):
+            self.forget_art(game.get(key))
+        self.grid.forget(game)
+        if self.view == "games":
+            self.grid.draw()
+            self._raise_overlays()
 
     # ========================================================================
     # TOAST
     # ========================================================================
     def show_toast(self, message, color=None):
-        """Display a temporary notification message (hides after 2 seconds)."""
-        if self.toast_job:
-            self.root.after_cancel(self.toast_job)
+        """Transient message above the footer (2.5 s)."""
+        self._toast = (message, color or COLOR["NEON_RED"])
+        self._draw_toast(*self._toast)
+        if self._toast_job:
+            self.root.after_cancel(self._toast_job)
+        self._toast_job = self.root.after(2500, self._hide_toast)
 
-        self.lbl_toast.configure(text_color=color or COLOR['NEON_RED'])
-        self.lbl_toast.configure(text=message)
-        self.lbl_toast.place(relx=0.5, rely=UI['TOAST_POSITION_Y'], anchor="center")
-        self.toast_job = self.root.after(2000, lambda: self.lbl_toast.place_forget())
+    def _hide_toast(self):
+        self._toast = None
+        self._toast_job = None
+        self.canvas.delete("toast")
 
-    # ========================================================================
-    # GAME LIST
-    # ========================================================================
-    def show_games(self, games, index):
-        """
-        Cover the player grid with the game grid (Core/GameGrid.py).
-
-        Args:
-            games (list[dict]): {"title", "path", "image", "cover"} in display order.
-            index (int):        Selected entry.
-        """
-        self.games_view = (games, index)
-        if self.games_grid is None:
-            from .GameGrid import GameGrid   # Pillow is only needed here
-            self.launch_text.configure(text=t("footer_play"))
-            self.quit_text.configure(text=t("footer_back"))
-            self.games_grid = GameGrid(self.root, self.scale, int(UI['FOOTER_HEIGHT'] * self.scale))
-        self.games_grid.render(games, index)
-
-    def games_columns(self):
-        return self.games_grid.columns if self.games_grid else 1
-
-    def games_page(self):
-        return self.games_grid.page_size() if self.games_grid else 1
-
-    def games_art_changed(self, game):
-        """A cover arrived for `game`: redraw with it."""
-        if self.games_grid:
-            self.games_grid.forget_art(game)
-            if self.games_view:
-                self.games_grid.render(*self.games_view)
-
-    def hide_games(self):
-        """Back to the player grid."""
-        self.games_view = None
-        if self.games_grid is None:
+    def _draw_toast(self, message, color):
+        c = self.canvas
+        c.delete("toast")
+        if not self.width:
             return
-        self.games_grid.destroy()
-        self.games_grid = None
-        self.launch_text.configure(text=self.launch_text_value)
-        self.quit_text.configure(text=t("footer_quit"))
+        font = self.font(16)
+        w, h = font.measure(message) + self.px(56), self.px(46)
+        x, y = self.width // 2, self.height - self.px(FOOTER_H + 44)
+        pill = self.photo(("toast", w, h, color), lambda: Glyphs.panel(
+            w, h, h // 2, (14, 16, 22, 235), outline=(color, self.px(2))))
+        c.create_image(x, y, image=pill, tags="toast")
+        c.create_text(x, y, text=message, fill=color, font=font, tags="toast")
+        self._raise_overlays()
 
     # ========================================================================
-    # ALERT DIALOG SYSTEM
+    # ALERTS
     # ========================================================================
+    ALERTS = {
+        "LAUNCH": ("alert_no_pads_title", "alert_no_pads_text", "WARN",
+                   (("a", "alert_continue"), ("b", "alert_back"))),
+        "EXIT": ("alert_exit_title", "alert_exit_text", "TEXT",
+                 (("a", "alert_yes"), ("b", "alert_no"))),
+        "KILL_CONFIRM": ("alert_kill_title", "alert_kill_text", "TEXT",
+                         (("a", "alert_kill_launcher"), ("y", "alert_kill_desktop"), ("b", "alert_kill_cancel"))),
+    }
+
     def show_alert(self, mode):
-        """
-        Display a modal alert dialog.
-
-        Args:
-            mode (str): Alert type - "LAUNCH", "EXIT", or "KILL_CONFIRM"
-        """
+        """Modal dialog: "LAUNCH", "EXIT" or "KILL_CONFIRM"."""
         self.alert_mode = mode
-
-        # Fullscreen overlay
-        self.alert_frame = ctk.CTkFrame(self.root, fg_color=COLOR['ALERT_BG'], corner_radius=0)
-        self.alert_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
-
-        # Dialog box
-        box = ctk.CTkFrame(
-            self.alert_frame,
-            width=UI['ALERT_BOX_WIDTH'],
-            height=UI['ALERT_BOX_HEIGHT'],
-            fg_color=COLOR['ALERT_BOX_BG'],
-            border_width=UI['ALERT_BOX_BORDER'],
-            border_color="#444444",
-            corner_radius=UI['ALERT_BOX_CORNER_RADIUS']
-        )
-        box.pack_propagate(False)
-        box.place(
-            relx=0.5,
-            rely=0.5,
-            anchor="center",
-        )
-
-        if mode == "LAUNCH":
-            # ================================================================
-            # NO CONTROLLERS WARNING
-            # ================================================================
-            self._alert_title(box, t("alert_no_pads_title"), COLOR['ALERT_YELLOW'])
-            self._alert_text(box, t("alert_no_pads_text", name=self.emulator_name))
-            self._alert_buttons(box, [
-                (t("alert_continue"), COLOR['NEON_BLUE']),
-                (t("alert_back"), COLOR['NEON_RED']),
-            ])
-
-        elif mode == "EXIT":
-            # ================================================================
-            # EXIT CONFIRMATION
-            # ================================================================
-            self._alert_title(box, t("alert_exit_title"), COLOR['TEXT_WHITE'])
-            self._alert_text(box, t("alert_exit_text"))
-            self._alert_buttons(box, [
-                (t("alert_yes"), COLOR['NEON_BLUE']),
-                (t("alert_no"), COLOR['NEON_RED']),
-            ])
-
-        elif mode == "KILL_CONFIRM":
-            # ================================================================
-            # KILL GAME MENU (THREE OPTIONS)
-            # ================================================================
-            self._alert_title(box, t("alert_kill_title"), COLOR['TEXT_WHITE'])
-            self._alert_text(box, t("alert_kill_text"))
-            self._alert_buttons(box, [
-                (t("alert_kill_launcher"), COLOR['NEON_BLUE']),   # Return to launcher
-                (t("alert_kill_desktop"), COLOR['ALERT_YELLOW']), # Exit to desktop
-                (t("alert_kill_cancel"), COLOR['NEON_RED']),      # Resume game
-            ])
+        self._draw_alert(mode)
 
     def close_alert(self):
         self.alert_mode = None
-        if self.alert_frame:
-            self.alert_frame.destroy()
-            self.alert_frame = None
+        self.canvas.delete("alert")
 
-    # --- alert building blocks ---------------------------------------------
-    def _alert_title(self, box, text, color):
-        ctk.CTkLabel(
-            box,
-            text=text,
-            font=(UI['FONT_FAMILY'], UI['FONT_ALERT_TITLE_SIZE'], "bold"),
-            fg_color="transparent",
-            text_color=color
-        ).pack(pady=((UI['ALERT_TITLE_PADDING_TOP']), (UI['ALERT_TITLE_PADDING_BOTTOM'])))
-
-    def _alert_text(self, box, text):
-        ctk.CTkLabel(
-            box,
-            text=text,
-            font=(UI['FONT_FAMILY'], UI['FONT_ALERT_TEXT_SIZE']),
-            fg_color="transparent",
-            text_color=COLOR['ALERT_TEXT_DIM']
-        ).pack(pady=(UI['ALERT_TEXT_PADDING']))
-
-    def _alert_buttons(self, box, buttons):
-        btn_frame = ctk.CTkFrame(box, fg_color=COLOR['ALERT_BOX_BG'], corner_radius=0)
-        btn_frame.pack(pady=(UI['ALERT_BTN_PADDING_TOP']))
-
-        for text, color in buttons:
-            ctk.CTkLabel(
-                btn_frame,
-                text=text,
-                font=(UI['FONT_FAMILY'], UI['FONT_ALERT_BTN_SIZE'], "bold"),
-                fg_color="transparent",
-                text_color=color
-            ).pack(side="left", padx=(UI['ALERT_BTN_PADDING_X']))
+    def _draw_alert(self, mode):
+        c = self.canvas
+        c.delete("alert")
+        if not self.width:
+            return
+        title, text, color, buttons = self.ALERTS[mode]
+        shade = self.photo(("overlay", self.width, self.height),
+                           lambda: Image.new("RGBA", (self.width, self.height), (0, 0, 0, 175)))
+        c.create_image(0, 0, image=shade, anchor="nw", tags="alert")
+        w, h = self.px(600), self.px(270)
+        cx, cy = self.width // 2, self.height // 2
+        box = self.photo(("dialog", w, h), lambda: Glyphs.panel(
+            w, h, self.px(20), (22, 24, 31, 248), outline=("#3A3F4B", max(1, self.px(1.5)))))
+        c.create_image(cx, cy, image=box, tags="alert")
+        c.create_text(cx, cy - self.px(72), text=t(title), fill=COLOR[color], font=self.font(26),
+                      tags="alert")
+        c.create_text(cx, cy - self.px(20), text=t(text, name=self.emulator_name), fill=COLOR["TEXT_DIM"],
+                      font=self.font(16, False), width=w - self.px(80), justify="center", tags="alert")
+        markup = "      ".join(f"[{b}] {t(label)}" for b, label in buttons)
+        self.rich(cx, cy + self.px(70), markup, 18, COLOR["TEXT"], anchor="center", tags="alert")
+        c.tag_raise("alert")

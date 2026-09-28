@@ -109,7 +109,7 @@ if PY="$(venv_python)"; then
     # An existing environment may predate requirements.txt - verify every build
     # and runtime dependency is present. find_spec locates them without
     # importing: importing sdl3 does network and binary resolution work.
-    if ! "$PY" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','customtkinter','sdl2','sdl3','PIL','Crypto')))" >/dev/null 2>&1; then
+    if ! "$PY" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','sdl2','sdl3','PIL','Crypto')))" >/dev/null 2>&1; then
         echo "      Build dependencies missing - installing requirements..."
         "$PY" -m pip install -r requirements.txt || die "Installing requirements.txt failed."
     fi
@@ -187,6 +187,12 @@ if [ -d assets ]; then
     EXTRA_ARGS+=(--add-data "assets${DATA_SEP}assets")
 fi
 
+# Player counts and eShop art index (optional: the launcher works without it)
+if [ ! -f assets/titledb.json.gz ]; then
+    echo "      Building assets/titledb.json.gz (player counts)..."
+    "$PY" tools/build_titledb_index.py || echo "      WARNING: index not built - no player badges"
+fi
+
 echo "[3/3] Building $(basename "$OUTPUT") from $ENTRY..."
 echo
 
@@ -197,7 +203,6 @@ echo
     --name "${NAME}Launcher" \
     "${ICON_ARGS[@]}" \
     "${EXTRA_ARGS[@]}" \
-    --collect-all customtkinter \
     --paths src \
     --hidden-import Core.ControllerManagerSDL2 \
     --hidden-import Core.ControllerManagerSDL3 \

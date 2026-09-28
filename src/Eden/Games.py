@@ -110,7 +110,30 @@ def _files(folder, deep):
             yield os.path.join(folder, name)
 
 
-def find_games(folders, header_key=None, cache_dir=None, identify=None):
+def cached_identify(identify, known):
+    """
+    Wrap identify() with a cache keyed by path, size and modification time,
+    so a library is read once and later launches only stat() the files.
+
+    Args:
+        known (dict): {path: [size, mtime, title_id, kind]}, updated in place.
+    """
+    def lookup(path):
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None, None
+        signature = [stat.st_size, int(stat.st_mtime)]
+        entry = known.get(path)
+        if entry and entry[:2] == signature:
+            return entry[2], entry[3]
+        title_id, kind = identify(path)
+        known[path] = signature + [title_id, kind]
+        return title_id, kind
+    return lookup
+
+
+def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=None, known=None):
     """
     Scan folders for games.
 
@@ -119,15 +142,22 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None):
         header_key (bytes | None):  prod.keys header_key, to read title IDs.
         cache_dir  (str | None):    Eden's cache folder (names and icons).
         identify   (callable):      path -> (title_id, kind); injectable for tests.
+        titledb    (TitleDb|None):  eShop facts: players, name, icon/banner URLs.
+        known      (dict | None):   identify() cache, see cached_identify().
+                                    Entries of files that are gone are dropped.
 
     Returns:
-        list[dict]: [{"title", "path", "title_id", "image"}] sorted by title,
-                    one entry per game. Updates and DLC are dropped; when the
-                    same game exists in several files the first one is kept.
+        list[dict]: one entry per game, sorted by title:
+                    {"title", "path", "title_id", "image", "players",
+                     "icon_url", "banner_url"}
+                    Updates and DLC are dropped; when the same game exists in
+                    several files the first one is kept.
     """
     if identify is None:
         from .Switch import identify as read_ids
         identify = lambda path: read_ids(path, header_key)  # noqa: E731
+    if known is not None:
+        identify = cached_identify(identify, known)
 
     games = []
     seen_files = set()
@@ -159,14 +189,22 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None):
                     seen_titles[title_id] = name
 
                 cached_name, icon = eden_cached(cache_dir, title_id)
+                info = (titledb.get(title_id) if titledb and title_id else None) or {}
                 games.append({
-                    "title": cached_name or clean_title(name),
+                    "title": cached_name or info.get("name") or clean_title(name),
                     "path": path,
                     "title_id": title_id,
                     "image": icon,
+                    "players": info.get("players"),
+                    "icon_url": info.get("icon_url"),
+                    "banner_url": info.get("banner_url"),
                 })
         except OSError as e:
             log("WARNING", "Could not scan game folder", f"{folder}: {e}")
+
+    if known is not None:
+        for path in [p for p in known if os.path.normcase(os.path.abspath(p)) not in seen_files]:
+            del known[path]
 
     # Same title in several formats: tell them apart
     counts = {}

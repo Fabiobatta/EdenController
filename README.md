@@ -64,8 +64,8 @@ Dal menu di chiusura: `Ⓐ` torna al launcher (per riassegnare i controller),
 
 ## Installazione (Windows)
 
-1. Scarica `EdenLauncher.exe` (artifact della GitHub Action *Build Eden Launcher*
-   oppure compilalo, vedi sotto).
+1. Scarica `EdenLauncher.exe` dalla pagina **Releases** del repository
+   (la release più recente, sezione *Assets*), oppure compilalo (vedi sotto).
 2. Mettilo **nella stessa cartella di `eden.exe`**:
 
    ```text

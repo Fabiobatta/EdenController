@@ -69,7 +69,7 @@ jobs:
         git clone https://github.com/libsdl-org/SDL.git --branch "release-$SDL3_VERSION" --depth 1
         # The launcher only needs SDL's joystick/gamepad subsystems
         cd SDL && cmake -B build -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
-          -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_AUDIO=OFF -DSDL_GPU=OFF -DSDL_RENDER=OFF -DSDL_CAMERA=OFF
+          -DSDL_UNIX_CONSOLE_BUILD=ON -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_AUDIO=OFF -DSDL_GPU=OFF -DSDL_RENDER=OFF -DSDL_CAMERA=OFF
         cmake --build build --parallel
         sudo cmake --install build
 
@@ -89,3 +89,29 @@ jobs:
       with:
         name: ${{ matrix.upload_name }}
         path: dist/${{ matrix.artifact_name }}
+
+  # Publish the Windows exe on the Releases page: a direct download, no zip,
+  # no expiry, visible from the GitHub mobile app too
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/download-artifact@v4
+      with:
+        name: EdenLauncher-Windows
+        path: out
+
+    - uses: softprops/action-gh-release@v2
+      with:
+        tag_name: build-${{ github.run_number }}
+        name: Eden Launcher (build ${{ github.run_number }})
+        target_commitish: ${{ github.sha }}
+        make_latest: true
+        body: |
+          Windows build from `${{ github.ref_name }}` @ ${{ github.sha }}.
+          Download **EdenLauncher.exe** and put it next to `eden.exe`.
+        files: out/EdenLauncher.exe

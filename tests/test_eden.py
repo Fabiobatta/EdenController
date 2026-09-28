@@ -619,11 +619,14 @@ class TitleDbTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "titledb.json.gz")
             with gzip.open(path, "wt", encoding="utf-8") as f:
-                json.dump({"v": 1, "games": {"0100152000022000": [4, "Mario Kart 8 Deluxe", "i.jpg", "b.jpg"],
+                json.dump({"v": 1, "games": {"0100152000022000": [4, "Mario Kart 8 Deluxe", "i.jpg", "b.jpg",
+                                                                  ["s1.jpg", "s2.jpg"]],
                                              "0100AAAA00000000": [None, "No Count", None, None]}}, f)
             db = TitleDb.load(path)
         self.assertEqual(db.get("0100152000022000"), {"players": 4, "name": "Mario Kart 8 Deluxe",
-                                                      "icon_url": CDN + "i.jpg", "banner_url": CDN + "b.jpg"})
+                                                      "icon_url": CDN + "i.jpg", "banner_url": CDN + "b.jpg",
+                                                      "screen_urls": [CDN + "s1.jpg", CDN + "s2.jpg"]})
+        self.assertEqual(db.get("0100AAAA00000000")["screen_urls"], [])     # older 4-field rows
         self.assertIsNone(db.get("0100AAAA00000000")["players"])
         self.assertIsNone(db.get("0100BBBB00000000"))
         self.assertEqual(TitleDb.load(os.path.join("nope", "missing.gz")).games, {})
@@ -632,14 +635,17 @@ class TitleDbTests(unittest.TestCase):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
         from build_titledb_index import build
         cdn = "https://img-eshop.cdn.nintendo.net/i/" + "a" * 64 + ".jpg"
+        shot = "https://img-eshop.cdn.nintendo.net/i/" + "{}" * 64 + ".jpg"
         us = {"1": {"id": "0100152000022000", "name": "Mario Kart™ 8 Deluxe", "numberOfPlayers": 4,
-                    "iconUrl": cdn, "bannerUrl": None},
+                    "iconUrl": cdn, "bannerUrl": None,
+                    "screenshots": [shot.replace("{}", c) for c in "bcde"] + ["https://elsewhere/x.jpg"]},
               "2": {"id": "0100152000022800", "name": "Update", "numberOfPlayers": 4},
               "3": {"id": "0100AAAA00000000", "name": "Demo", "isDemo": True, "numberOfPlayers": 2}}
         gb = {"1": {"id": "0100152000022000", "name": "Other name", "numberOfPlayers": 8,
                     "bannerUrl": cdn}}
         self.assertEqual(build([us, gb]), {"0100152000022000": [4, "Mario Kart 8 Deluxe", "a" * 64 + ".jpg",
-                                                                 "a" * 64 + ".jpg"]})
+                                                                 "a" * 64 + ".jpg",
+                                                                 [c * 64 + ".jpg" for c in "bcd"]]})
 
 
 class LibraryCacheTests(unittest.TestCase):
@@ -732,9 +738,189 @@ class GlyphTests(unittest.TestCase):
             self.assertEqual(image.height, 24)
             self.assertEqual(image.mode, "RGBA")
         self.assertEqual(Glyphs.people(2, 20, "#FFFFFF").height, 20)
+        self.assertEqual(Glyphs.star(20, "#F5D90A").size, (20, 20))
+        self.assertEqual(Glyphs.clock(18, "#FFFFFF").size, (18, 18))
         self.assertEqual(Glyphs.panel(100, 40, 8, (0, 0, 0, 128), glow=("#FF0000", 6)).size, (112, 52))
         with self.assertRaises(ValueError):
             Glyphs.button("nope", 24)
+
+
+class BackupTests(unittest.TestCase):
+    def _saves(self, tmp):
+        root = os.path.join(tmp, "save")
+        folder = os.path.join(root, "0000000000000000", "A" * 32, "0100152000022000")
+        os.makedirs(os.path.join(folder, "sub"))
+        with open(os.path.join(folder, "save.bin"), "wb") as f:
+            f.write(b"progress")
+        with open(os.path.join(folder, "sub", "extra.dat"), "wb") as f:
+            f.write(b"more")
+        return root, folder
+
+    def test_backup_skip_unchanged_and_rotate(self):
+        import zipfile
+        from Core.Backup import backup_saves
+        game = {"title": "Mario Kart: 8", "title_id": "0100152000022000"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root, folder = self._saves(tmp)
+            out = os.path.join(tmp, "backups")
+            first = backup_saves(game, root, [folder], out, keep=2, now=1_000_000)
+            self.assertTrue(first and os.path.isfile(first))
+            self.assertEqual(os.path.basename(os.path.dirname(first)), "Mario Kart 8 [0100152000022000]")
+            with zipfile.ZipFile(first) as z:
+                self.assertEqual(sorted(z.namelist()), [
+                    "0000000000000000/" + "A" * 32 + "/0100152000022000/save.bin",
+                    "0000000000000000/" + "A" * 32 + "/0100152000022000/sub/extra.dat"])
+            # Nothing changed: no new zip
+            self.assertIsNone(backup_saves(game, root, [folder], out, keep=2, now=1_000_100))
+            # Changed three times: only the newest two are kept
+            for i in range(3):
+                with open(os.path.join(folder, "save.bin"), "wb") as f:
+                    f.write(b"progress" * (i + 2))
+                self.assertIsNotNone(backup_saves(game, root, [folder], out, keep=2, now=1_000_200 + i * 60))
+            zips = sorted(os.listdir(os.path.dirname(first)))
+            self.assertEqual(len(zips), 2)
+            self.assertNotIn(os.path.basename(first), zips)
+
+    def test_nothing_to_back_up(self):
+        from Core.Backup import backup_saves
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(backup_saves({"title": "X"}, tmp, [], tmp))
+            root, folder = self._saves(tmp)
+            self.assertIsNone(backup_saves({"title": "X"}, root, [folder], tmp, keep=0))
+
+    def test_eden_save_folders(self):
+        from Eden import Eden
+        with tempfile.TemporaryDirectory() as tmp:
+            eden = Eden()
+            eden.user_dir = tmp
+            root, folder = self._saves(os.path.join(tmp, "nand", "user"))
+            os.makedirs(os.path.join(root, "0000000000000000", "B" * 32, "0100152000022000"))
+            os.makedirs(os.path.join(root, "0000000000000000", "B" * 32, "0100000000010000"))
+            found_root, folders = eden.save_folders({"title_id": "0100152000022000"})
+            self.assertEqual(found_root, root)
+            self.assertEqual(len(folders), 2)
+            self.assertEqual(eden.save_folders({"title_id": None}), (None, []))
+
+
+class SunshineTests(unittest.TestCase):
+    def test_register_keeps_other_apps(self):
+        import json
+        from Core import Sunshine
+        with tempfile.TemporaryDirectory() as tmp:
+            apps = os.path.join(tmp, "apps.json")
+            original = {"env": {"PATH": "x"}, "apps": [{"name": "Desktop", "image-path": "desktop.png"},
+                                                       {"name": "Eden", "cmd": "C:\\Eden\\eden.exe"}]}
+            with open(apps, "w") as f:
+                json.dump(original, f)
+            self.assertFalse(Sunshine.is_registered(apps))
+            self.assertEqual(Sunshine.register(apps, "Eden", "cover.png"), "added")
+            with open(apps) as f:
+                data = json.load(f)
+            self.assertEqual(data["env"], {"PATH": "x"})
+            self.assertEqual([a["name"] for a in data["apps"]], ["Desktop", "Eden", "Eden Launcher"])
+            self.assertEqual(data["apps"][2]["image-path"], "cover.png")
+            self.assertTrue(Sunshine.is_registered(apps))
+            self.assertEqual(Sunshine.register(apps, "Eden", "cover.png"), "unchanged")
+            self.assertEqual(Sunshine.register(apps, "Eden", "other.png"), "updated")
+            with open(apps + ".bak") as f:
+                self.assertEqual(json.load(f), original)
+
+    def test_find_apps_file(self):
+        from Core import Sunshine
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(Sunshine.find_apps_file(os.path.join(tmp, "missing.json")))
+            if sys.platform == "win32":
+                return
+            config = os.path.join(tmp, "sunshine")
+            os.makedirs(config)
+            custom = os.path.join(config, "my_apps.json")
+            with open(custom, "w") as f:
+                f.write("{}")
+            with open(os.path.join(config, "sunshine.conf"), "w") as f:
+                f.write("# comment\nfile_apps = my_apps.json\n")
+            old = os.environ.get("XDG_CONFIG_HOME")
+            os.environ["XDG_CONFIG_HOME"] = tmp
+            try:
+                self.assertEqual(Sunshine.find_apps_file(), custom)
+            finally:
+                if old is None:
+                    del os.environ["XDG_CONFIG_HOME"]
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = old
+
+    def test_cover(self):
+        from PIL import Image
+        from Core import Sunshine
+        from Core.Paths import resource_path
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Sunshine.make_cover(os.path.join(tmp, "c.png"),
+                                       resource_path(os.path.join("assets", "EdenLauncherPNG.png")), "Eden")
+            with Image.open(path) as image:
+                self.assertEqual((image.format, image.size), ("PNG", (600, 800)))
+
+
+class RouletteTests(unittest.TestCase):
+    def test_candidates_take_everyone(self):
+        from Core.Roulette import ease_out, pick_candidates
+        games = [{"title": "Solo", "players": 1}, {"title": "Duo", "players": 2},
+                 {"title": "Party", "players": 4}, {"title": "Big", "players": 8}, {"title": "Unknown"}]
+        self.assertEqual([g["title"] for g in pick_candidates(games, 4)], ["Party", "Big"])
+        self.assertEqual([g["title"] for g in pick_candidates(games, 2)], ["Duo", "Party", "Big"])
+        self.assertEqual(len(pick_candidates(games, 1)), 5)
+        self.assertEqual(len(pick_candidates(games, 0)), 5)
+        self.assertEqual(pick_candidates(games, 9), [])
+        self.assertEqual((ease_out(0), ease_out(1)), (0, 1))
+
+
+class SoundTests(unittest.TestCase):
+    def test_every_sound_is_a_valid_wav(self):
+        import io
+        import wave
+        from Core.Sound import RATE, SOUNDS, synthesize, wav
+        for name in ("join3", "win", "move"):
+            data = wav(synthesize(SOUNDS[name], 0.5))
+            with wave.open(io.BytesIO(data)) as w:
+                self.assertEqual((w.getframerate(), w.getnchannels(), w.getsampwidth()), (RATE, 1, 2))
+                self.assertGreater(w.getnframes(), RATE // 100)
+
+
+class TimeLabelTests(unittest.TestCase):
+    def test_labels(self):
+        import time
+        from Core.I18n import last_played_label, playtime_label, set_language
+        set_language("it")
+        try:
+            self.assertEqual(playtime_label(45 * 60), "45 min")
+            self.assertEqual(playtime_label(3 * 3600 + 5 * 60 + 30), "3 h 5 min")
+            now = time.mktime((2026, 9, 28, 12, 0, 0, 0, 0, -1))
+            self.assertEqual(last_played_label(now - 3600, now), "oggi")
+            self.assertEqual(last_played_label(now - 86400, now), "ieri")
+            self.assertEqual(last_played_label(now - 5 * 86400, now), "5 giorni fa")
+            self.assertEqual(last_played_label(now - 90 * 86400, now), "30/06/2026")
+        finally:
+            set_language("en")
+
+
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class OrderTests(unittest.TestCase):
+    def test_favourites_first_then_order(self):
+        from Core.App import LauncherApp
+        games = [{"title": t, "path": t, "title_id": None} for t in ("Alpha", "Bravo", "Charlie", "Delta")]
+        app = types.SimpleNamespace(
+            games=games, sort_mode="recent", game_key=LauncherApp.game_key,
+            emu=types.SimpleNamespace(settings=types.SimpleNamespace(state={
+                "play": {"Bravo": [600, 100], "Charlie": [9000, 50], "Delta": [60, 300]},
+                "favorites": ["Charlie"]})))
+        LauncherApp.order_games(app)
+        self.assertEqual([g["title"] for g in app.games], ["Charlie", "Delta", "Bravo", "Alpha"])
+        self.assertTrue(app.games[0]["favorite"])
+        app.sort_mode = "most"
+        LauncherApp.order_games(app)
+        self.assertEqual([g["title"] for g in app.games], ["Charlie", "Bravo", "Delta", "Alpha"])
+        app.sort_mode = "az"
+        LauncherApp.order_games(app)
+        self.assertEqual([g["title"] for g in app.games], ["Charlie", "Alpha", "Bravo", "Delta"])
+        self.assertEqual(app.games[1]["playtime"], 0)
 
 
 @unittest.skipUnless(HAS_TK, "needs Tk")

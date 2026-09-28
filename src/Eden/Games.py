@@ -149,7 +149,7 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
     Returns:
         list[dict]: one entry per game, sorted by title:
                     {"title", "path", "title_id", "image", "players",
-                     "icon_url", "banner_url"}
+                     "icon_url", "banner_url", "screen_urls"}
                     Updates and DLC are dropped; when the same game exists in
                     several files the first one is kept.
     """
@@ -198,6 +198,7 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
                     "players": info.get("players"),
                     "icon_url": info.get("icon_url"),
                     "banner_url": info.get("banner_url"),
+                    "screen_urls": info.get("screen_urls") or [],
                 })
         except OSError as e:
             log("WARNING", "Could not scan game folder", f"{folder}: {e}")

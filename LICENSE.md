@@ -20,12 +20,14 @@ by **Artomos**, licensed under CC BY-NC 4.0.
   comes from there. Changed or added here: the whole UI (`Ui.py`,
   `GameGrid.py`, `Glyphs.py`: one Tk canvas instead of customtkinter),
   translations (`I18n.py`), the settings file (`Settings.py`), pictures
-  (`Art.py`), the game picker, confirmation rumble, a configurable kill combo,
+  (`Art.py`), the game picker, the roulette (`Roulette.py`), save backups
+  (`Backup.py`), interface sounds (`Sound.py`), the streaming host app entry
+  (`Sunshine.py`), confirmation rumble, a configurable kill combo,
   incremental controller detection and stable keys for controllers without a
   device path, face-button bindings, and the build scripts' Eden defaults.
 * `src/Eden/`, `src/EdenLauncher.py`, `tools/`, `tests/`, the assets and the CI
   workflow were written for this project.
-* Player counts, names and eShop picture addresses in the generated
+* Player counts, names and eShop picture and screenshot addresses in the generated
   `assets/titledb.json.gz` come from [blawar/titledb](https://github.com/blawar/titledb).
 
 No warranties are given. This project is not affiliated with the Eden

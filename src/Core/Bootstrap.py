@@ -14,13 +14,26 @@ The order below is not cosmetic - each step depends on the previous one:
     profiles    discovered once, then owned by the emulator instance
 """
 
+import sys
+
 from .I18n import set_language
 from .Log import init_log, log
 from .Paths import base_dir
 from .Sdl import load_sdl
 from .Settings import LAUNCHER_SECTION, load_settings
+from . import Sunshine
 
-LAUNCHER_VERSION = "2.0.0"
+LAUNCHER_VERSION = "2.1.0"
+
+
+def _register_streaming(emulator, apps_path):
+    """Elevated helper run: add the app entry, exit 0 on success."""
+    try:
+        Sunshine.register(apps_path, emulator.name, Sunshine.cover_path(emulator.name))
+        sys.exit(0)
+    except Exception as e:
+        log("EXCEPTION", "Streaming host registration failed", e)
+        sys.exit(1)
 
 
 def run(emulator):
@@ -30,7 +43,16 @@ def run(emulator):
     Args:
         emulator (Emulator): A fresh instance from an emulator package.
     """
-    import sys
+    # Launcher-only flags never reach the emulator (and do not count as
+    # "a game was passed" for the game picker)
+    flags = [a for a in sys.argv[1:] if a in (Sunshine.REGISTER_FLAG, Sunshine.SHOW_PROMPT_FLAG)]
+    register_target = None
+    if Sunshine.REGISTER_FLAG in sys.argv:
+        position = sys.argv.index(Sunshine.REGISTER_FLAG)
+        register_target = sys.argv[position + 1] if position + 1 < len(sys.argv) else None
+        del sys.argv[position:position + 2]
+    sys.argv = [a for a in sys.argv if a not in flags]
+    emulator.show_streaming_prompt = Sunshine.SHOW_PROMPT_FLAG in flags
 
     # 0. Launcher settings and UI language, first so that even the
     #    "emulator not found" dialog is translated
@@ -49,6 +71,9 @@ def run(emulator):
     log("INFO", "Executable", emulator.exe)
     log("INFO", "Settings", emulator.settings.path)
     log("INFO", "Language", language)
+
+    if register_target:
+        _register_streaming(emulator, register_target)
 
     # 3. Version, SDL backend choice, environment (before SDL is imported)
     emulator.prepare()

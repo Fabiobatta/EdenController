@@ -355,6 +355,27 @@ class Eden(Emulator):
             command.append("-f")
         return command + ["-g", path]
 
+    def save_folders(self, game):
+        """
+        <user>/nand/user/save/0000000000000000/<profile id>/<TITLEID>, one per
+        Eden user profile (plus the all-zero "device" profile).
+        """
+        title_id = (game.get("title_id") or "").upper()
+        root = os.path.join(self.user_dir, "nand", "user", "save")
+        if not title_id:
+            return None, []
+        folders = []
+        users = os.path.join(root, "0000000000000000")
+        try:
+            for user in sorted(os.listdir(users)):
+                for name in os.listdir(os.path.join(users, user)):
+                    path = os.path.join(users, user, name)
+                    if name.upper() == title_id and os.path.isdir(path):
+                        folders.append(path)
+        except OSError:
+            pass            # no saves yet
+        return root, folders
+
     def _setting(self, key, default):
         if self.settings is None:
             return default

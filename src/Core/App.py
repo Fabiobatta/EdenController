@@ -7,9 +7,14 @@ Emulator-agnostic. Everything emulator-specific arrives through the Emulator
 instance handed in by Core/Bootstrap.py.
 
 Screens (self.mode):
-    PLAYERS   the 8 player cards - press A to take the next player slot
+    PLAYERS   the 8 player cards - press A to take the next player slot,
+              Y to resume the last game
     GAMES     the game grid - only when the emulator offers games and no game
               was passed on the command line
+    ROULETTE  "tonight we play...": a random game for everyone who joined
+
+Remembered between sessions (Settings state file): the last game, play time
+and last-played date per game, favourites and the grid's sort order.
 
 Work kept off the 16 ms loop:
     - controllers are opened once, when they appear (sync_pads)
@@ -26,12 +31,16 @@ import threading
 import time
 from tkinter import messagebox
 
+from . import Sunshine
 from .Art import ArtLibrary
+from .Backup import backup_saves
 from .I18n import t
 from .Log import log
-from .Paths import base_dir
+from .Paths import base_dir, resource_path
 from .Process import launch
+from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
+from .Sound import Sounds
 from .Ui import COLOR, COLOR_POOL, LauncherUi
 
 MAX_PLAYERS = 8
@@ -46,6 +55,14 @@ RUMBLE_GAP_MS = 170
 NAV_REPEAT_DELAY = 0.35
 NAV_REPEAT_RATE = 0.07
 STICK_THRESHOLD = 0.6
+
+# Roulette feedback on every pad
+TICK_RUMBLE = (0.25, 25)
+WIN_RUMBLE = (0.8, 450)
+
+SORT_MODES = ("recent", "az", "most")
+ALERT_GUARD_S = 0.6         # dialogs ignore buttons this long after they open
+MIN_SESSION_S = 10          # shorter runs (crash at boot...) are not play time
 
 # kill_combo button names -> button picture
 COMBO_GLYPHS = {"select": "back", "up": "dpad", "down": "dpad", "left": "dpad", "right": "dpad"}
@@ -95,6 +112,22 @@ class LauncherApp:
             sgdb_key=settings.get(LAUNCHER_SECTION, "steamgriddb_api_key", ""),
             sgdb_missing=(settings.state or {}).get("covers_not_found", []))
         self._sgdb_missing_saved = set(self.art.sgdb_missing)
+        self.sounds = Sounds(
+            enabled=settings.get_bool(LAUNCHER_SECTION, "sounds", True),
+            volume=_int(settings.get(LAUNCHER_SECTION, "sound_volume", "70"), 70),
+            override_dir=os.path.join(base_dir(), "sounds"))
+        self.backup_keep = _int(settings.get(LAUNCHER_SECTION, "backup_keep", "10"), 10) \
+            if settings.get_bool(LAUNCHER_SECTION, "backup_saves", True) else 0
+        self.backup_dir = os.path.join(base_dir(), os.path.expandvars(os.path.expanduser(
+            settings.get(LAUNCHER_SECTION, "backup_dir", "saves_backup"))))
+        self.ui.slideshow_seconds = _int(settings.get(LAUNCHER_SECTION, "slideshow_seconds", "8"), 8)
+        self.ui.slides_wanted = self.art.want_screens
+        self.roulette = Roulette(self.ui, on_tick=self.on_roulette_tick, on_done=self.on_roulette_done)
+        state = settings.state or {}
+        self.sort_mode = state.get("sort") if state.get("sort") in SORT_MODES else SORT_MODES[0]
+        self.session = None                 # {"key", "start"} while a picked game runs
+        self._stream_apps = None            # apps.json offered in the "add to Moonlight" dialog
+        self._stream_result = None          # elevated registration outcome (thread -> loop)
 
         # Keyboard shortcuts for accessibility
         self.root.bind("<Return>", lambda e: self.handle_enter_key())
@@ -137,6 +170,7 @@ class LauncherApp:
             threading.Thread(target=self._scan_games, daemon=True).start()
 
         self.update_loop()
+        self.root.after(1200, self.offer_streaming)
 
     @staticmethod
     def _combo_names(text):
@@ -156,6 +190,12 @@ class LauncherApp:
             self.quit()
         elif self.ui.alert_mode == "KILL_CONFIRM":
             self.kill_and_quit()
+        elif self.ui.alert_mode == "STREAM":
+            self.ui.close_alert()
+            self.register_streaming()
+        elif self.mode == "ROULETTE":
+            if not self.roulette.spinning:
+                self.launch_game(self.roulette.chosen)
         elif self.mode == "GAMES" and not self.process:
             self.launch_selected_game()
         elif not self.process:
@@ -165,6 +205,8 @@ class LauncherApp:
         """Handle Escape key press (cancel/back action)."""
         if self.ui.alert_mode:
             self.ui.close_alert()
+        elif self.mode == "ROULETTE":
+            self.close_roulette()
         elif self.mode == "GAMES":
             self.show_players()
         else:
@@ -182,6 +224,7 @@ class LauncherApp:
         if self.process:
             self.process.kill()
             log("INFO", f"{self.emu.name} killed - exiting to desktop")
+        self.end_session()
         self.emu.cleanup()
         self.root.quit()
         sys.exit()
@@ -197,6 +240,7 @@ class LauncherApp:
             self.process.kill()
             log("INFO", f"{self.emu.name} killed - returning to launcher")
         self.process = None
+        self.end_session()
 
         # Reset launcher state for fresh assignment
         self.assignments = []
@@ -209,6 +253,7 @@ class LauncherApp:
         if self.process.poll() is None:
             return False
         self.process = None
+        self.end_session()
         self.root.deiconify()
         if self.returning_to_launcher:
             # User chose "Launcher" from the kill menu - fresh assignment
@@ -319,6 +364,8 @@ class LauncherApp:
         self.refresh_grid()
         if self.mode == "GAMES":
             self.show_games()                   # badges depend on the number of players
+        elif self.mode == "PLAYERS":
+            self.update_hints()
 
     def kill_combo_pressed(self):
         sdl = self.sdl
@@ -366,8 +413,9 @@ class LauncherApp:
         # ====================================================================
         for game in self.art.take_finished():
             self.ui.games_art_changed(game)
-            if self.mode == "PLAYERS" and game is self._last_game():
-                self.ui.set_background(self._art_of(game))
+        if self._stream_result is not None:
+            ok, self._stream_result = self._stream_result, None
+            self.on_streaming_registered("added" if ok else None)
         if self.art.sgdb_missing != self._sgdb_missing_saved:
             self._sgdb_missing_saved = set(self.art.sgdb_missing)
             self.emu.settings.save_state(covers_not_found=sorted(self._sgdb_missing_saved))
@@ -386,6 +434,8 @@ class LauncherApp:
                     self.on_alert_button(button)
                 elif self.process:
                     continue    # Ignore input while a game runs (no mid-game reassignment)
+                elif self.mode == "ROULETTE":
+                    self.on_roulette_button(button)
                 elif self.mode == "GAMES":
                     self.on_games_button(button)
                 else:
@@ -412,7 +462,21 @@ class LauncherApp:
     def on_alert_button(self, button):
         sdl = self.sdl
         mode = self.ui.alert_mode
-        if mode == "KILL_CONFIRM":
+        if time.monotonic() - self.ui.alert_since < ALERT_GUARD_S:
+            return      # a press meant for the screen underneath (e.g. A to join)
+        if mode == "STREAM":
+            if button == sdl.SDL_CONTROLLER_BUTTON_A:
+                self.ui.close_alert()
+                self.register_streaming()
+            elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
+                self.ui.close_alert()
+                self.sounds.play("back")
+                self.emu.settings.save_state(streaming_prompt="never")
+                log("INFO", "Streaming host prompt disabled")
+            elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+                self.ui.close_alert()
+                self.sounds.play("back")
+        elif mode == "KILL_CONFIRM":
             if button == sdl.SDL_CONTROLLER_BUTTON_A:
                 self.kill_and_restart()             # Return to launcher
             elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
@@ -428,18 +492,37 @@ class LauncherApp:
                 self.quit()
         elif button == sdl.SDL_CONTROLLER_BUTTON_B:
             self.ui.close_alert()
+            self.sounds.play("back")
 
     def on_games_button(self, button):
         sdl = self.sdl
         if button == sdl.SDL_CONTROLLER_BUTTON_A:
             self.launch_selected_game()
         elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+            self.sounds.play("back")
             self.show_players()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_X:
+            self.start_roulette()
         elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
             self.toggle_filter()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_START:
+            self.cycle_sort()
         elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
-            self.ui.show_alert("EXIT")
+            self.toggle_favorite()
         # D-pad, stick and LB/RB are polled in poll_game_navigation()
+
+    def on_roulette_button(self, button):
+        sdl = self.sdl
+        if self.roulette.spinning:
+            if button == sdl.SDL_CONTROLLER_BUTTON_B:
+                self.close_roulette()
+            return
+        if button == sdl.SDL_CONTROLLER_BUTTON_A:
+            self.launch_game(self.roulette.chosen)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_X:
+            self.start_roulette(exclude=self.roulette.chosen)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+            self.close_roulette()
 
     def on_players_button(self, button, which):
         sdl = self.sdl
@@ -453,9 +536,12 @@ class LauncherApp:
         elif button == sdl.SDL_CONTROLLER_BUTTON_B:
             if editing:
                 self.assignments[slot_idx]["is_editing"] = False
+                self.sounds.play("back")
                 self.refresh_grid()
             else:
                 self.remove_player(which)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
+            self.resume_last_game(which)
         elif button == sdl.SDL_CONTROLLER_BUTTON_X:
             self.toggle_profile_edit(which)         # Enter/exit profile selection
         elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
@@ -465,6 +551,7 @@ class LauncherApp:
         elif button == sdl.SDL_CONTROLLER_BUTTON_START:
             self.check_launch()                     # Launch / choose a game
         elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
+            self.sounds.play("toggle")
             self.ui.show_alert("EXIT")
 
     # ========================================================================
@@ -491,31 +578,42 @@ class LauncherApp:
         self.refresh_grid()
         self.ui.flash_slot(player - 1)
         self.update_hints()
-        self.rumble_player_number(instance_id, player)
+        self.confirm_player_number(instance_id, player)
 
-    def rumble_player_number(self, instance_id, count):
+    def confirm_player_number(self, instance_id, count):
         """
         Pulse the controller once per player number (P1 = 1 pulse, P2 = 2 ...),
         so whoever holds it knows their slot without looking at the screen.
+        Each pulse has a rising blip; the last one a small chime.
         """
-        if not self.rumble_enabled:
-            return
-
-        def pulse():
+        def pulse(n):
+            if self.process:
+                return
+            self.sounds.play("join" if n == count else "blip", n)
             # Looked up at pulse time: a launch may have closed the handle since
             pad = self.pads.get(instance_id)
-            if pad and not self.process:
+            if pad and self.rumble_enabled:
                 self.sdl.rumble(pad["ctrl"], RUMBLE_STRENGTH, RUMBLE_PULSE_MS)
 
         period = RUMBLE_PULSE_MS + RUMBLE_GAP_MS
         for n in range(count):
-            self.root.after(n * period, pulse)
+            self.root.after(n * period, pulse, n + 1)
+
+    def rumble_all(self, strength, duration_ms):
+        if not self.rumble_enabled:
+            return
+        for pad in self.pads.values():
+            try:
+                self.sdl.rumble(pad["ctrl"], strength, duration_ms)
+            except Exception:
+                pass
 
     def remove_player(self, instance_id):
         slot_idx = self.find_slot_by_instance(instance_id)
         if slot_idx != -1:
             removed = self.assignments.pop(slot_idx)
             log("INFO", f"Removed {removed['name']} from Player {slot_idx + 1}")
+            self.sounds.play("leave")
             self.refresh_grid()
             self.update_hints()
 
@@ -541,6 +639,7 @@ class LauncherApp:
             return
         assignment = self.assignments[slot_idx]
         assignment["is_editing"] = not assignment["is_editing"]
+        self.sounds.play("toggle" if assignment["is_editing"] else "select")
         if not assignment["is_editing"]:
             log("INFO", f"Player {slot_idx + 1} profile confirmed -> {assignment['profile_key']}")
         self.refresh_grid()
@@ -555,6 +654,7 @@ class LauncherApp:
             return
         current = self.profile_keys.index(assignment["profile_key"])
         assignment["profile_key"] = self.profile_keys[(current + direction) % len(self.profile_keys)]
+        self.sounds.play("move")
         self.hid_profiles[assignment["path"]] = assignment["profile_key"]
         self.refresh_grid()
 
@@ -581,12 +681,16 @@ class LauncherApp:
 
     def update_hints(self):
         """Footer button hints for the current screen."""
-        if self.mode == "GAMES":
-            hints = [("dpad", t("hint_browse")), (("lb", "rb"), t("hint_page"))]
+        if self.mode == "ROULETTE":
+            hints = []                          # the roulette draws its own
+        elif self.mode == "GAMES":
+            hints = [(("lb", "rb"), t("hint_page")), ("x", t("hint_surprise"))]
             joined = len(self.assignments)
             if joined >= 2:
                 hints.append(("y", t("hint_filter_off") if self.filter_on else t("hint_filter_on", n=joined)))
-            hints += [("a", t("hint_play")), ("b", t("hint_back"))]
+            hints += [("start", t("hint_sort", mode=t("sort_" + self.sort_mode))),
+                      ("back", t("hint_favorite")),
+                      ("a", t("hint_play")), ("b", t("hint_back"))]
         else:
             if self.has_game_args:
                 start = t("hint_launch_game")
@@ -594,7 +698,12 @@ class LauncherApp:
                 start = t("hint_choose")
             else:
                 start = t("hint_launch", name=self.emu.name)
-            hints = [("a", t("hint_join")), ("start", start), ("back", t("hint_quit"))]
+            hints = [("a", t("hint_join"))]
+            last = self._last_game() if self.picker else None
+            if last:
+                title = last["title"] if len(last["title"]) <= 26 else last["title"][:25].rstrip() + "…"
+                hints.append(("y", t("hint_resume", title=title)))
+            hints += [("start", start), ("back", t("hint_quit"))]
         self.ui.set_hints(hints)
 
     # ========================================================================
@@ -622,14 +731,15 @@ class LauncherApp:
         log("INFO", "Game picker", f"{len(games)} game(s)")
         if not games:
             self.picker = False                 # nothing to pick: START starts the emulator
-            self.update_hints()
         else:
-            self.art.start(games)               # fetch missing pictures in the background
+            self.order_games()
+            self.art.start(self.games)          # fetch missing pictures in the background
             last = self._last_game()
             if last:
-                self.game_index = games.index(last)
+                self.game_index = self.games.index(last)
                 if self.mode == "PLAYERS":
-                    self.ui.set_background(self._art_of(last))
+                    self.ui.set_backdrop(last)
+        self.update_hints()
         if self.waiting_for_games:
             self.waiting_for_games = False
             if games:
@@ -641,9 +751,135 @@ class LauncherApp:
         last = (self.emu.settings.state or {}).get("last_game")
         return next((g for g in self.games if g["path"] == last), None)
 
+    # ========================================================================
+    # PLAY TIME, FAVOURITES, SORT ORDER
+    # ========================================================================
     @staticmethod
-    def _art_of(game):
-        return game.get("background") or game.get("cover") or game.get("image")
+    def game_key(game):
+        """Identity of a game in the state file: its title ID, else its path."""
+        return game.get("title_id") or game["path"]
+
+    def order_games(self):
+        """
+        Copy play time / favourite flags from the state onto the games and
+        sort them: favourites first, then by the chosen order.
+        """
+        state = self.emu.settings.state or {}
+        played = state.get("play") or {}
+        favorites = set(state.get("favorites") or ())
+        for game in self.games:
+            key = self.game_key(game)
+            seconds, last = (list(played.get(key) or []) + [0, 0])[:2]
+            game["playtime"], game["last_played"] = seconds, last
+            game["favorite"] = key in favorites
+        by_title = lambda g: g["title"].lower()     # noqa: E731
+        orders = {
+            "recent": lambda g: (not g["favorite"], -(g["last_played"] or 0), by_title(g)),
+            "az": lambda g: (not g["favorite"], by_title(g)),
+            "most": lambda g: (not g["favorite"], -(g["playtime"] or 0), by_title(g)),
+        }
+        self.games = sorted(self.games, key=orders[self.sort_mode])
+
+    def start_session(self, game):
+        key = self.game_key(game)
+        self.session = {"key": key, "start": time.monotonic(), "game": game}
+        played = dict(self.emu.settings.state.get("play") or {})
+        seconds = (list(played.get(key) or []) + [0])[0]
+        played[key] = [seconds, int(time.time())]
+        self.emu.settings.save_state(last_game=game["path"], play=played)
+
+    def end_session(self):
+        """The game closed (or was killed): add its play time."""
+        session, self.session = self.session, None
+        if not session:
+            return
+        elapsed = int(time.monotonic() - session["start"])
+        if elapsed < MIN_SESSION_S:
+            return
+        played = dict(self.emu.settings.state.get("play") or {})
+        seconds, last = (list(played.get(session["key"]) or []) + [0, int(time.time())])[:2]
+        played[session["key"]] = [seconds + elapsed, last]
+        self.emu.settings.save_state(play=played)
+        log("INFO", "Play time", f"{session['key']}: +{elapsed // 60} min")
+        if self.games:
+            self.order_games()                  # "recent" / "most played" may have changed
+            if session["game"] in self.games:
+                self.game_index = self.games.index(session["game"])
+            self.shown_games = []               # rebuilt by show_games(), selection kept
+
+    def toggle_favorite(self):
+        if not self.shown_games:
+            return
+        game = self.shown_games[self.game_index]
+        key = self.game_key(game)
+        favorites = list(self.emu.settings.state.get("favorites") or [])
+        if key in favorites:
+            favorites.remove(key)
+        else:
+            favorites.append(key)
+        self.emu.settings.save_state(favorites=favorites)
+        self.sounds.play("toggle")
+        self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["ACCENT"])
+        self._reorder_keeping(game)
+
+    def cycle_sort(self):
+        self.sort_mode = SORT_MODES[(SORT_MODES.index(self.sort_mode) + 1) % len(SORT_MODES)]
+        self.emu.settings.save_state(sort=self.sort_mode)
+        self.sounds.play("toggle")
+        self.ui.show_toast(t("hint_sort", mode=t("sort_" + self.sort_mode)), COLOR["ACCENT"])
+        self._reorder_keeping(self.shown_games[self.game_index] if self.shown_games else None)
+
+    def _reorder_keeping(self, game):
+        """Re-sort the grid, keeping `game` selected."""
+        self.order_games()
+        self.shown_games = []
+        self._apply_filter()
+        if game in self.shown_games:
+            self.game_index = self.shown_games.index(game)
+        self.show_games()
+
+    # ========================================================================
+    # ROULETTE
+    # ========================================================================
+    def start_roulette(self, exclude=None):
+        joined = len(self.assignments)
+        candidates = pick_candidates(self.games, joined)
+        if not candidates:
+            self.sounds.play("error")
+            self.ui.show_toast(t("roulette_none", n=joined))
+            return
+        pool = [g for g in candidates if g is not exclude] or candidates
+        chosen = random.choice(pool)
+        subtitle = t("roulette_pool", n=len(candidates), p=joined) if joined >= 2 else \
+            t("roulette_pool_all", n=len(candidates))
+        log("INFO", "Roulette", f"{chosen['title']} (from {len(candidates)})")
+        self.mode = "ROULETTE"
+        self.nav_direction = None
+        self.update_hints()
+        self.sounds.play("select")
+        self.roulette.start(candidates, chosen, subtitle)
+
+    def on_roulette_tick(self):
+        self.sounds.play("tick")
+        self.rumble_all(*TICK_RUMBLE)
+
+    def on_roulette_done(self, game):
+        self.sounds.play("win")
+        self.rumble_all(*WIN_RUMBLE)
+        self.ui.set_backdrop(game)
+
+    def close_roulette(self):
+        """Back to the grid, on the drawn game if the spin finished."""
+        chosen = None if self.roulette.spinning else self.roulette.chosen
+        self.roulette.close()
+        self.sounds.play("back")
+        self.mode = "GAMES"
+        if chosen is not None:
+            if chosen not in self.shown_games:
+                self.filter_on = False
+                self.shown_games = self.games
+            self.game_index = self.shown_games.index(chosen)
+        self.show_games()
 
     # ========================================================================
     # GAME GRID
@@ -684,7 +920,7 @@ class LauncherApp:
         self.ui.hide_games()
         last = self._last_game()
         if last:
-            self.ui.set_background(self._art_of(last))
+            self.ui.set_backdrop(last)
         self.refresh_grid()
         self.update_hints()
 
@@ -692,6 +928,7 @@ class LauncherApp:
         if len(self.assignments) < 2 or not self.games_loaded:
             return
         self.filter_on = not self.filter_on
+        self.sounds.play("toggle")
         self.show_games()
 
     def move_game_selection(self, action):
@@ -724,6 +961,7 @@ class LauncherApp:
             index = min(count - 1, index + self.ui.games_page())
         if index != self.game_index:
             self.game_index = index
+            self.sounds.play("move")
             joined = len(self.assignments)
             self.ui.show_games(self.shown_games, index, players=joined,
                                filter_players=joined if self.filter_on else 0)
@@ -769,12 +1007,87 @@ class LauncherApp:
             self.move_game_selection(action)
 
     def launch_selected_game(self):
-        if not self.shown_games:
-            return
-        game = self.shown_games[self.game_index]
+        if self.shown_games:
+            self.launch_game(self.shown_games[self.game_index])
+
+    def launch_game(self, game):
+        """Back up the saves, remember the game, start it."""
         log("INFO", "Game selected", game["path"])
-        self.emu.settings.save_state(last_game=game["path"])
+        self.roulette.close()
+        self.sounds.play("launch")
+        if self.backup_keep > 0:
+            root, folders = self.emu.save_folders(game)
+            backup_saves(game, root, folders, self.backup_dir, self.backup_keep)
+        self.start_session(game)
+        self.mode = "GAMES"
         self.force_launch(self.emu.game_command(game["path"]))
+
+    def resume_last_game(self, instance_id):
+        """Y on the player cards: straight back into the last game."""
+        last = self._last_game() if self.picker and self.games_loaded else None
+        if not last:
+            return
+        if not self.assignments:
+            self.assign_player(instance_id)     # whoever pressed Y plays
+        self.launch_game(last)
+
+    # ========================================================================
+    # STREAMING HOST ("add to Moonlight")
+    # ========================================================================
+    def offer_streaming(self):
+        """Ask once per start to add the launcher to Sunshine/Vibeshine, until it is there or refused."""
+        settings = self.emu.settings
+        forced = getattr(self.emu, "show_streaming_prompt", False)
+        if self.process or self.ui.alert_mode or self.has_game_args:
+            return
+        if self.assignments and not forced:
+            return      # players are joining: do not put a dialog under their A presses
+        if not forced and (not settings.get_bool(LAUNCHER_SECTION, "moonlight_prompt", True)
+                           or (settings.state or {}).get("streaming_prompt") == "never"):
+            return
+        path = Sunshine.find_apps_file(settings.get(LAUNCHER_SECTION, "apps_json", "") or None)
+        if not path:
+            log("INFO", "No Sunshine/Vibeshine app list found")
+            return
+        if Sunshine.is_registered(path):
+            if forced:
+                self.ui.show_toast(t("toast_stream_same"), COLOR["OK"])
+            return
+        self._stream_apps = path
+        self.sounds.play("toggle")
+        self.ui.show_alert("STREAM")
+
+    def register_streaming(self):
+        path = self._stream_apps
+        if not path:
+            return
+        self.sounds.play("select")
+        cover = Sunshine.cover_path(self.emu.name)
+        try:
+            Sunshine.make_cover(cover, resource_path(os.path.join("assets", f"{self.emu.name}LauncherPNG.png")),
+                                self.emu.name)
+        except Exception as e:
+            log("WARNING", "Could not write the Moonlight cover", e)
+        try:
+            self.on_streaming_registered(Sunshine.register(path, self.emu.name, cover))
+        except PermissionError:
+            if sys.platform != "win32":
+                self.on_streaming_registered(None)
+                return
+            log("INFO", "apps.json needs administrator rights - asking Windows")
+            Sunshine.register_elevated(path, lambda ok: setattr(self, "_stream_result", ok))
+        except Exception as e:
+            log("EXCEPTION", "Could not update the streaming host app list", e)
+            self.on_streaming_registered(None)
+
+    def on_streaming_registered(self, result):
+        if result in ("added", "updated"):
+            self.ui.show_toast(t("toast_stream_added"), COLOR["OK"])
+        elif result == "unchanged":
+            self.ui.show_toast(t("toast_stream_same"), COLOR["OK"])
+        else:
+            self.sounds.play("error")
+            self.ui.show_toast(t("toast_stream_failed"))
 
     # ========================================================================
     # CONFIG GENERATION & LAUNCH
@@ -877,3 +1190,10 @@ class LauncherApp:
                 t("error_missing_text", path=self.emu.exe)
             )
             sys.exit()
+
+
+def _int(text, default):
+    try:
+        return int(str(text).strip())
+    except ValueError:
+        return default

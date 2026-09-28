@@ -14,8 +14,10 @@ Emulator packages add their own strings with register(); a key missing in
 the current language falls back to English, then to the key itself.
 """
 
+import datetime
 import locale
 import sys
+import time
 
 DEFAULT_LANGUAGE = "en"
 
@@ -64,6 +66,37 @@ STRINGS = {
         "alert_kill_desktop":   "Desktop",
         "alert_kill_cancel":    "Cancel",
         # Toasts
+        "hint_surprise":        "Surprise me",
+        "hint_sort":            "Sort: {mode}",
+        "hint_favorite":        "Favourite",
+        "hint_resume":          "Resume {title}",
+        "sort_recent":          "Recent",
+        "sort_az":              "A–Z",
+        "sort_most":            "Most played",
+        "toast_favorite_on":    "Added to favourites",
+        "toast_favorite_off":   "Removed from favourites",
+        # Play time
+        "time_hours":           "{h} h {m} min",
+        "time_minutes":         "{m} min",
+        "last_today":           "today",
+        "last_yesterday":       "yesterday",
+        "last_days":            "{n} days ago",
+        # Roulette
+        "roulette_title":       "Tonight we play…",
+        "roulette_pool":        "Drawing from {n} games for {p} players",
+        "roulette_pool_all":    "Drawing from {n} games",
+        "roulette_hints":       "[a] Play      [x] Spin again      [b] Back",
+        "roulette_none":        "No game for {n} players",
+        # Streaming host
+        "alert_stream_title":   "ADD TO MOONLIGHT?",
+        "alert_stream_text":    "{name} will show up in Moonlight's app list with its own cover "
+                                "(Sunshine / Vibeshine on this PC).",
+        "alert_stream_add":     "Add",
+        "alert_stream_later":   "Not now",
+        "alert_stream_never":   "Never",
+        "toast_stream_added":   "Added! Not in Moonlight yet? Restart Vibeshine",
+        "toast_stream_same":    "Already in Moonlight",
+        "toast_stream_failed":  "Could not change the app list (see the log)",
         "toast_disconnected":   "{name} disconnected",
         # Error dialogs
         "error_launch_title":   "Launch Error",
@@ -110,6 +143,34 @@ STRINGS = {
         "alert_kill_launcher":  "Launcher",
         "alert_kill_desktop":   "Desktop",
         "alert_kill_cancel":    "Annulla",
+        "hint_surprise":        "Sorpresa",
+        "hint_sort":            "Ordina: {mode}",
+        "hint_favorite":        "Preferito",
+        "hint_resume":          "Riprendi {title}",
+        "sort_recent":          "Recenti",
+        "sort_az":              "A–Z",
+        "sort_most":            "Più giocati",
+        "toast_favorite_on":    "Aggiunto ai preferiti",
+        "toast_favorite_off":   "Tolto dai preferiti",
+        "time_hours":           "{h} h {m} min",
+        "time_minutes":         "{m} min",
+        "last_today":           "oggi",
+        "last_yesterday":       "ieri",
+        "last_days":            "{n} giorni fa",
+        "roulette_title":       "Stasera si gioca a…",
+        "roulette_pool":        "Estrazione tra {n} giochi per {p} giocatori",
+        "roulette_pool_all":    "Estrazione tra {n} giochi",
+        "roulette_hints":       "[a] Gioca      [x] Ritira      [b] Indietro",
+        "roulette_none":        "Nessun gioco per {n} giocatori",
+        "alert_stream_title":   "AGGIUNGERE A MOONLIGHT?",
+        "alert_stream_text":    "{name} comparirà tra le app di Moonlight con la sua copertina "
+                                "(Sunshine / Vibeshine su questo PC).",
+        "alert_stream_add":     "Aggiungi",
+        "alert_stream_later":   "Non ora",
+        "alert_stream_never":   "Mai",
+        "toast_stream_added":   "Aggiunto! Se non lo vedi in Moonlight, riavvia Vibeshine",
+        "toast_stream_same":    "È già in Moonlight",
+        "toast_stream_failed":  "Impossibile modificare la lista app (vedi il log)",
         "toast_disconnected":   "{name} scollegato",
         "error_launch_title":   "Errore di avvio",
         "error_launch_text":    "Impossibile avviare {name}.\n{error}",
@@ -163,3 +224,24 @@ def t(key, **values):
 def players_label(count):
     """ "1 giocatore" / "1–4 giocatori" for a game's max player count."""
     return t("players_one") if count <= 1 else t("players_range", n=count)
+
+
+def playtime_label(seconds):
+    """ "12 h 5 min" / "40 min"."""
+    minutes = int(seconds) // 60
+    if minutes >= 60:
+        return t("time_hours", h=minutes // 60, m=minutes % 60)
+    return t("time_minutes", m=minutes)
+
+
+def last_played_label(epoch, now=None):
+    """ "oggi" / "ieri" / "3 giorni fa" / "12/05/2026"."""
+    today = datetime.date.fromtimestamp(time.time() if now is None else now)
+    days = (today - datetime.date.fromtimestamp(epoch)).days
+    if days <= 0:
+        return t("last_today")
+    if days == 1:
+        return t("last_yesterday")
+    if days < 30:
+        return t("last_days", n=days)
+    return time.strftime("%d/%m/%Y", time.localtime(epoch))

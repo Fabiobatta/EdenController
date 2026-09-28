@@ -38,6 +38,33 @@ language = auto
 ; (1 impulso = Giocatore 1, 2 impulsi = Giocatore 2, ...): true / false
 rumble = true
 
+; Suoni dell'interfaccia (ingresso giocatori, conferme, roulette): true / false
+sounds = true
+; Volume dei suoni, da 0 a 100
+sound_volume = 70
+; Per cambiare un suono metti un file .wav con lo stesso nome nella cartella
+; "sounds" accanto al launcher (join1..join8, blip1..blip8, select, back,
+; move, toggle, launch, tick, win, leave, error)
+
+; Backup dei salvataggi prima di avviare un gioco dalla lista: true / false
+backup_saves = true
+; Cartella dei backup (relativa al launcher, oppure un percorso completo,
+; es. una cartella di OneDrive: %USERPROFILE%\OneDrive\Salvataggi Eden)
+backup_dir = saves_backup
+; Quanti backup tenere per ogni gioco (i piu' vecchi vengono cancellati)
+backup_keep = 10
+
+; Sfondo animato: ogni quanti secondi passare allo screenshot successivo
+; del gioco selezionato (scaricati dall'eShop). 0 = sfondo fisso
+slideshow_seconds = 8
+
+; All'avvio, proponi di aggiungere il launcher alle app di Moonlight
+; (Sunshine / Vibeshine installato su questo PC): true / false
+moonlight_prompt = true
+; Percorso di apps.json, solo se Sunshine/Vibeshine e' in una cartella
+; diversa da quella standard
+apps_json =
+
 ; Combinazione da tenere premuta durante il gioco per chiudere l'emulatore.
 ; Tasti: a b x y back start lb rb ls rs up down left right, uniti da '+'
 kill_combo = {DEFAULT_KILL_COMBO}

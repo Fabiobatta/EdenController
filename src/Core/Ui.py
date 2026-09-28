@@ -8,6 +8,7 @@ Layers, bottom to top (canvas tags):
     games     the game grid (Core/GameGrid) }
     header    title, clock, connected controllers
     footer    button hints ("[a] Play  [b] Back")
+    roulette  the "tonight we play" spinner (Core/Roulette.py)
     toast     transient message
     alert     modal dialog
 
@@ -21,6 +22,7 @@ import ctypes
 import os
 import re
 import sys
+import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -50,7 +52,11 @@ MARGIN = 64
 FOOTER_H = 64
 ART_MAX = 720           # art is kept in memory at most this big
 ART_CACHE = 48          # pictures kept decoded
-BG_CACHE = 16           # blurred backgrounds kept
+BG_CACHE = 8            # blurred backgrounds kept (screen-sized each)
+BG_SAMPLE_W = 128       # backdrop detail: the art is shrunk to this width...
+BG_BLUR = 1.8           # ...blurred, and stretched back to the screen
+FADE_STEPS = 6          # slideshow cross-fade frames
+FADE_FRAME_MS = 60
 
 COLOR = {
     "BG": "#0B0D12",
@@ -74,6 +80,42 @@ COLOR_POOL = [
 _TOKEN = re.compile(r"\[(\w+)\]")
 
 
+def art_of(game):
+    """The picture a game's backdrop starts from, or None."""
+    if not game:
+        return None
+    return game.get("background") or game.get("cover") or game.get("image")
+
+
+def load_picture(path, limit=ART_MAX):
+    """Decoded picture (RGB, at most `limit` px) or None. Thread-safe (no cache)."""
+    if not path:
+        return None
+    try:
+        with Image.open(path) as image:
+            image.draft("RGB", (limit, limit))              # fast JPEG downscale
+            picture = image.convert("RGB")
+            picture.thumbnail((limit, limit), Image.LANCZOS)
+        return picture
+    except Exception:
+        return None
+
+
+def compose_background(art, width, height, shade):
+    """Screen-sized backdrop: the art blurred and shaded (default glow without art)."""
+    if art is not None:
+        sample = BG_SAMPLE_W
+        small = Glyphs.cover_crop(art, sample, max(1, round(sample * height / width)))
+        small = small.point(lambda v: v * 4 // 5)           # bright screenshots must not wash out the UI
+        image = small.filter(ImageFilter.GaussianBlur(BG_BLUR)).resize((width, height), Image.BILINEAR)
+    else:
+        # Default backdrop: deep blue with a soft teal glow
+        image = Image.new("RGB", (64, 36), (13, 17, 30))
+        ImageDraw.Draw(image).ellipse((-10, -18, 44, 30), fill=(24, 70, 92))
+        image = image.filter(ImageFilter.GaussianBlur(9)).resize((width, height), Image.BILINEAR)
+    return ImageChops.multiply(image, shade)
+
+
 class LauncherUi:
     """
     Owns the canvas. Core/App.py drives it through:
@@ -81,7 +123,7 @@ class LauncherUi:
         refresh(slots) / flash_slot(i)        player cards
         set_hints([...]) / set_tip(markup)    footer hints, tip line
         set_pads(n)                           connected controllers
-        set_background(path, delay_ms)        blurred backdrop
+        set_backdrop(game, delay_ms)          blurred backdrop / slideshow
         show_games(...) / show_games_loading() / hide_games()
         show_toast(msg, color)
         show_alert(mode) / close_alert() / alert_mode
@@ -106,6 +148,7 @@ class LauncherUi:
         self.width = self.height = 0
         self.scale = 1.0
         self.alert_mode = None
+        self.alert_since = 0.0
         self.view = "players"
         self.slots = []
         self.flashing = set()
@@ -118,7 +161,16 @@ class LauncherUi:
         self._art = OrderedDict()
         self._backgrounds = OrderedDict()
         self._bg_wanted = None
+        self._bg_owner = None
         self._bg_job = None
+        self._slides = []
+        self._slide_index = 0
+        self._slide_job = None
+        self._fade_generation = 0
+        self._fade_photo = None
+        self.slideshow_seconds = 0          # 0 = no slideshow
+        self.slides_wanted = None           # callback(game): the slideshow could use screenshots
+        self.busy_overlay = False           # something animated on top (roulette): pause the slideshow
         self._toast_job = None
         self._toast = None
 
@@ -180,13 +232,7 @@ class LauncherUi:
         if path in self._art:
             self._art.move_to_end(path)
             return self._art[path]
-        try:
-            with Image.open(path) as image:
-                image.draft("RGB", (ART_MAX, ART_MAX))      # fast JPEG downscale
-                art = image.convert("RGB")
-                art.thumbnail((ART_MAX, ART_MAX), Image.LANCZOS)
-        except Exception:
-            art = None
+        art = load_picture(path)
         self._art[path] = art
         if len(self._art) > ART_CACHE:
             self._art.popitem(last=False)
@@ -263,15 +309,27 @@ class LauncherUi:
             self.grid.draw(full=True)
 
     def _raise_overlays(self):
-        for tag in ("header", "footer", "toast", "alert"):
+        for tag in ("header", "footer", "roulette", "toast", "alert"):
             self.canvas.tag_raise(tag)
 
     # ========================================================================
     # BACKGROUND
     # ========================================================================
-    def set_background(self, path, delay_ms=0):
-        """Blurred backdrop from `path` (None: default); delay_ms debounces fast scrolling."""
-        self._bg_wanted = path
+    def set_backdrop(self, game, delay_ms=0):
+        """
+        Blurred art of `game` behind everything (None: the default backdrop).
+        delay_ms debounces fast scrolling. With screenshots (game["screens"])
+        the backdrop becomes a slow slideshow.
+        """
+        path = art_of(game)
+        slides = [p for p in [path] + list((game or {}).get("screens") or ()) if p]
+        if game is self._bg_owner and path == self._bg_wanted:
+            if slides != self._slides:              # screenshots arrived
+                self._slides = slides
+            return
+        self._bg_owner, self._bg_wanted = game, path
+        self._slides, self._slide_index = slides, 0
+        self._fade_generation += 1                  # abandon a crossfade in progress
         if self._bg_job:
             self.root.after_cancel(self._bg_job)
             self._bg_job = None
@@ -299,32 +357,98 @@ class LauncherUi:
         if key in self._backgrounds:
             self._backgrounds.move_to_end(key)
             return self._backgrounds[key]
-        art = self.load_art(path)
-        if art is not None:
-            small = Glyphs.cover_crop(art, 96, max(1, round(96 * self.height / self.width)))
-            image = small.filter(ImageFilter.GaussianBlur(2.2)).resize((self.width, self.height), Image.BILINEAR)
-        else:
-            # Default backdrop: deep blue with a soft teal glow
-            image = Image.new("RGB", (64, 36), (13, 17, 30))
-            ImageDraw.Draw(image).ellipse((-10, -18, 44, 30), fill=(24, 70, 92))
-            image = image.filter(ImageFilter.GaussianBlur(9)).resize((self.width, self.height), Image.BILINEAR)
-        photo = ImageTk.PhotoImage(ImageChops.multiply(image, self._shade()))
+        image = compose_background(self.load_art(path), self.width, self.height, self._shade())
+        return self._keep_background(key, ImageTk.PhotoImage(image))
+
+    def _keep_background(self, key, photo):
         self._backgrounds[key] = photo
         if len(self._backgrounds) > BG_CACHE:
             self._backgrounds.popitem(last=False)
         return photo
 
-    def _apply_background(self):
-        self._bg_job = None
-        if not self.width:
-            return
-        photo = self._background_photo(self._bg_wanted)
+    def _show_background(self, photo):
         item = self.canvas.find_withtag("bg")
         if item:
             self.canvas.itemconfigure(item[0], image=photo)
         else:
             self.canvas.create_image(0, 0, image=photo, anchor="nw", tags="bg")
-        self.canvas.tag_lower("bg")
+            self.canvas.tag_lower("bg")
+
+    def _apply_background(self):
+        self._bg_job = None
+        if not self.width:
+            return
+        path = self._slides[self._slide_index] if self._slides else self._bg_wanted
+        self._show_background(self._background_photo(path))
+        self._schedule_slide()
+
+    # ========================================================================
+    # SLIDESHOW
+    # A new picture every slideshow_seconds, cross-faded in FADE_STEPS
+    # frames. The pictures and the fade frames are made on a worker thread;
+    # the UI thread only turns finished frames into PhotoImages. Paused while
+    # a game runs (window hidden), a dialog is open or the roulette spins.
+    # ========================================================================
+    def _schedule_slide(self):
+        if self._slide_job:
+            self.root.after_cancel(self._slide_job)
+            self._slide_job = None
+        if self.slideshow_seconds > 0:
+            self._slide_job = self.root.after(int(self.slideshow_seconds * 1000), self._next_slide)
+
+    def _slideshow_paused(self):
+        try:
+            hidden = self.root.state() == "withdrawn"
+        except tk.TclError:
+            hidden = True
+        return hidden or bool(self.alert_mode) or self.busy_overlay
+
+    def _next_slide(self):
+        self._slide_job = None
+        if self._bg_owner is not None and self.slides_wanted:
+            self.slides_wanted(self._bg_owner)      # fetch screenshots for next time
+        if self._slideshow_paused() or len(self._slides) < 2 or not self.width:
+            self._schedule_slide()
+            return
+        current = self._slides[self._slide_index]
+        self._slide_index = (self._slide_index + 1) % len(self._slides)
+        target = self._slides[self._slide_index]
+        generation = self._fade_generation
+        size, shade = (self.width, self.height), self._shade()
+        result = {}
+
+        def work():
+            try:
+                old = compose_background(load_picture(current), *size, shade)
+                new = compose_background(load_picture(target), *size, shade)
+                result["frames"] = [Image.blend(old, new, (i + 1) / FADE_STEPS) for i in range(FADE_STEPS)]
+            except Exception:
+                result["frames"] = []
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def play(frames, i=0):
+            if generation != self._fade_generation or (self.width, self.height) != size:
+                return                              # the selection or the window changed meanwhile
+            if i < len(frames):
+                photo = ImageTk.PhotoImage(frames[i])
+                if i == len(frames) - 1:
+                    self._keep_background((target, *size), photo)
+                self._fade_photo = photo            # keep it alive while shown
+                self._show_background(photo)
+                self._slide_job = self.root.after(FADE_FRAME_MS, play, frames, i + 1)
+            else:
+                self._fade_photo = None
+                self._schedule_slide()
+
+        def wait():
+            if worker.is_alive():
+                self._slide_job = self.root.after(40, wait)
+            elif result.get("frames"):
+                play(result["frames"])
+            else:
+                self._schedule_slide()
+        wait()
 
     # ========================================================================
     # HEADER
@@ -382,14 +506,16 @@ class LauncherUi:
                           lambda: Glyphs.vertical_fade(self.width, band_h, 0, 215))
         c.create_image(0, self.height, image=band, anchor="sw", tags="footer")
         y = self.height - self.px(FOOTER_H / 2)
-        c.create_text(self.px(MARGIN), y, text=f"{self.emulator_name.upper()} LAUNCHER", anchor="w",
-                      fill=COLOR["TEXT_FAINT"], font=self.font(12), tags="footer")
         x = self.width - self.px(MARGIN)
         for buttons, label in reversed(self.hints):
             if isinstance(buttons, str):
                 buttons = (buttons,)
             markup = "".join(f"[{b}]" for b in buttons) + " " + label
             x -= self.rich(x, y, markup, 15, COLOR["TEXT"], anchor="e", tags="footer") + self.px(30)
+        brand = f"{self.emulator_name.upper()} LAUNCHER"
+        if self.px(MARGIN) + self.font(12).measure(brand) < x:     # only where the hints leave room
+            c.create_text(self.px(MARGIN), y, text=brand, anchor="w",
+                          fill=COLOR["TEXT_FAINT"], font=self.font(12), tags="footer")
         self._raise_overlays()
 
     # ========================================================================
@@ -517,6 +643,8 @@ class LauncherUi:
         if self.view == "games":
             self.grid.draw()
             self._raise_overlays()
+        if game is self._bg_owner:
+            self.set_backdrop(game)             # new main picture, or more slides
 
     # ========================================================================
     # TOAST
@@ -558,11 +686,14 @@ class LauncherUi:
                  (("a", "alert_yes"), ("b", "alert_no"))),
         "KILL_CONFIRM": ("alert_kill_title", "alert_kill_text", "TEXT",
                          (("a", "alert_kill_launcher"), ("y", "alert_kill_desktop"), ("b", "alert_kill_cancel"))),
+        "STREAM": ("alert_stream_title", "alert_stream_text", "TEXT",
+                   (("a", "alert_stream_add"), ("b", "alert_stream_later"), ("y", "alert_stream_never"))),
     }
 
     def show_alert(self, mode):
-        """Modal dialog: "LAUNCH", "EXIT" or "KILL_CONFIRM"."""
+        """Modal dialog: "LAUNCH", "EXIT", "KILL_CONFIRM" or "STREAM"."""
         self.alert_mode = mode
+        self.alert_since = time.monotonic()
         self._draw_alert(mode)
 
     def close_alert(self):

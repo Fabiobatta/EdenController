@@ -154,7 +154,7 @@ class Emulator:
             list[dict]: in display order, with at least {"title", "path"}.
                         Optional: "title_id", "image" (square icon path),
                         "players" (max players on one console), "icon_url",
-                        "banner_url" (downloaded by Core/Art.py).
+                        "banner_url", "screen_urls" (downloaded by Core/Art.py).
                         An empty list disables the picker.
         """
         return []
@@ -162,3 +162,19 @@ class Emulator:
     def game_command(self, path):
         """Full command line that boots the game at `path`."""
         return [self.exe, path]
+
+    # ------------------------------------------------------------------
+    # 7. Save data (optional)
+    # ------------------------------------------------------------------
+    def save_folders(self, game):
+        """
+        Folders holding the save data of `game` (a list_games() entry), backed
+        up by Core/Backup.py before each launch.
+
+        Returns:
+            (root, [folder, ...]): folders are inside root; the backup stores
+                                   paths relative to root, so unzipping the
+                                   backup into root restores it. (None, [])
+                                   when there is nothing to back up.
+        """
+        return None, []

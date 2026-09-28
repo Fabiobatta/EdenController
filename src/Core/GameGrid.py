@@ -10,6 +10,9 @@ console - coloured against the number of controllers assigned:
     red     fewer players than joined
     grey    nothing to compare (unknown count, or a single player)
 
+Favourites carry a star in the top-right corner. The header shows the
+selected game's name, players, play time and when it was last played.
+
 Speed: tile pictures are composed once per (game, size, state) and cached;
 the rows just outside the view are prepared while idle, so scrolling only
 re-places cached images. The background is debounced while scrolling.
@@ -21,7 +24,7 @@ from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import Glyphs
-from .I18n import players_label, t
+from .I18n import last_played_label, players_label, playtime_label, t
 
 TILE_W, TILE_H = 150, 225       # 720p baseline
 GAP = 24
@@ -152,6 +155,8 @@ class GameGrid:
         players = game.get("players")
         if players:
             self._draw_badge(tile, players, badge)
+        if game.get("favorite"):
+            self._draw_star(tile)
         if selected:
             ImageDraw.Draw(tile).rounded_rectangle(
                 (0, 0, width - 1, height - 1), radius=radius, outline=ACCENT, width=max(2, ui.px(BORDER)))
@@ -175,9 +180,24 @@ class GameGrid:
         ImageDraw.Draw(tile).text((x + h // 3 + icon.width + h // 5, y + h / 2), label, font=font,
                                   fill=text_color, anchor="lm")
 
+    def _draw_star(self, tile):
+        ui = self.ui
+        d = max(14, ui.px(28))
+        margin = ui.px(7)
+        disc = Glyphs.panel(d, d, d // 2, (12, 14, 20, 210))
+        icon = Glyphs.star(int(d * 0.66), ACCENT)
+        x = tile.width - margin - d
+        tile.alpha_composite(disc, (x, margin))
+        tile.alpha_composite(icon, (x + (d - icon.width) // 2, margin + (d - icon.height) // 2))
+
+    def tile(self, game, width, height, selected):
+        """PhotoImage of a game's tile (cached), also used by the roulette."""
+        return self._tile(game, width, height, selected)
+
     def _tile(self, game, width, height, selected):
         badge = badge_state(game.get("players"), self.players)
-        key = (game["path"], width, height, selected, badge, bool(game.get("cover")), bool(game.get("image")))
+        key = (game["path"], width, height, selected, badge, bool(game.get("cover")), bool(game.get("image")),
+               bool(game.get("favorite")))
         photo = self._tiles.get(key)
         if photo is None:
             photo = ImageTk.PhotoImage(self._compose(game, width, height, selected, badge))
@@ -205,8 +225,14 @@ class GameGrid:
         left = ui.px(64)
         title_font = ui.font(30)
         tags = ("games", "games-header")
-        c.create_text(left, ui.px(46), anchor="w", fill=TEXT, font=title_font, tags=tags,
-                      text=ui.truncate(selected["title"], title_font, ui.width - left - ui.px(300)))
+        title_x = left
+        if selected.get("favorite"):
+            star_h = ui.px(26)
+            star = ui.photo(("star", star_h), lambda: Glyphs.star(star_h, ACCENT))
+            c.create_image(left, ui.px(46), image=star, anchor="w", tags=tags)
+            title_x += star_h + ui.px(12)
+        c.create_text(title_x, ui.px(46), anchor="w", fill=TEXT, font=title_font, tags=tags,
+                      text=ui.truncate(selected["title"], title_font, ui.width - title_x - ui.px(300)))
         x, y = left, ui.px(90)
         players = selected.get("players")
         if players:
@@ -225,8 +251,19 @@ class GameGrid:
                 x += self._chip(x, y, text, OK if fits else BAD) + ui.px(16)
         if self.filter_players:
             x += self._chip(x, y, t("games_filter", n=self.filter_players), ACCENT) + ui.px(16)
-        c.create_text(x, y, anchor="w", fill=TEXT_DIM, font=ui.font(14, False),
-                      text=f"{self.index + 1} / {visible_count}", tags=tags)
+        item = c.create_text(x, y, anchor="w", fill=TEXT_DIM, font=ui.font(14, False),
+                             text=f"{self.index + 1} / {visible_count}", tags=tags)
+        seconds = selected.get("playtime") or 0
+        if seconds >= 60:
+            x = c.bbox(item)[2] + ui.px(24)
+            icon_h = ui.px(17)
+            icon = ui.photo(("clock", icon_h), lambda: Glyphs.clock(icon_h, TEXT_DIM))
+            c.create_image(x, y, image=icon, anchor="w", tags=tags)
+            text = playtime_label(seconds)
+            if selected.get("last_played"):
+                text += "  ·  " + last_played_label(selected["last_played"])
+            c.create_text(x + icon.width() + ui.px(8), y, anchor="w", fill=TEXT_DIM, font=ui.font(14, False),
+                          text=text, tags=tags)
 
     def _chip(self, x, y, text, color):
         """Outlined pill with coloured text; returns its width."""
@@ -271,8 +308,7 @@ class GameGrid:
         self.first_row = max(0, min(self.first_row, max(0, last_row - self.rows + 1)))
 
         selected = self.games[self.index]
-        ui.set_background(selected.get("background") or selected.get("cover") or selected.get("image"),
-                          BACKGROUND_DELAY_MS)
+        ui.set_backdrop(selected, BACKGROUND_DELAY_MS)
 
         layout = (id(self.games), count, self.first_row, self.columns, self.rows,
                   ui.width, ui.height, self.players, self.filter_players)

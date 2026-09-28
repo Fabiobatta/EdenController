@@ -58,6 +58,7 @@ L'interfaccia è in **italiano** (o inglese, in base alla lingua di Windows o a
 | Diventare il giocatore successivo | `Ⓐ` (il controller vibra 1 volta per P1, 2 per P2...) |
 | Liberare il proprio slot | `Ⓑ` |
 | Scegliere il layout dei tasti | `Ⓧ`, poi `◄ ►` e `Ⓐ` per confermare (`Ⓑ` annulla) |
+| Riprendere l'ultimo gioco giocato, saltando la lista | `Ⓨ` |
 | Avviare il gioco / aprire la lista giochi | `☰` (Start) |
 | Uscire dal launcher | `⧉` (Back) |
 | **Chiudere Eden bloccato** | Premi insieme `⧉` + `LB` + `RB` su *qualsiasi* controller (combinazione configurabile) |
@@ -69,8 +70,14 @@ Nella **lista giochi**:
 | Muoversi nella griglia (tenere premuto per scorrere) | Croce direzionale o levetta sinistra |
 | Pagina precedente / successiva | `LB` / `RB` |
 | Avviare il gioco selezionato | `Ⓐ` |
+| **Roulette**: un gioco a caso adatto a tutti i giocatori | `Ⓧ` |
 | Mostrare solo i giochi adatti a tutti i giocatori (con 2+ giocatori) | `Ⓨ` |
+| Cambiare ordine: Recenti → A–Z → Più giocati | `☰` (Start) |
+| Aggiungere / togliere dai preferiti (★) | `⧉` (Back) |
 | Tornare ai controller | `Ⓑ` |
+
+Nella **roulette**: `Ⓐ` gioca, `Ⓧ` ritira, `Ⓑ` torna alla lista (sul gioco
+estratto).
 
 Quando chiudi un gioco avviato dalla lista torni alla lista, con gli stessi
 giocatori: puoi sceglierne subito un altro. Il launcher parte dall'ultimo gioco
@@ -126,6 +133,21 @@ I log del launcher finiscono nella cartella `log` di Eden
 ---
 
 ## Vibeshine / Sunshine / Apollo + Moonlight per Xbox
+
+**Automatico.** Al primo avvio sul PC host il launcher trova Vibeshine (o
+Sunshine) e chiede *"Aggiungere a Moonlight?"*: con `Ⓐ` aggiunge l'app "Eden" alla
+lista di Moonlight, con una copertina (`EdenLauncher.cover.png` accanto al
+launcher). Windows chiede una volta il permesso di amministratore, perché la
+lista delle app (`C:\Program Files\Sunshine\config\apps.json`) è nella
+cartella dei programmi. Le altre app restano come sono, e una copia della lista
+originale viene salvata in `apps.json.bak`. Se l'app non compare subito in
+Moonlight, riavvia Vibeshine.
+
+`Ⓑ` rimanda alla prossima volta, `Ⓨ` non lo chiede più. Per riproporre la domanda
+avvia `EdenLauncher.exe --streaming`. Se Vibeshine è installato in una cartella
+diversa, scrivi il percorso di `apps.json` in `apps_json` (vedi *Impostazioni*).
+
+**A mano**, se preferisci:
 
 1. Nell'interfaccia web dell'host apri **Applications → Add New**.
 2. **Application Name**: "Eden" (una sola app per tutti i giochi) oppure il nome
@@ -183,6 +205,14 @@ kill_combo = back+lb+rb
 covers_dir = covers
 download_art = true
 steamgriddb_api_key =
+sounds = true
+sound_volume = 70
+backup_saves = true
+backup_dir = saves_backup
+backup_keep = 10
+slideshow_seconds = 8
+moonlight_prompt = true
+apps_json =
 
 [Eden]
 layout = Xbox
@@ -206,7 +236,15 @@ fullscreen = true
 | `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
 | `covers_dir` | cartella | Dove cercare le copertine (predefinito `covers` accanto al launcher) |
 | `steamgriddb_api_key` | chiave API | Se impostata, scarica da sola le copertine mancanti da SteamGridDB |
-| `download_art` | `true`, `false` | Scarica dall'eShop banner (sfondi) e icone mancanti |
+| `download_art` | `true`, `false` | Scarica dall'eShop banner (sfondi), icone e screenshot mancanti |
+| `sounds` | `true`, `false` | Suoni dell'interfaccia (ingresso giocatori, conferme, roulette) |
+| `sound_volume` | `0`–`100` | Volume dei suoni |
+| `backup_saves` | `true`, `false` | Backup dei salvataggi prima di ogni gioco avviato dalla lista |
+| `backup_dir` | cartella | Dove mettere i backup (relativa al launcher o percorso completo) |
+| `backup_keep` | numero | Quanti backup tenere per gioco |
+| `slideshow_seconds` | secondi, `0` = spento | Ogni quanto lo sfondo passa allo screenshot successivo |
+| `moonlight_prompt` | `true`, `false` | Proporre di aggiungere il launcher a Moonlight (Sunshine / Vibeshine) |
+| `apps_json` | percorso | `apps.json` di Sunshine/Vibeshine, se non è nella cartella standard |
 | `[Players]` | `<Title ID o nome> = <numero>` | Corregge il numero di giocatori mostrato su un gioco |
 
 I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
@@ -235,15 +273,32 @@ separa le cartelle in `game_dirs`.
 * **game_dirs**: se vuoto, il launcher usa le cartelle dei giochi aggiunte in Eden
   (rispettando l'opzione "scansione sottocartelle"). Vedi *Lista giochi* sotto.
 
-Accanto al file il launcher salva `EdenLauncher.state.json` (l'ultimo gioco
-giocato): si può cancellare senza problemi.
+Accanto al file il launcher salva `EdenLauncher.state.json` (ultimo gioco, tempo
+di gioco, preferiti, ordinamento). Si può cancellare senza problemi, ma così si
+azzerano tempi di gioco e preferiti.
 
 ---
 
 ## Lista giochi
 
 Una griglia di copertine in stile Playnite. Lo sfondo è l'immagine del gioco
-selezionato (il banner dell'eShop, se disponibile), sfocata e scurita.
+selezionato (il banner dell'eShop, se disponibile), sfocata e scurita. Se resti
+qualche secondo su un gioco, lo sfondo passa lentamente ai suoi **screenshot
+dell'eShop**, con una dissolvenza. Gli screenshot vengono scaricati solo per i
+giochi su cui ti fermi. L'animazione è leggera: le immagini vengono preparate in
+background e si ferma durante il gioco (`slideshow_seconds = 0` per lo sfondo
+fisso).
+
+**Ordine e preferiti.** Di default i giochi sono in ordine di **ultima partita**:
+il primo in alto è quello giocato più di recente. Con `☰` (Start) passi ad
+**A–Z** o **Più giocati**, e la scelta viene ricordata. I **preferiti** (`⧉` Back
+per aggiungerli o toglierli) hanno una stella ★ e stanno sempre in cima.
+
+**Tempo di gioco.** Il launcher misura quanto resta aperto ogni gioco avviato
+dalla lista. In alto, accanto ai giocatori, compaiono il tempo totale e l'ultima
+volta, per esempio *3 h 25 min · ieri*. Dalla schermata dei controller, `Ⓨ`
+riavvia subito l'ultimo gioco. Se nessuno si è ancora unito, chi preme `Ⓨ`
+diventa il Giocatore 1.
 
 **Quanti possono giocare.** Ogni copertina ha un badge con l'icona delle persone e
 il numero massimo di giocatori sulla stessa console (es. `1-4`), preso dai dati
@@ -259,7 +314,7 @@ In alto, accanto al titolo del gioco selezionato, compare anche "✓ Va bene per
 giocatori" oppure "✕ Max 2 · siete in 3". Con 2 o più giocatori, `Ⓨ` mostra solo i
 giochi adatti a tutti.
 
-I dati vengono da un indice compatto (~2 MB) costruito da
+I dati vengono da un indice compatto (~4 MB, con gli indirizzi degli screenshot) costruito da
 [titledb](https://github.com/blawar/titledb) durante la build e incluso nell'exe:
 nessun download all'avvio. Se un numero è sbagliato lo correggi nella sezione
 `[Players]` di `EdenLauncher.ini` (vedi sotto).
@@ -297,6 +352,61 @@ mancanza, dal nome del file ripulito.
 La ricerca dei giochi avviene in background mentre i giocatori si uniscono, e il
 risultato viene ricordato in `EdenLauncher.library.json`: dal secondo avvio i file
 non vengono più riletti, a meno che non cambino.
+
+---
+
+## Roulette: "Stasera si gioca a…"
+
+Nella lista giochi premi `Ⓧ`: parte una striscia di copertine che rallenta fino a
+fermarsi su un gioco a caso, con un tic e una leggera vibrazione su tutti i
+controller a ogni copertina, e una fanfara alla fine.
+
+La roulette sceglie **solo giochi che supportano tutti i controller che si sono
+uniti**. Se siete in 4 non escono mai giochi da 1–2 giocatori, né giochi con numero
+di giocatori sconosciuto. Con un solo giocatore può uscire qualsiasi gioco.
+Se nessun gioco va bene per il gruppo, il launcher lo dice e non gira.
+
+---
+
+## Backup dei salvataggi
+
+Prima di avviare un gioco dalla lista (o con `Ⓨ` *Riprendi*), il launcher copia i
+suoi salvataggi di Eden (tutti i profili utente) in uno zip:
+
+```text
+saves_backup\Mario Kart 8 Deluxe [0100152000022000]\2026-09-28_21-04-10.zip
+```
+
+* Se i salvataggi non sono cambiati dall'ultimo backup non viene creato un nuovo zip:
+  i backup buoni non vengono spinti fuori da copie identiche.
+* Vengono tenuti gli ultimi `backup_keep` (10) per gioco; i più vecchi si cancellano.
+* Per tenerli al sicuro fuori dal PC, imposta `backup_dir` su una cartella
+  sincronizzata, es. `backup_dir = %USERPROFILE%\OneDrive\Salvataggi Eden`.
+
+**Ripristino**: chiudi Eden e apri lo zip. Dentro c'è la cartella
+`0000000000000000`: estraila in `%APPDATA%\eden\nand\user\save\` (o
+`<cartella di Eden>\user\nand\user\save\` se Eden è portable) e conferma la
+sovrascrittura.
+
+I giochi avviati con un gioco passato da riga di comando (Playnite, un'app per
+gioco in Vibeshine) non passano dalla lista, quindi non hanno backup né tempo di
+gioco.
+
+---
+
+## Suoni
+
+Quando un controller si unisce, oltre alla vibrazione (1 impulso per P1, 2 per
+P2...), a ogni impulso suona un "blip". L'ultimo è una piccola melodia, più acuta
+per ogni giocatore. Ci sono anche suoni leggeri per la navigazione, la conferma,
+l'avvio del gioco e la roulette. Non ci sono voci.
+
+I suoni sono generati dal launcher (nessun file da scaricare) e in streaming
+arrivano sulla TV insieme all'audio del PC. Si spengono con `sounds = false` o si
+regolano con `sound_volume`. Per sostituirne uno, metti un `.wav` con lo stesso
+nome nella cartella `sounds` accanto al launcher: `join1`…`join8`,
+`blip1`…`blip8`, `select`, `back`, `move`, `toggle`, `launch`, `tick`, `win`,
+`leave`, `error`.
 
 ---
 
@@ -392,7 +502,11 @@ src/
 │   ├── Ui.py            #   schermo (una tela Tk): sfondo, schede, barra tasti, dialoghi
 │   ├── GameGrid.py      #   griglia giochi con badge dei giocatori
 │   ├── Glyphs.py        #   tasti Xbox disegnati, icone, pannelli
-│   ├── Art.py           #   copertine, sfondi, download in background
+│   ├── Art.py           #   copertine, sfondi, screenshot, download in background
+│   ├── Roulette.py      #   "Stasera si gioca a…"
+│   ├── Backup.py        #   zip dei salvataggi prima di ogni gioco
+│   ├── Sound.py         #   suoni sintetizzati dell'interfaccia
+│   ├── Sunshine.py      #   app "Eden" in apps.json di Sunshine/Vibeshine
 │   ├── Settings.py      #   EdenLauncher.ini, stato, cache
 │   ├── I18n.py          #   testi IT/EN
 │   └── ...              #   SDL, processi, log
@@ -400,7 +514,7 @@ src/
     ├── Eden.py          # percorsi, backend SDL, hint SDL identici a Eden
     ├── Config.py        # GUID/port, layout Xbox/Nintendo, modalità TV, scrittura di qt-config.ini
     ├── Games.py         # cartelle dei giochi di Eden, ricerca, nomi e icone dalla cache di Eden
-    ├── TitleDb.py       # giocatori, nomi e immagini eShop dall'indice incluso
+    ├── TitleDb.py       # giocatori, nomi, immagini e screenshot eShop dall'indice incluso
     ├── Switch.py        # Title ID da NSP/XCI (ticket, CNMT, intestazioni NCA)
     └── Ini.py           # editor INI che non altera il resto del file
 tools/build_titledb_index.py   # genera assets/titledb.json.gz (lo fanno gli script di build)

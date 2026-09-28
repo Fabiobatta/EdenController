@@ -7,6 +7,7 @@ icon, glass panels and fonts. Everything is drawn at 4x and scaled down
     button("a", 28)            -> green A button, 28 px high (RGBA)
     button("lb", 28)           -> LB bumper pill
     people(2, 20, "#FFFFFF")   -> two-person icon
+    star(20, "#F5D90A")        -> favourite star
     panel(300, 120, 16, (0, 0, 0, 150), outline=("#F5D90A", 3))
 """
 
@@ -185,6 +186,43 @@ def gamepad(height, color):
     d.ellipse((W * 0.68, H * 0.34, W * 0.75, H * 0.44), fill=hole)
     d.ellipse((W * 0.76, H * 0.44, W * 0.83, H * 0.54), fill=hole)
     return _finish(img, (w, h))
+
+
+@lru_cache(maxsize=16)
+def star(height, color, outline=None):
+    """Five-pointed star (favourites)."""
+    import math
+    h = max(8, int(height))
+    s = SUPERSAMPLE
+    size = h * s
+    points = []
+    for i in range(10):
+        radius = size * (0.5 if i % 2 == 0 else 0.21)
+        angle = -math.pi / 2 + i * math.pi / 5
+        points.append((size / 2 + radius * math.cos(angle), size * 0.53 + radius * math.sin(angle)))
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.polygon(points, fill=_rgb(color) + (255,))
+    if outline:
+        d.line(points + points[:1], fill=_rgb(outline) + (255,), width=max(1, size // 14), joint="curve")
+    return _finish(img, (h, h))
+
+
+@lru_cache(maxsize=16)
+def clock(height, color):
+    """Clock face (play time)."""
+    h = max(8, int(height))
+    s = SUPERSAMPLE
+    size = h * s
+    rgb = _rgb(color) + (255,)
+    line = max(1, int(size * 0.11))
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.ellipse((line / 2, line / 2, size - line / 2, size - line / 2), outline=rgb, width=line)
+    c = size / 2
+    d.line((c, c, c, size * 0.24), fill=rgb, width=line)
+    d.line((c, c, size * 0.7, size * 0.62), fill=rgb, width=line)
+    return _finish(img, (h, h))
 
 
 # ============================================================================

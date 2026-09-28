@@ -8,6 +8,7 @@ picks one and hands the instance to Core.Bootstrap.run().
 
 Lifecycle, driven by Core/Bootstrap.py in this exact order:
 
+    0. <settings load>  "<Name>Launcher.ini" is read into self.settings
     1. locate(base)     resolve dir / exe / config_path (mount AppImage).
                         Runs before logging, because log_dir() depends on it.
     2. <logger starts>
@@ -38,6 +39,10 @@ class Emulator:
 
     name = "Emulator"   # branding: window title, "<Name>Path.config", log filename
 
+    # Emulator-specific part of "<Name>Launcher.ini", appended to the generic
+    # [Launcher] section when the file is first created
+    default_settings = ""
+
     def __init__(self):
         self.dir = None
         self.exe = None
@@ -45,6 +50,7 @@ class Emulator:
         self.is_appimage = False
         self.env = None
         self.profiles = {}
+        self.settings = None    # Core.Settings.Settings, set by Bootstrap
 
     # ------------------------------------------------------------------
     # 1. Where everything lives
@@ -128,3 +134,21 @@ class Emulator:
     def cleanup(self):
         """Release anything locate() acquired. Called on every exit path."""
         pass
+
+    # ------------------------------------------------------------------
+    # 6. Game picker (optional)
+    # ------------------------------------------------------------------
+    def list_games(self):
+        """
+        Games offered by the launcher's game picker when no game was passed
+        on the command line.
+
+        Returns:
+            list[dict]: [{"title": str, "path": str}, ...] in display order.
+                        An empty list disables the picker.
+        """
+        return []
+
+    def game_command(self, path):
+        """Full command line that boots the game at `path`."""
+        return [self.exe, path]

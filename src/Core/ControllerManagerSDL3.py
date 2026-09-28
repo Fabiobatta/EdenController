@@ -71,6 +71,8 @@ class SDLManager:
     SDL_CONTROLLER_BUTTON_DPAD_RIGHT        = sdl3.SDL_GAMEPAD_BUTTON_DPAD_RIGHT
     SDL_CONTROLLER_BUTTON_DPAD_UP           = sdl3.SDL_GAMEPAD_BUTTON_DPAD_UP
     SDL_CONTROLLER_BUTTON_DPAD_DOWN         = sdl3.SDL_GAMEPAD_BUTTON_DPAD_DOWN
+    SDL_CONTROLLER_BUTTON_LEFT_STICK        = sdl3.SDL_GAMEPAD_BUTTON_LEFT_STICK
+    SDL_CONTROLLER_BUTTON_RIGHT_STICK       = sdl3.SDL_GAMEPAD_BUTTON_RIGHT_STICK
 
     # =========================================================================
     # EVENT CONSTANTS  (integers — plain class attribute)
@@ -156,6 +158,20 @@ class SDLManager:
         SDL3: SDL_GUIDToString(guid, buf, size) — different name, same intent as SDL2.
         """
         sdl3.SDL_GUIDToString(guid, buf, size)
+
+    @staticmethod
+    def rumble(ctrl, strength, duration_ms):
+        """Vibrate a controller; strength 0.0-1.0. Silently ignored if unsupported."""
+        level = int(max(0.0, min(1.0, strength)) * 0xFFFF)
+        try:
+            sdl3.SDL_RumbleGamepad(ctrl, level, level, int(duration_ms))
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_left_y(ctrl):
+        """Left stick vertical position, -1.0 (up) to 1.0 (down)."""
+        return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTY) / 32767.0
 
     @staticmethod
     def get_button_info(event):

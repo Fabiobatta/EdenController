@@ -286,12 +286,130 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(emu.command(["launcher", "-f", "-g", "game.nsp"]),
                          [emu.exe, "-f", "-g", "game.nsp"])
 
+    def test_layout_setting_orders_profiles(self):
+        from Core.Settings import Settings
+        from Eden import Eden
+        emu = Eden()
+        emu.locate(self.eden_dir)
+        emu.settings = Settings({"eden": {"layout": "nintendo"}})
+        self.assertEqual(list(emu.load_profiles())[0], Config.NINTENDO_PROFILE)
+        emu.settings = Settings({"eden": {"layout": "does-not-exist"}})
+        self.assertEqual(list(emu.load_profiles())[0], Config.XBOX_PROFILE)
+
+    def test_game_command_and_docked_policy(self):
+        from Core.Settings import Settings
+        from Eden import Eden
+        emu = Eden()
+        emu.locate(self.eden_dir)
+        emu.settings = Settings({"eden": {"fullscreen": "true"}})
+        self.assertEqual(emu.game_command("g.nsp"), [emu.exe, "-f", "-g", "g.nsp"])
+        emu.settings = Settings({"eden": {"fullscreen": "false"}})
+        self.assertEqual(emu.game_command("g.nsp"), [emu.exe, "-g", "g.nsp"])
+
     def test_portable_user_folder_wins(self):
         from Eden import Eden
         os.makedirs(os.path.join(self.tmp.name, "user", "config"))
         emu = Eden()
         emu.locate(self.eden_dir)
         self.assertEqual(emu.config_path, os.path.join(self.tmp.name, "user", "config", "qt-config.ini"))
+
+
+class SettingsTests(unittest.TestCase):
+    def test_defaults_are_created_and_user_values_win(self):
+        from Core.Settings import load_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(tmp, "TestLauncher", "[Eden]\nlayout = Xbox\ndocked = auto\n")
+            self.assertTrue(os.path.exists(os.path.join(tmp, "TestLauncher.ini")))
+            self.assertEqual(settings.get("Launcher", "language"), "auto")
+            self.assertTrue(settings.get_bool("Launcher", "rumble"))
+
+            with open(os.path.join(tmp, "TestLauncher.ini"), "w", encoding="utf-8") as f:
+                f.write("[Launcher]\nlanguage = it\nrumble = false\n"
+                        "[Eden]\ngame_dirs = D:\\Giochi ; E:\\Altri\n")
+            settings = load_settings(tmp, "TestLauncher", "[Eden]\nlayout = Xbox\n")
+            self.assertEqual(settings.get("launcher", "LANGUAGE"), "it")
+            self.assertFalse(settings.get_bool("Launcher", "rumble", True))
+            self.assertEqual(settings.get("Eden", "layout"), "Xbox")      # missing -> default
+            self.assertEqual(settings.get_list("Eden", "game_dirs"), ["D:\\Giochi", "E:\\Altri"])
+
+            settings.save_state(last_game="x.nsp")
+            self.assertEqual(load_settings(tmp, "TestLauncher").state, {"last_game": "x.nsp"})
+
+
+class I18nTests(unittest.TestCase):
+    def test_languages_have_the_same_keys(self):
+        import Eden.Eden  # noqa: F401  (registers the Eden strings)
+        from Core.I18n import STRINGS
+        self.assertEqual(set(STRINGS["en"]), set(STRINGS["it"]))
+
+    def test_selection_and_fallback(self):
+        from Core import I18n
+        try:
+            self.assertEqual(I18n.set_language("it"), "it")
+            self.assertEqual(I18n.t("slot_profile", name="Xbox"), "◄   Profilo: Xbox   ►")
+            self.assertEqual(I18n.set_language("xx"), "en")
+            self.assertEqual(I18n.t("missing_key"), "missing_key")
+        finally:
+            I18n.set_language("en")
+
+
+class ComboTests(unittest.TestCase):
+    def test_parse_combo(self):
+        from Core.Settings import BUTTON_NAMES, parse_combo
+        sdl = types.SimpleNamespace(**{name: i for i, name in enumerate(sorted(set(BUTTON_NAMES.values())))})
+        self.assertEqual(parse_combo("Back + Start", sdl),
+                         [getattr(sdl, BUTTON_NAMES["back"]), getattr(sdl, BUTTON_NAMES["start"])])
+        default = parse_combo("back+lb+rb", sdl)
+        self.assertEqual(parse_combo("back+nope", sdl), default)
+        self.assertEqual(parse_combo("", sdl), default)
+
+
+class GamesTests(unittest.TestCase):
+    def test_eden_game_dirs(self):
+        from Eden.Games import eden_game_dirs
+        items = {
+            "Paths\\gamedirs\\size": "3",
+            "Paths\\gamedirs\\1\\path": "SDMC",
+            "Paths\\gamedirs\\2\\path": '"D:/Giochi Switch"',
+            "Paths\\gamedirs\\2\\deep_scan\\default": "false",
+            "Paths\\gamedirs\\2\\deep_scan": "true",
+            "Paths\\gamedirs\\3\\path": "E:/Altri",
+        }
+        self.assertEqual(eden_game_dirs(items), [
+            (os.path.normpath("D:/Giochi Switch"), True), (os.path.normpath("E:/Altri"), False)])
+
+    def test_find_games_hides_updates_and_dlc(self):
+        from Eden.Games import clean_title, find_games
+        self.assertEqual(clean_title("Super Game [0100ABCD12340000][v0] (USA).nsp"), "Super Game (USA)")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "sub"))
+            for name in ("Zelda [01007EF00011E000][v0].nsp", "Zelda [01007EF00011E800][v5].nsp",
+                         "Zelda [01007EF00011F001][v0].nsp", "Kart.xci", "Kart.nsp",
+                         "readme.txt", "sub/Deep Game.nsp"):
+                open(os.path.join(tmp, name), "w").close()
+            shallow = [g["title"] for g in find_games([(tmp, False)])]
+            deep = [g["title"] for g in find_games([(tmp, True)])]
+        self.assertEqual(shallow, ["Kart (NSP)", "Kart (XCI)", "Zelda"])
+        self.assertEqual(deep, ["Deep Game", "Kart (NSP)", "Kart (XCI)", "Zelda"])
+
+
+class DockedTests(unittest.TestCase):
+    def test_force_docked_is_written_to_system(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "qt-config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(QT_CONFIG)
+            profiles = Config.load_profiles(tmp, Config.load_template(IniFile.load(path)))
+            hw = hardware(("p1", RAW_GUID), ("p2", RAW_GUID))
+            assignments = [{"path": p, "name": p, "profile_key": Config.DEFAULT_PROFILE} for p in ("p1", "p2")]
+
+            Config.write_input(path, assignments, hw, profiles, force_docked=False)
+            self.assertFalse(IniFile.load(path).has_section("System"))
+
+            Config.write_input(path, assignments, hw, profiles, force_docked=True)
+            system = IniFile.load(path).items("System")
+        self.assertEqual(system["use_docked_mode"], "1")
+        self.assertEqual(system["use_docked_mode\\default"], "true")
 
 
 if __name__ == "__main__":

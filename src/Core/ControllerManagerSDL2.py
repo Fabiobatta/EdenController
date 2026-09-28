@@ -64,6 +64,8 @@ class SDLManager:
     SDL_CONTROLLER_BUTTON_DPAD_RIGHT        = sdl2.SDL_CONTROLLER_BUTTON_DPAD_RIGHT
     SDL_CONTROLLER_BUTTON_DPAD_UP           = sdl2.SDL_CONTROLLER_BUTTON_DPAD_UP
     SDL_CONTROLLER_BUTTON_DPAD_DOWN         = sdl2.SDL_CONTROLLER_BUTTON_DPAD_DOWN
+    SDL_CONTROLLER_BUTTON_LEFT_STICK        = sdl2.SDL_CONTROLLER_BUTTON_LEFTSTICK
+    SDL_CONTROLLER_BUTTON_RIGHT_STICK       = sdl2.SDL_CONTROLLER_BUTTON_RIGHTSTICK
 
     # =========================================================================
     # EVENT CONSTANTS  (integers — plain class attribute)
@@ -133,6 +135,20 @@ class SDLManager:
             list[int]: Sequential joystick indices (may be empty)
         """
         return list(range(sdl2.SDL_NumJoysticks()))
+
+    @staticmethod
+    def rumble(ctrl, strength, duration_ms):
+        """Vibrate a controller; strength 0.0-1.0. Silently ignored if unsupported."""
+        level = int(max(0.0, min(1.0, strength)) * 0xFFFF)
+        try:
+            sdl2.SDL_GameControllerRumble(ctrl, level, level, int(duration_ms))
+        except Exception:
+            pass
+
+    @staticmethod
+    def get_left_y(ctrl):
+        """Left stick vertical position, -1.0 (up) to 1.0 (down)."""
+        return sdl2.SDL_GameControllerGetAxis(ctrl, sdl2.SDL_CONTROLLER_AXIS_LEFTY) / 32767.0
 
     @staticmethod
     def get_button_info(event):

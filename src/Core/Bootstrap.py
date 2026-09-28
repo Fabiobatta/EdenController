@@ -4,6 +4,8 @@ The startup sequence, shared by every emulator entry script.
 
 The order below is not cosmetic - each step depends on the previous one:
 
+    settings    "<Name>Launcher.ini" and the UI language, before anything
+                can show a dialog
     locate()    resolves the emulator directory, so log_dir() has an answer
     init_log()  starts the logger, so everything after it is recorded
     prepare()   detects the emulator version and snapshots the child env,
@@ -14,11 +16,13 @@ The order below is not cosmetic - each step depends on the previous one:
 
 import customtkinter as ctk
 
+from .I18n import set_language
 from .Log import init_log, log
 from .Paths import base_dir
 from .Sdl import load_sdl
+from .Settings import LAUNCHER_SECTION, load_settings
 
-LAUNCHER_VERSION = "1.2.0"
+LAUNCHER_VERSION = "2.0.0"
 
 
 def run(emulator):
@@ -30,6 +34,11 @@ def run(emulator):
     """
     import sys
 
+    # 0. Launcher settings and UI language, first so that even the
+    #    "emulator not found" dialog is translated
+    emulator.settings = load_settings(base_dir(), f"{emulator.name}Launcher", emulator.default_settings)
+    language = set_language(emulator.settings.get(LAUNCHER_SECTION, "language", "auto"))
+
     # 1. Where is the emulator?
     emulator.locate(base_dir())
 
@@ -40,6 +49,8 @@ def run(emulator):
     log("INFO", f"{emulator.name} dir", emulator.dir)
     log("INFO", "Config", emulator.config_path)
     log("INFO", "Executable", emulator.exe)
+    log("INFO", "Settings", emulator.settings.path)
+    log("INFO", "Language", language)
 
     # 3. Version, SDL backend choice, environment (before SDL is imported)
     emulator.prepare()

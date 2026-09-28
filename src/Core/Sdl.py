@@ -51,6 +51,8 @@ def load_sdl(backend, lib_dir):
         os.environ["SDL_CHECK_BINARY_VERSION"] = "0"    # Disable binary version checking, "1" by default.
         os.environ["SDL_IGNORE_MISSING_FUNCTIONS"] = "1" # Disable missing function warnings, "1" by default.
         os.environ["SDL_FIND_BINARIES"] = "1"           # Search system libraries, "1" by default.
+        os.environ["SDL_DOC_GENERATOR"] = "0"           # No docs download from GitHub when run from source.
+        os.environ["SDL_CHECK_VERSION"] = "0"           # No PyPI update check when run from source.
         from .ControllerManagerSDL3 import SDLManager
 
     return SDLManager

@@ -1,7 +1,8 @@
 """
 Core/Ui.py
 All rendering for the launcher: theme, scaling, the 8-slot player grid,
-modal alerts and toasts.
+the game list, modal alerts and toasts. Every visible string comes from
+Core/I18n.py.
 
 Emulator-agnostic. The UI is fed plain view-model dicts by Core/App.py and
 never reads launcher state directly.
@@ -17,6 +18,7 @@ import tkinter as tk
 
 import customtkinter as ctk
 
+from .I18n import t
 from .Paths import resource_path
 
 # ============================================================================
@@ -88,6 +90,13 @@ UI = {
 
     # === TOAST ===
     'TOAST_POSITION_Y': 0.95,       # Toast Y position (relative)
+
+    # === GAME LIST ===
+    'GAMES_VISIBLE_ROWS': 9,        # Rows shown at once
+    'GAMES_ROW_WIDTH': 900,         # Row width
+    'GAMES_ROW_HEIGHT': 44,         # Row height
+    'FONT_GAMES_SIZE': 22,          # Row text
+    'FONT_GAMES_INFO_SIZE': 16,     # "3 / 42" line
 }
 
 # ============================================================================
@@ -158,21 +167,25 @@ class LauncherUi:
         show_toast(msg, color)  - transient message
         show_alert(mode)        - modal dialog, mode readable via .alert_mode
         close_alert()
+        show_games(titles, i)   - replace the grid with the game list
+        hide_games()
     """
 
-    def __init__(self, root, emulator_name, launch_label, on_rebuild):
+    def __init__(self, root, emulator_name, launch_text, on_rebuild):
         """
         Args:
             root          (ctk.CTk): The root window.
-            emulator_name (str):     "Ryujinx" - window title and alert copy.
-            launch_label  (str):     What START launches - "GAME" or "RYUJINX".
+            emulator_name (str):     "Eden" - window title and alert copy.
+            launch_text   (str):     Footer hint for START, e.g. "☰ AVVIA GIOCO".
             on_rebuild    (callable): Called after a resolution change rebuilds
                                       the widgets, so App can repaint the grid.
         """
         self.root = root
         self.emulator_name = emulator_name
-        self.launch_label = launch_label
+        self.launch_text_value = launch_text
         self.on_rebuild = on_rebuild
+        self.games_view = None      # (titles, index) while the game list is shown
+        self.games_frame = None
 
         self.alert_mode = None      # Current alert type (if any)
         self.alert_frame = None     # Alert dialog container
@@ -302,7 +315,7 @@ class LauncherUi:
         # Header: Title
         self.lbl_title = ctk.CTkLabel(
             self.main_container,
-            text=f"{self.launch_label} CONTROLLER SETUP",
+            text=t("title_players"),
             font=(UI['FONT_FAMILY'], UI['FONT_TITLE_SIZE'], "bold"),
             fg_color="transparent",
             text_color=COLOR['TEXT_WHITE']
@@ -357,7 +370,7 @@ class LauncherUi:
             # Status/name label (center)
             lbl_status = ctk.CTkLabel(
                 card,
-                text="PRESS Ⓐ CONNECT",
+                text=t("slot_empty"),
                 font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
                 fg_color="transparent",
                 text_color=COLOR['TEXT_DIM']
@@ -367,7 +380,7 @@ class LauncherUi:
             # Disconnect hint label (bottom, initially hidden)
             lbl_disc = ctk.CTkLabel(
                 card,
-                text="Ⓑ DISCONNECT   |   Ⓧ PROFILE",
+                text=t("slot_hint"),
                 font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
                 fg_color="transparent",
                 text_color=COLOR['NEON_RED']
@@ -376,7 +389,7 @@ class LauncherUi:
             # Profile selector label (center, hidden by default - shown in State B)
             lbl_profile = ctk.CTkLabel(
                 card,
-                text="◄   Profile: RL Default   ►",
+                text=t("slot_profile", name=""),
                 font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold"),
                 fg_color="transparent",
                 text_color=COLOR['TEXT_DIM']
@@ -403,14 +416,14 @@ class LauncherUi:
         )
         self.launch_text = ctk.CTkLabel(
             self.footer_frame,
-            text=f"☰ LAUNCH {self.launch_label}",
+            text=self.launch_text_value,
             font=(UI['FONT_FAMILY'], UI['FONT_FOOTER_SIZE'], "bold"),
             fg_color="transparent",
             text_color=COLOR['TEXT_WHITE']
         )
         self.quit_text = ctk.CTkLabel(
             self.footer_frame,
-            text="⧉ QUIT",
+            text=t("footer_quit"),
             font=(UI['FONT_FAMILY'], UI['FONT_FOOTER_SIZE'], "bold"),
             fg_color="transparent",
             text_color=COLOR['TEXT_WHITE']
@@ -431,6 +444,11 @@ class LauncherUi:
         )
         self.lbl_toast.place(relx=0.5, rely=UI['TOAST_POSITION_Y'], anchor="center")
         self.lbl_toast.place_forget()
+
+        # A rebuild (resolution change) keeps the game list on screen
+        self.games_frame = None
+        if self.games_view:
+            self.show_games(*self.games_view)
 
     # ========================================================================
     # PLAYER GRID
@@ -472,7 +490,7 @@ class LauncherUi:
                     lbl_status.place_forget()
 
                     lbl_profile.configure(
-                        text=f"◄   Profile: {slot['profile']}   ►",
+                        text=t("slot_profile", name=slot['profile']),
                         fg_color="transparent",
                         text_color=active_color,
                         font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold")
@@ -481,7 +499,7 @@ class LauncherUi:
 
                     lbl_disc.place(relx=0.5, rely=0.75, anchor="center")
                     lbl_disc.configure(
-                        text="Ⓐ CONFIRM   |   Ⓑ CANCEL",
+                        text=t("slot_profile_hint"),
                         fg_color="transparent",
                         text_color=COLOR['NEON_RED']
                     )
@@ -502,7 +520,7 @@ class LauncherUi:
 
                     lbl_disc.place(relx=0.5, rely=0.75, anchor="center")
                     lbl_disc.configure(
-                        text="Ⓑ DISCONNECT   |   Ⓧ PROFILE",
+                        text=t("slot_hint"),
                         fg_color="transparent",
                         text_color=COLOR['NEON_RED']
                     )
@@ -518,7 +536,7 @@ class LauncherUi:
                 lbl_num.configure(fg_color="transparent", text_color="#444444")
                 lbl_status.place(relx=0.5, rely=0.5, anchor="center")
                 lbl_status.configure(
-                    text="PRESS Ⓐ CONNECT",
+                    text=t("slot_empty"),
                     fg_color="transparent",
                     text_color=COLOR['TEXT_DIM'],
                     font=(UI['FONT_FAMILY'], UI['FONT_CARD_SIZE'], "bold")
@@ -538,6 +556,79 @@ class LauncherUi:
         self.lbl_toast.configure(text=message)
         self.lbl_toast.place(relx=0.5, rely=UI['TOAST_POSITION_Y'], anchor="center")
         self.toast_job = self.root.after(2000, lambda: self.lbl_toast.place_forget())
+
+    # ========================================================================
+    # GAME LIST
+    # ========================================================================
+    def show_games(self, titles, index):
+        """
+        Replace the player grid with a scrolling game list.
+
+        Only GAMES_VISIBLE_ROWS rows exist as widgets; moving the selection
+        re-labels them, so a library of thousands of games costs nothing.
+
+        Args:
+            titles (list[str]): Game titles in display order (not empty).
+            index  (int):       Selected entry.
+        """
+        self.games_view = (titles, index)
+
+        if self.games_frame is None:
+            self.grid_frame.pack_forget()
+            self.lbl_title.configure(text=t("title_games"))
+            self.launch_text.configure(text=t("footer_play"))
+            self.quit_text.configure(text=t("footer_back"))
+
+            self.games_frame = ctk.CTkFrame(self.main_container, fg_color=COLOR['BG_DARK'], corner_radius=0)
+            self.games_frame.pack()
+            self.games_rows = []
+            for _ in range(UI['GAMES_VISIBLE_ROWS']):
+                row = ctk.CTkLabel(
+                    self.games_frame,
+                    text="",
+                    width=UI['GAMES_ROW_WIDTH'],
+                    height=UI['GAMES_ROW_HEIGHT'],
+                    anchor="w",
+                    corner_radius=UI['CARD_CORNER_RADIUS'],
+                    font=(UI['FONT_FAMILY'], UI['FONT_GAMES_SIZE'], "bold"),
+                )
+                row.pack(pady=2)
+                self.games_rows.append(row)
+            self.games_info = ctk.CTkLabel(
+                self.games_frame,
+                text="",
+                font=(UI['FONT_FAMILY'], UI['FONT_GAMES_INFO_SIZE']),
+                fg_color="transparent",
+                text_color=COLOR['TEXT_DIM'],
+            )
+            self.games_info.pack(pady=(UI['CARD_PADDING_Y'], 0))
+
+        # Keep the selection in the middle of the window where possible
+        visible = UI['GAMES_VISIBLE_ROWS']
+        first = max(0, min(index - visible // 2, len(titles) - visible))
+        for i, row in enumerate(self.games_rows):
+            item = first + i
+            if item >= len(titles):
+                row.configure(text="", fg_color="transparent")
+            elif item == index:
+                row.configure(text=f"  ▶  {titles[item]}", fg_color=COLOR['NEON_BLUE'],
+                              text_color=COLOR['BG_DARK'])
+            else:
+                row.configure(text=f"      {titles[item]}", fg_color=COLOR['BG_CARD'],
+                              text_color=COLOR['TEXT_WHITE'])
+        self.games_info.configure(text=t("games_position", index=index + 1, total=len(titles)))
+
+    def hide_games(self):
+        """Back to the player grid."""
+        self.games_view = None
+        if self.games_frame is None:
+            return
+        self.games_frame.destroy()
+        self.games_frame = None
+        self.lbl_title.configure(text=t("title_players"))
+        self.launch_text.configure(text=self.launch_text_value)
+        self.quit_text.configure(text=t("footer_quit"))
+        self.grid_frame.pack()
 
     # ========================================================================
     # ALERT DIALOG SYSTEM
@@ -576,34 +667,34 @@ class LauncherUi:
             # ================================================================
             # NO CONTROLLERS WARNING
             # ================================================================
-            self._alert_title(box, "⚠️ NO CONTROLLERS", COLOR['ALERT_YELLOW'])
-            self._alert_text(box, f"{self.emulator_name} will launch with default inputs.")
+            self._alert_title(box, t("alert_no_pads_title"), COLOR['ALERT_YELLOW'])
+            self._alert_text(box, t("alert_no_pads_text", name=self.emulator_name))
             self._alert_buttons(box, [
-                (f"Ⓐ LAUNCH {self.launch_label}", COLOR['NEON_BLUE']),
-                ("Ⓑ BACK", COLOR['NEON_RED']),
+                (t("alert_continue"), COLOR['NEON_BLUE']),
+                (t("alert_back"), COLOR['NEON_RED']),
             ])
 
         elif mode == "EXIT":
             # ================================================================
             # EXIT CONFIRMATION
             # ================================================================
-            self._alert_title(box, "EXIT LAUNCHER?", COLOR['TEXT_WHITE'])
-            self._alert_text(box, "Are you sure you want to quit?")
+            self._alert_title(box, t("alert_exit_title"), COLOR['TEXT_WHITE'])
+            self._alert_text(box, t("alert_exit_text"))
             self._alert_buttons(box, [
-                ("Ⓐ YES", COLOR['NEON_BLUE']),
-                ("Ⓑ NO", COLOR['NEON_RED']),
+                (t("alert_yes"), COLOR['NEON_BLUE']),
+                (t("alert_no"), COLOR['NEON_RED']),
             ])
 
         elif mode == "KILL_CONFIRM":
             # ================================================================
             # KILL GAME MENU (THREE OPTIONS)
             # ================================================================
-            self._alert_title(box, "KILL GAME?", COLOR['TEXT_WHITE'])
-            self._alert_text(box, "How would you like to proceed?")
+            self._alert_title(box, t("alert_kill_title"), COLOR['TEXT_WHITE'])
+            self._alert_text(box, t("alert_kill_text"))
             self._alert_buttons(box, [
-                ("Ⓐ LAUNCHER", COLOR['NEON_BLUE']),    # Return to launcher
-                ("Ⓨ DESKTOP", COLOR['ALERT_YELLOW']),  # Exit to desktop
-                ("Ⓑ CANCEL", COLOR['NEON_RED']),       # Resume game
+                (t("alert_kill_launcher"), COLOR['NEON_BLUE']),   # Return to launcher
+                (t("alert_kill_desktop"), COLOR['ALERT_YELLOW']), # Exit to desktop
+                (t("alert_kill_cancel"), COLOR['NEON_RED']),      # Resume game
             ])
 
     def close_alert(self):

@@ -37,12 +37,17 @@ Configuri Eden in qualunque modo, ma lo avvii tramite `EdenLauncher`:
 
 1. si apre una schermata a tutto schermo controllabile con il gamepad;
 2. ogni persona preme **Ⓐ** sul proprio controller: il primo che preme è il
-   Giocatore 1, il secondo il Giocatore 2, e così via (fino a 8);
-3. si preme **☰ (Start)**: il launcher riscrive *solo* le chiavi `player_N_*`
-   di `qt-config.ini` con `guid`/`port` corretti per quel controller e avvia Eden.
+   Giocatore 1, il secondo il Giocatore 2, e così via (fino a 8). Il controller
+   **vibra** una volta per il Giocatore 1, due per il Giocatore 2, ecc.;
+3. si preme **☰ (Start)**: se il launcher è stato avviato senza un gioco si apre
+   la **lista dei giochi**, altrimenti parte subito il gioco passato da Vibeshine;
+4. il launcher riscrive *solo* le chiavi `player_N_*` di `qt-config.ini` con
+   `guid`/`port` corretti per ogni controller, attiva la **modalità TV** se ci
+   sono 2 o più giocatori, e avvia Eden.
 
-Tutto il resto della configurazione (grafica, audio, hotkey, vibrazione...) non
-viene toccato.
+Tutto il resto della configurazione (grafica, audio, hotkey...) non viene toccato.
+L'interfaccia è in **italiano** (o inglese, in base alla lingua di Windows o a
+`EdenLauncher.ini`).
 
 ---
 
@@ -53,9 +58,22 @@ viene toccato.
 | Diventare il giocatore successivo | `Ⓐ` |
 | Liberare il proprio slot | `Ⓑ` |
 | Scegliere il profilo di mappatura | `Ⓧ`, poi `◄ ►` e `Ⓐ` per confermare |
-| Avviare Eden / il gioco | `☰` (Start) |
+| Avviare il gioco / aprire la lista giochi | `☰` (Start) |
 | Uscire dal launcher | `⧉` (Back) |
-| **Chiudere Eden bloccato** | Tieni premuti `⧉` + `LB` + `RB` (~1 s) su *qualsiasi* controller |
+| **Chiudere Eden bloccato** | Premi insieme `⧉` + `LB` + `RB` su *qualsiasi* controller (combinazione configurabile) |
+
+Nella **lista giochi**:
+
+| Azione | Tasto (Xbox) |
+| :--- | :--- |
+| Su / giù (tenere premuto per scorrere) | Croce direzionale o levetta sinistra |
+| Pagina precedente / successiva | `LB` / `RB` |
+| Avviare il gioco selezionato | `Ⓐ` |
+| Tornare ai controller | `Ⓑ` |
+
+Quando chiudi un gioco avviato dalla lista torni alla lista, con gli stessi
+giocatori: puoi sceglierne subito un altro. Il launcher parte dall'ultimo gioco
+giocato.
 
 Dal menu di chiusura: `Ⓐ` torna al launcher (per riassegnare i controller),
 `Ⓨ` esce del tutto, `Ⓑ` annulla e torna al gioco.
@@ -108,16 +126,26 @@ I log del launcher finiscono nella cartella `log` di Eden
 ## Vibeshine / Sunshine / Apollo + Moonlight per Xbox
 
 1. Nell'interfaccia web dell'host apri **Applications → Add New**.
-2. **Application Name**: il nome del gioco (o "Eden").
-3. **Command**:
+2. **Application Name**: "Eden" (una sola app per tutti i giochi) oppure il nome
+   di un gioco.
+3. **Command**, a scelta:
 
-   ```text
-   "C:\Emulatori\Eden\EdenLauncher.exe" -f -g "D:\Giochi\Switch\NomeGioco.nsp"
-   ```
+   * **Una sola app con la lista giochi** (consigliato):
 
-   Tutti gli argomenti dopo il launcher vengono passati così come sono a Eden
-   (`-f` = schermo intero, `-g` = gioco da avviare). Senza argomenti viene avviata
-   l'interfaccia di Eden.
+     ```text
+     "C:\Emulatori\Eden\EdenLauncher.exe"
+     ```
+
+     Dopo aver assegnato i controller, `Start` apre la lista dei giochi presi
+     dalle cartelle configurate in Eden.
+   * **Un'app per gioco**:
+
+     ```text
+     "C:\Emulatori\Eden\EdenLauncher.exe" -f -g "D:\Giochi\Switch\NomeGioco.nsp"
+     ```
+
+     Tutti gli argomenti dopo il launcher vengono passati così come sono a Eden
+     (`-f` = schermo intero, `-g` = gioco da avviare).
 4. **Working Directory**: la cartella di Eden, es. `C:\Emulatori\Eden`.
 5. Lato host, nelle impostazioni **Input** lascia l'emulazione gamepad su
    **Xbox 360 (X360)** o *Auto*.
@@ -136,6 +164,58 @@ Note utili:
 * Se usi Joy-Con o Pro Controller Nintendo con i driver interni di Eden
   ("Enable direct Joy-Con/Pro Controller driver"), quei controller non passano da
   SDL e il launcher non può assegnarli.
+
+---
+
+## Impostazioni (`EdenLauncher.ini`)
+
+Al primo avvio il launcher crea `EdenLauncher.ini` accanto a `EdenLauncher.exe`,
+con tutte le opzioni commentate. Si modifica con il Blocco note; le righe che
+iniziano con `;` sono commenti.
+
+```ini
+[Launcher]
+language = auto
+rumble = true
+kill_combo = back+lb+rb
+
+[Eden]
+layout = Xbox
+docked = auto
+game_picker = true
+game_dirs =
+fullscreen = true
+```
+
+| Opzione | Valori | Cosa fa |
+| :--- | :--- | :--- |
+| `language` | `auto`, `it`, `en` | Lingua dell'interfaccia (`auto` = quella di Windows) |
+| `rumble` | `true`, `false` | Vibrazione di conferma quando un controller prende uno slot |
+| `kill_combo` | es. `back+lb+rb` | Tasti da premere insieme per chiudere Eden durante il gioco |
+| `layout` | `Xbox`, `Nintendo`, nome di un profilo | Layout predefinito dei tasti (vedi *Profili di mappatura*) |
+| `docked` | `auto`, `always`, `never` | Modalità TV: con 2+ giocatori, sempre, o non toccarla |
+| `game_picker` | `true`, `false` | Lista giochi quando il launcher parte senza un gioco |
+| `game_dirs` | cartelle separate da `;` | Dove cercare i giochi; vuoto = le cartelle configurate in Eden |
+| `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
+
+I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
+separa le cartelle in `game_dirs`.
+
+* **kill_combo**: tasti disponibili `a b x y back start lb rb ls rs up down left
+  right`, uniti da `+` (es. `back+start`). Se scrivi un nome sbagliato si usa
+  `back+lb+rb`, così un errore non ti lascia senza modo di chiudere Eden.
+* **docked**: molti giochi accettano più controller solo in modalità TV. Con
+  `auto` il launcher la attiva quando ci sono almeno 2 giocatori (non la
+  disattiva mai). Una configurazione personalizzata del gioco in Eden che imposta
+  una modalità diversa ha comunque la precedenza.
+* **game_dirs**: se vuoto, il launcher usa le cartelle dei giochi aggiunte in Eden
+  (rispettando l'opzione "scansione sottocartelle"). La lista mostra i file
+  `.nsp`, `.xci`, `.nro`; aggiornamenti e DLC con il title ID nel nome
+  (`[0100...800]`, `[0100...001]`) vengono nascosti. Il nome mostrato è il nome del
+  file ripulito dalle parti tra `[ ]`.
+
+Accanto al file il launcher salva `EdenLauncher.state.json` (l'ultimo gioco
+giocato): si può cancellare senza problemi.
 
 ---
 
@@ -221,10 +301,12 @@ Struttura:
 ```text
 src/
 ├── EdenLauncher.py      # entry point
-├── Core/                # motore generico (UI, SDL, hot-plug, kill combo) - da RyujinxLauncher
+├── Core/                # motore generico (UI, SDL, hot-plug, kill combo, lista giochi,
+│                        #   impostazioni, traduzioni) - derivato da RyujinxLauncher
 └── Eden/
     ├── Eden.py          # percorsi, backend SDL, hint SDL identici a Eden
-    ├── Config.py        # GUID/port, template, profili, scrittura di qt-config.ini
+    ├── Config.py        # GUID/port, layout Xbox/Nintendo, modalità TV, scrittura di qt-config.ini
+    ├── Games.py         # cartelle dei giochi di Eden, ricerca e nomi dei giochi
     └── Ini.py           # editor INI che non altera il resto del file
 tests/test_eden.py
 ```

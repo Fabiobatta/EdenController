@@ -38,6 +38,10 @@ from Core.Log import log
 from .Ini import IniFile, quote, unquote
 
 SECTION = "Controls"
+SYSTEM_SECTION = "System"
+
+# Settings::ConsoleMode (common/settings_enums.h): Handheld = 0, Docked = 1
+CONSOLE_DOCKED = 1
 MAX_PLAYERS = 8
 # Built-in profiles, in selector order. The first is the default.
 XBOX_PROFILE = "Xbox"          # A=A, B=B, X=X, Y=Y (by the label printed on the pad)
@@ -355,12 +359,24 @@ def build_player_values(assignments, hardware, profiles):
     return values, player
 
 
-def write_input(config_file, assignments, hardware, profiles):
+def docked_values():
+    """[System] keys that put Eden in docked (TV) mode, the built-in default."""
+    return {
+        "use_docked_mode\\default": "true",
+        "use_docked_mode": str(CONSOLE_DOCKED),
+    }
+
+
+def write_input(config_file, assignments, hardware, profiles, force_docked=False):
     """
     Rewrite the player_N_* keys of qt-config.ini for this launch.
 
     Only those keys are replaced - every other line of the user's settings
     is preserved as-is.
+
+    Args:
+        force_docked (bool): Also switch Eden to docked (TV) mode, which games
+                             need to accept more than one controller.
     """
     if not assignments:
         log("INFO", "No controllers assigned - leaving qt-config.ini untouched")
@@ -378,6 +394,9 @@ def write_input(config_file, assignments, hardware, profiles):
         return
 
     ini.set_many(SECTION, values)
+    if force_docked:
+        ini.set_many(SYSTEM_SECTION, docked_values())
+        log("INFO", "Console mode", "docked (TV)")
     try:
         os.makedirs(os.path.dirname(config_file), exist_ok=True)
         ini.save(config_file)

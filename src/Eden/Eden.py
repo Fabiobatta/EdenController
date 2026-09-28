@@ -11,16 +11,65 @@ import os
 import sys
 
 from Core.Emulator import Emulator
+from Core.I18n import register, t
 from Core.Log import log, fatal
 from Core.Paths import find_appimage, read_path_override, resource_path
 from Core.Process import mount_appimage, unmount_appimage
 
-from . import Config
+from . import Config, Games
 from .Ini import IniFile, read_bool
 
 # Environment overrides
 ENV_SDL_BACKEND = "EDEN_LAUNCHER_SDL"       # "SDL2" or "SDL3"
 ENV_USER_DIR = "EDEN_LAUNCHER_USER_DIR"     # Eden's user folder (holds config/)
+
+SETTINGS_SECTION = "Eden"
+
+DEFAULT_SETTINGS = f"""\
+[{SETTINGS_SECTION}]
+; Layout predefinito dei tasti A/B/X/Y:
+;   Xbox     = ogni tasto fa quello che c'e' scritto sopra (A in basso = A di Switch)
+;   Nintendo = per posizione, come la mappatura automatica di Eden
+; oppure il nome di un profilo salvato in Eden. Si cambia per giocatore con X.
+layout = {Config.XBOX_PROFILE}
+
+; Modalita' TV (docked), necessaria a molti giochi per piu' controller:
+;   auto   = attivala quando ci sono 2 o piu' giocatori
+;   always = attivala sempre
+;   never  = non toccare l'impostazione di Eden
+docked = auto
+
+; Lista dei giochi quando il launcher parte senza un gioco: true / false
+game_picker = true
+; Cartelle dei giochi separate da ';' (sottocartelle incluse).
+; Vuoto = usa le cartelle gia' configurate in Eden.
+game_dirs =
+; Avvia i giochi della lista a schermo intero: true / false
+fullscreen = true
+"""
+
+register({
+    "en": {
+        "eden_missing_title": "Eden Missing",
+        "eden_missing_text": "Could not find {exe} in:\n{dir}\n\n"
+                             "Place the launcher next to Eden, or write Eden's folder\n"
+                             "into EdenPath.config next to the launcher.",
+        "eden_config_title": "Configuration Error",
+        "eden_config_text": "Could not read Eden's qt-config.ini.\n\n"
+                            "Open Eden manually once so it writes a valid configuration,\n"
+                            "then start this launcher again.",
+    },
+    "it": {
+        "eden_missing_title": "Eden non trovato",
+        "eden_missing_text": "Impossibile trovare {exe} in:\n{dir}\n\n"
+                             "Metti il launcher nella cartella di Eden, oppure scrivi\n"
+                             "la cartella di Eden in EdenPath.config accanto al launcher.",
+        "eden_config_title": "Errore di configurazione",
+        "eden_config_text": "Impossibile leggere qt-config.ini di Eden.\n\n"
+                            "Apri Eden una volta a mano per creare una configurazione valida,\n"
+                            "poi riavvia il launcher.",
+    },
+})
 
 _SDL_LIBS = {
     "SDL3": {"win32": "SDL3.dll", "darwin": "libSDL3.dylib", "linux": "libSDL3.so.0"},
@@ -53,6 +102,7 @@ class Eden(Emulator):
     """Eden (Nintendo Switch emulator, yuzu lineage)."""
 
     name = "Eden"
+    default_settings = DEFAULT_SETTINGS
 
     def __init__(self):
         super().__init__()
@@ -118,10 +168,8 @@ class Eden(Emulator):
 
         if not os.path.exists(self.exe):
             fatal(
-                "Eden Missing",
-                f"Could not find {os.path.basename(self.exe)} in:\n{self.dir}\n\n"
-                "Place the launcher next to Eden, or write Eden's folder\n"
-                "into EdenPath.config next to the launcher.",
+                t("eden_missing_title"),
+                t("eden_missing_text", exe=os.path.basename(self.exe), dir=self.dir),
                 "Eden binary not found", self.exe
             )
 
@@ -228,20 +276,58 @@ class Eden(Emulator):
             except Exception as e:
                 log("EXCEPTION", "Could not read qt-config.ini", e)
                 fatal(
-                    "Configuration Error",
-                    "Could not read Eden's qt-config.ini.\n\n"
-                    "Open Eden manually once so it writes a valid configuration,\n"
-                    "then start this launcher again.",
+                    t("eden_config_title"),
+                    t("eden_config_text"),
                     "Config file unreadable", self.config_path
                 )
         template = Config.load_template(ini)
-        return Config.load_profiles(self.profiles_dir, template)
+        profiles = Config.load_profiles(self.profiles_dir, template)
+
+        # The profile named by "layout" becomes the default (first) one
+        wanted = self._setting("layout", Config.DEFAULT_PROFILE)
+        match = next((k for k in profiles if k.lower() == wanted.lower()), None)
+        if match is None:
+            log("WARNING", "layout setting names an unknown profile, using default", wanted)
+            return profiles
+        log("INFO", "Default layout", match)
+        return {match: profiles[match], **{k: v for k, v in profiles.items() if k != match}}
 
     # ------------------------------------------------------------------
     # 4. Writing the launch configuration
     # ------------------------------------------------------------------
     def write_input_config(self, assignments, hardware):
-        Config.write_input(self.config_path, assignments, hardware, self.profiles)
+        docked = self._setting("docked", "auto").lower()
+        force_docked = docked == "always" or (docked == "auto" and len(assignments) >= 2)
+        Config.write_input(self.config_path, assignments, hardware, self.profiles,
+                           force_docked=force_docked)
+
+    # ------------------------------------------------------------------
+    # 6. Game picker
+    # ------------------------------------------------------------------
+    def list_games(self):
+        if not self.settings.get_bool(SETTINGS_SECTION, "game_picker", True):
+            return []
+
+        folders = [(os.path.expandvars(os.path.expanduser(d)), True)
+                   for d in self.settings.get_list(SETTINGS_SECTION, "game_dirs")]
+        if not folders and os.path.exists(self.config_path):
+            try:
+                folders = Games.eden_game_dirs(IniFile.load(self.config_path).items("UI"))
+            except Exception as e:
+                log("EXCEPTION", "Could not read Eden's game folders", e)
+        log("INFO", "Game folders", "; ".join(f for f, _ in folders) or "none")
+        return Games.find_games(folders)
+
+    def game_command(self, path):
+        command = [self.exe]
+        if self.settings.get_bool(SETTINGS_SECTION, "fullscreen", True):
+            command.append("-f")
+        return command + ["-g", path]
+
+    def _setting(self, key, default):
+        if self.settings is None:
+            return default
+        return self.settings.get(SETTINGS_SECTION, key, default)
 
     # ------------------------------------------------------------------
     # 5. Teardown

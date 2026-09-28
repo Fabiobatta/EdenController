@@ -146,6 +146,24 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(set(template), {"button_a", "button_b", "lstick"})
         self.assertIn("deadzone:0.200000", template["lstick"])
 
+    def test_xbox_layout_swaps_face_buttons_and_is_default(self):
+        template = Config.load_template(IniFile(QT_CONFIG))
+        profiles = Config.load_profiles("/nonexistent", template)
+        self.assertEqual(list(profiles)[0], Config.DEFAULT_PROFILE)
+        xbox, nintendo = profiles[Config.XBOX_PROFILE], profiles[Config.NINTENDO_PROFILE]
+        # Eden auto-map: Switch A = raw button 1 (Xbox B). Xbox layout: Switch A = raw 0 (Xbox A)
+        self.assertIn("button:1,", nintendo["button_a"])
+        self.assertIn("button:0,", xbox["button_a"])
+        self.assertIn("button:1,", xbox["button_b"])
+        self.assertEqual(xbox["lstick"], nintendo["lstick"])
+        self.assertEqual(Config.to_label_layout(xbox), nintendo)
+
+    def test_fallback_xbox_layout_matches_xinput_labels(self):
+        xbox = Config.to_label_layout(Config.fallback_template())
+        # SDL XInput raw indices: A=0 B=1 X=2 Y=3
+        for key, index in (("button_a", 0), ("button_b", 1), ("button_x", 2), ("button_y", 3)):
+            self.assertTrue(xbox[key].startswith(f"button:{index},"), key)
+
     def test_keyboard_player_1_falls_back(self):
         ini = IniFile("[Controls]\nplayer_0_button_a\\default=false\nplayer_0_button_a=\"code:67,engine:keyboard\"\n")
         self.assertEqual(Config.load_template(ini), Config.fallback_template())
@@ -161,7 +179,7 @@ class ProfileTests(unittest.TestCase):
             template = Config.load_template(IniFile(QT_CONFIG))
             profiles = Config.load_profiles(tmp, template)
 
-        self.assertEqual(list(profiles), [Config.DEFAULT_PROFILE, "Swapped"])
+        self.assertEqual(list(profiles), [Config.XBOX_PROFILE, Config.NINTENDO_PROFILE, "Swapped"])
         self.assertIn("button:0,", profiles["Swapped"]["button_a"])
         self.assertEqual(profiles["Swapped"]["button_b"], template["button_b"])  # inherited
 
@@ -191,8 +209,10 @@ class WriteTests(unittest.TestCase):
             text = f.read()
         controls = IniFile(text).items("Controls")
 
-        self.assertEqual(unquote(controls["player_0_button_a"]), f"button:1,engine:sdl,guid:{EDEN_GUID},port:2")
-        self.assertEqual(unquote(controls["player_1_button_a"]), f"button:1,engine:sdl,guid:{EDEN_GUID},port:0")
+        # Default Xbox layout: Switch A = raw button 0, the Xbox A (bottom) button
+        self.assertEqual(unquote(controls["player_0_button_a"]), f"button:0,engine:sdl,guid:{EDEN_GUID},port:2")
+        self.assertEqual(unquote(controls["player_1_button_a"]), f"button:0,engine:sdl,guid:{EDEN_GUID},port:0")
+        self.assertEqual(unquote(controls["player_1_button_b"]), f"button:1,engine:sdl,guid:{EDEN_GUID},port:0")
         self.assertIn(f"port:2", controls["player_0_lstick"])
         self.assertIn("deadzone:0.200000", controls["player_1_lstick"])
         self.assertEqual(controls["player_1_button_b\\default"], "false")

@@ -39,7 +39,13 @@ from .Ini import IniFile, quote, unquote
 
 SECTION = "Controls"
 MAX_PLAYERS = 8
-DEFAULT_PROFILE = "ED Default"
+# Built-in profiles, in selector order. The first is the default.
+XBOX_PROFILE = "Xbox"          # A=A, B=B, X=X, Y=Y (by the label printed on the pad)
+NINTENDO_PROFILE = "Nintendo"  # by position, like Eden's auto-map (Xbox B = Switch A)
+DEFAULT_PROFILE = XBOX_PROFILE
+
+# Face buttons whose bindings trade places between the two layouts
+FACE_SWAPS = (("button_a", "button_b"), ("button_x", "button_y"))
 
 # Settings::ControllerType::ProController
 PRO_CONTROLLER = 0
@@ -237,6 +243,22 @@ def load_template(ini):
 # ============================================================================
 # PROFILES
 # ============================================================================
+def to_label_layout(mapping):
+    """
+    Turn a positional mapping into an Xbox-label one, or back.
+
+    Eden's auto-map (and the fallback above) follows the physical position:
+    Switch A is the east button, which an Xbox pad labels B. Swapping the
+    A/B and X/Y bindings makes every button do what its Xbox label says
+    (Xbox A, the bottom button, becomes Switch A). The swap is its own inverse.
+    """
+    result = dict(mapping)
+    for first, second in FACE_SWAPS:
+        if first in mapping and second in mapping:
+            result[first], result[second] = mapping[second], mapping[first]
+    return result
+
+
 def load_profiles(profiles_dir, template):
     """
     Load Eden input profiles (<config>/input/*.ini).
@@ -244,12 +266,20 @@ def load_profiles(profiles_dir, template):
     Profiles are saved from Eden's Controls dialog; their [Controls] section
     holds the same keys as qt-config.ini without the "player_N_" prefix.
     Only SDL profiles are offered, since the launcher assigns physical pads.
-    A profile file named "ED Default.ini" overrides the built-in default.
+
+    The two built-in profiles come first, both derived from `template`
+    (Player 1's mapping, assumed positional as Eden's auto-map makes it):
+        "Xbox"      A/B and X/Y follow the labels on the Xbox pad (default)
+        "Nintendo"  the template unchanged
+    A profile file with the same name as a built-in one replaces it.
 
     Returns:
         dict: {"display name": mapping dict}, default first.
     """
-    profiles = {DEFAULT_PROFILE: dict(template)}
+    profiles = {
+        XBOX_PROFILE: to_label_layout(template),
+        NINTENDO_PROFILE: dict(template),
+    }
 
     if os.path.isdir(profiles_dir):
         for filepath in sorted(glob.glob(os.path.join(profiles_dir, "*.ini"))):

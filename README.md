@@ -81,9 +81,10 @@ Dal menu di chiusura: `Ⓐ` torna al launcher (per riassegnare i controller),
 3. **Configurazione una tantum dentro Eden** (consigliata):
    apri Eden → *Emulazione → Configura → Controlli*, imposta il **Giocatore 1**
    con un controller Xbox (dispositivo SDL, pulsante *Mappatura automatica*),
-   regola deadzone, vibrazione ecc. e salva. Questa mappatura diventa il profilo
-   **"ED Default"** che il launcher applica a tutti i controller, cambiando solo
-   `guid` e `port`.
+   regola deadzone, vibrazione ecc. e salva. Il launcher parte da questa
+   mappatura per tutti i controller, cambiando solo `guid` e `port`, e di
+   default la converte nel **layout Xbox** (vedi *Profili di mappatura*).
+   Non scambiare a mano A/B in Eden: ci pensa il launcher.
 
    Se il Giocatore 1 non ha una mappatura SDL, il launcher usa un layout Xbox
    (XInput) integrato.
@@ -140,11 +141,28 @@ Note utili:
 
 ## Profili di mappatura
 
-Oltre a **"ED Default"** (la mappatura del Giocatore 1), il launcher elenca i
-profili che salvi in Eden (*Configura → Controlli → Profilo → Salva*), cioè i
-file `config\input\*.ini` che usano un controller SDL. Con `Ⓧ` ogni giocatore
-può sceglierne uno diverso (utile per esempio per un layout A/B invertito).
-Un profilo chiamato `ED Default` sostituisce il default.
+Due profili sono integrati, entrambi ricavati dalla mappatura del Giocatore 1:
+
+| Tasto sull'Xbox | **Xbox** (predefinito) | **Nintendo** |
+| :--- | :--- | :--- |
+| A (in basso) | A di Switch | B di Switch |
+| B (a destra) | B di Switch | A di Switch |
+| X (a sinistra) | X di Switch | Y di Switch |
+| Y (in alto) | Y di Switch | X di Switch |
+
+* **Xbox**: ogni tasto fa quello che c'è scritto sopra. In Mario Kart, per
+  esempio, si accelera con l'**A** dell'Xbox (in basso), come indicano i giochi.
+* **Nintendo**: stessa *posizione* del Pro Controller, cioè la mappatura
+  automatica di Eden (in Mario Kart si accelera col tasto a destra, la B dell'Xbox).
+
+Levette, croce direzionale, dorsali, grilletti, Start e Back sono uguali nei due
+profili.
+
+Il launcher elenca anche i profili che salvi in Eden (*Configura → Controlli →
+Profilo → Salva*), cioè i file `config\input\*.ini` che usano un controller SDL.
+Con `Ⓧ` ogni giocatore può sceglierne uno diverso; la scelta viene ricordata
+per quel controller finché resta collegato. Un profilo salvato con il nome
+`Xbox` o `Nintendo` sostituisce quello integrato.
 
 ---
 

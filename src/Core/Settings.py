@@ -44,7 +44,7 @@ sounds = true
 sound_volume = 70
 ; Per cambiare un suono metti un file .wav con lo stesso nome nella cartella
 ; "sounds" accanto al launcher (join1..join8, blip1..blip8, select, back,
-; move, toggle, launch, tick, win, leave, error)
+; move, toggle, launch, tick, win, trophy, leave, error)
 
 ; Backup dei salvataggi prima di avviare un gioco dalla lista: true / false
 backup_saves = true
@@ -56,6 +56,9 @@ backup_keep = 10
 
 ; Sfondo animato: l'immagine sfocata del gioco si muove lentamente: true / false
 background_motion = true
+; Il bordo e il bagliore del gioco selezionato prendono il colore della sua
+; copertina (false = sempre giallo)
+dynamic_colors = true
 
 ; Combinazione da tenere premuta durante il gioco per chiudere l'emulatore.
 ; Tasti: a b x y back start lb rb ls rs up down left right, uniti da '+'

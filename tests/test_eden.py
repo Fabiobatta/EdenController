@@ -734,6 +734,7 @@ class GlyphTests(unittest.TestCase):
         self.assertEqual(Glyphs.people(2, 20, "#FFFFFF").height, 20)
         self.assertEqual(Glyphs.star(20, "#F5D90A").size, (20, 20))
         self.assertEqual(Glyphs.clock(18, "#FFFFFF").size, (18, 18))
+        self.assertEqual(Glyphs.trophy(30, "#F5D90A").size, (30, 30))
         self.assertEqual(Glyphs.panel(100, 40, 8, (0, 0, 0, 128), glow=("#FF0000", 6)).size, (112, 52))
         with self.assertRaises(ValueError):
             Glyphs.button("nope", 24)
@@ -807,6 +808,62 @@ class RouletteTests(unittest.TestCase):
         self.assertEqual(len(pick_candidates(games, 0)), 5)
         self.assertEqual(pick_candidates(games, 9), [])
         self.assertEqual((ease_out(0), ease_out(1)), (0, 1))
+
+
+class AchievementTests(unittest.TestCase):
+    def _tracker(self):
+        from Core.Achievements import Achievements
+        state = {}
+        settings = types.SimpleNamespace(state=state, save_state=lambda **v: state.update(v))
+        return Achievements(settings), state
+
+    def test_unlocks_once(self):
+        import time
+        tracker, state = self._tracker()
+        game = {"title": "Mario Kart 8 Deluxe"}
+        noon = time.mktime((2026, 9, 28, 12, 0, 0, 0, 0, -1))
+        self.assertEqual(tracker.game_started(game, "MK", 4, now=noon), ["first_game", "party2", "party4"])
+        self.assertEqual(tracker.game_started(game, "MK", 4, now=noon), [])       # already unlocked
+        self.assertEqual(state["achievements"]["party4"]["game"], "Mario Kart 8 Deluxe")
+        self.assertEqual(tracker.game_started(game, "MK", 8, from_roulette=True, now=noon), ["party8", "roulette"])
+        night = time.mktime((2026, 9, 29, 2, 30, 0, 0, 0, -1))
+        self.assertEqual(tracker.game_started({"title": "B"}, "B", 1, now=night), ["night_owl"])
+        self.assertEqual(tracker.game_started({"title": "C"}, "C", 1, now=noon), ["variety"])
+
+    def test_play_time_and_counters(self):
+        import time
+        from Core.Achievements import ACHIEVEMENTS
+        tracker, state = self._tracker()
+        noon = time.mktime((2026, 9, 28, 12, 0, 0, 0, 0, -1))
+        state["play"] = {"MK": [11 * 3600, 0], "X": [90 * 3600, 0]}
+        self.assertEqual(tracker.game_ended({"title": "MK"}, "MK", 3 * 3600 + 5, now=noon),
+                         ["marathon", "devoted", "century"])
+        self.assertEqual(tracker.roulette_picked({"title": "MK"}, "MK"), [])
+        tracker.roulette_picked({"title": "MK"}, "MK")
+        self.assertEqual(tracker.roulette_picked({"title": "MK"}, "MK"), ["destiny"])
+        self.assertEqual(tracker.favorites_changed(4), [])
+        self.assertEqual(tracker.favorites_changed(5), ["favorites"])
+        self.assertTrue(set(state["achievements"]) <= set(ACHIEVEMENTS))
+
+    def test_every_achievement_has_text(self):
+        from Core.Achievements import ACHIEVEMENTS
+        from Core.I18n import STRINGS
+        for language in ("en", "it"):
+            for achievement in ACHIEVEMENTS:
+                self.assertIn(f"ach_{achievement}", STRINGS[language])
+                self.assertIn(f"ach_{achievement}_desc", STRINGS[language])
+
+
+class ColorTests(unittest.TestCase):
+    def test_vivid_color(self):
+        from PIL import Image, ImageDraw
+        from Core.Glyphs import vivid_color
+        self.assertEqual(vivid_color(Image.new("RGB", (100, 100), (128, 128, 128)), "#F5D90A"), "#F5D90A")
+        image = Image.new("RGB", (100, 100), (120, 120, 120))
+        ImageDraw.Draw(image).rectangle((0, 0, 60, 60), fill=(200, 30, 30))    # red wins over grey
+        color = vivid_color(image, "#F5D90A")
+        r, g, b = (int(color[i:i + 2], 16) for i in (1, 3, 5))
+        self.assertTrue(r > 200 and g < 80 and b < 80, color)
 
 
 class SoundTests(unittest.TestCase):

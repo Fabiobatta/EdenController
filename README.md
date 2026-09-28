@@ -59,6 +59,7 @@ L'interfaccia è in **italiano** (o inglese, in base alla lingua di Windows o a
 | Liberare il proprio slot | `Ⓑ` |
 | Scegliere il layout dei tasti | `Ⓧ`, poi `◄ ►` e `Ⓐ` per confermare (`Ⓑ` annulla) |
 | Riprendere l'ultimo gioco giocato, saltando la lista | `Ⓨ` |
+| Vedere i traguardi | `RB` |
 | Avviare il gioco / aprire la lista giochi | `☰` (Start) |
 | Uscire dal launcher | `⧉` (Back) |
 | **Chiudere Eden bloccato** | Premi insieme `⧉` + `LB` + `RB` su *qualsiasi* controller (combinazione configurabile) |
@@ -196,6 +197,7 @@ backup_saves = true
 backup_dir = saves_backup
 backup_keep = 10
 background_motion = true
+dynamic_colors = true
 
 [Eden]
 layout = Xbox
@@ -226,6 +228,7 @@ fullscreen = true
 | `backup_dir` | cartella | Dove mettere i backup (relativa al launcher o percorso completo) |
 | `backup_keep` | numero | Quanti backup tenere per gioco |
 | `background_motion` | `true`, `false` | Sfondo che si muove lentamente |
+| `dynamic_colors` | `true`, `false` | Bordo e bagliore del gioco selezionato nel colore della sua copertina |
 | `[Players]` | `<Title ID o nome> = <numero>` | Corregge il numero di giocatori mostrato su un gioco |
 
 I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
@@ -268,6 +271,11 @@ molto lentamente. Per restare leggero l'animazione sposta l'immagine già pronta
 di un pixel alla volta (circa due volte al secondo). Si ferma mentre scorri la
 lista, con un dialogo aperto e durante il gioco (`background_motion = false` per
 lo sfondo fermo).
+
+**Colori dinamici.** Il bordo e il bagliore del gioco selezionato prendono il colore
+principale della sua copertina: rosso per Mario Kart, rosa per Kirby… Se
+l'immagine è quasi tutta grigia si usa il giallo (`dynamic_colors = false` per
+averlo sempre giallo).
 
 **Ordine e preferiti.** Di default i giochi sono in ordine di **ultima partita**:
 il primo in alto è quello giocato più di recente. Con `☰` (Start) passi ad
@@ -374,6 +382,37 @@ gioco.
 
 ---
 
+## Traguardi
+
+Piccoli riconoscimenti che si sbloccano giocando. Quando ne sblocchi uno compare un
+banner dorato in alto, con un suono e una vibrazione su tutti i controller.
+Quelli sbloccati durante una partita vengono mostrati quando torni al launcher.
+Dalla schermata dei controller, `RB` apre l'elenco completo, con la data e il gioco
+di quelli ottenuti.
+
+| Traguardo | Come si sblocca |
+| :--- | :--- |
+| Si comincia | Avvia il primo gioco dal launcher |
+| In compagnia | Gioca in 2 o più |
+| Serata in 4 | Gioca in 4 o più |
+| Tutti a bordo | Gioca in 8 |
+| Che la sorte decida | Gioca a un gioco scelto dalla roulette |
+| Destino | La roulette sceglie lo stesso gioco 3 volte |
+| Serata varia | Gioca 3 giochi diversi senza chiudere il launcher |
+| Collezionista | Gioca 10 giochi diversi |
+| I miei preferiti | Aggiungi 5 giochi ai preferiti |
+| Maratona | Gioca 3 ore di fila |
+| Appassionato | 10 ore sullo stesso gioco |
+| Veterano | 50 ore sullo stesso gioco |
+| Centenario | 100 ore di gioco in totale |
+| Nottambulo | Gioca dopo le 2 di notte |
+
+Valgono i giochi avviati dalla lista (o con `Ⓨ` *Riprendi*). I traguardi sono
+salvati in `EdenLauncher.state.json`; il tempo giocato prima di questa versione
+conta già per quelli sulle ore.
+
+---
+
 ## Suoni
 
 Quando un controller si unisce, oltre alla vibrazione (1 impulso per P1, 2 per
@@ -385,7 +424,7 @@ I suoni sono generati dal launcher (nessun file da scaricare) e in streaming
 arrivano sulla TV insieme all'audio del PC. Si spengono con `sounds = false` o si
 regolano con `sound_volume`. Per sostituirne uno, metti un `.wav` con lo stesso
 nome nella cartella `sounds` accanto al launcher: `join1`…`join8`,
-`blip1`…`blip8`, `select`, `back`, `move`, `toggle`, `launch`, `tick`, `win`,
+`blip1`…`blip8`, `select`, `back`, `move`, `toggle`, `launch`, `tick`, `win`, `trophy`,
 `leave`, `error`.
 
 ---
@@ -484,6 +523,7 @@ src/
 │   ├── Glyphs.py        #   tasti Xbox disegnati, icone, pannelli
 │   ├── Art.py           #   copertine, sfondi, download in background
 │   ├── Roulette.py      #   "Stasera si gioca a…"
+│   ├── Achievements.py  #   traguardi
 │   ├── Backup.py        #   zip dei salvataggi prima di ogni gioco
 │   ├── Sound.py         #   suoni sintetizzati dell'interfaccia
 │   ├── Settings.py      #   EdenLauncher.ini, stato, cache

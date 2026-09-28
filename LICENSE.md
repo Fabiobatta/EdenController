@@ -21,7 +21,8 @@ by **Artomos**, licensed under CC BY-NC 4.0.
   `GameGrid.py`, `Glyphs.py`: one Tk canvas instead of customtkinter),
   translations (`I18n.py`), the settings file (`Settings.py`), pictures
   (`Art.py`), the game picker, the roulette (`Roulette.py`), save backups
-  (`Backup.py`), interface sounds (`Sound.py`), confirmation rumble, a
+  (`Backup.py`), interface sounds (`Sound.py`), achievements
+  (`Achievements.py`), dynamic colours, confirmation rumble, a
   configurable kill combo,
   incremental controller detection and stable keys for controllers without a
   device path, face-button bindings, and the build scripts' Eden defaults.

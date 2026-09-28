@@ -12,6 +12,7 @@ Screens (self.mode):
     GAMES     the game grid - only when the emulator offers games and no game
               was passed on the command line
     ROULETTE  "tonight we play...": a random game for everyone who joined
+    TROPHIES  the achievements list (RB on the player cards)
 
 Remembered between sessions (Settings state file): the last game, play time
 and last-played date per game, favourites and the grid's sort order.
@@ -31,6 +32,7 @@ import threading
 import time
 from tkinter import messagebox
 
+from .Achievements import ACHIEVEMENTS, Achievements
 from .Art import ArtLibrary
 from .Backup import backup_saves
 from .I18n import t
@@ -120,10 +122,14 @@ class LauncherApp:
         self.backup_dir = os.path.join(base_dir(), os.path.expandvars(os.path.expanduser(
             settings.get(LAUNCHER_SECTION, "backup_dir", "saves_backup"))))
         self.ui.motion = settings.get_bool(LAUNCHER_SECTION, "background_motion", True)
+        self.ui.dynamic_colors = settings.get_bool(LAUNCHER_SECTION, "dynamic_colors", True)
         self.roulette = Roulette(self.ui, on_tick=self.on_roulette_tick, on_done=self.on_roulette_done)
         state = settings.state or {}
         self.sort_mode = state.get("sort") if state.get("sort") in SORT_MODES else SORT_MODES[0]
-        self.session = None                 # {"key", "start"} while a picked game runs
+        self.session = None                 # {"key", "start", "game"} while a picked game runs
+        self.achievements = Achievements(settings)
+        self.trophy_queue = []              # unlocked, not announced yet
+        self._mode_before_trophies = "PLAYERS"
 
         # Keyboard shortcuts for accessibility
         self.root.bind("<Return>", lambda e: self.handle_enter_key())
@@ -185,9 +191,11 @@ class LauncherApp:
             self.quit()
         elif self.ui.alert_mode == "KILL_CONFIRM":
             self.kill_and_quit()
+        elif self.mode == "TROPHIES":
+            self.close_trophies()
         elif self.mode == "ROULETTE":
             if not self.roulette.spinning:
-                self.launch_game(self.roulette.chosen)
+                self.launch_game(self.roulette.chosen, from_roulette=True)
         elif self.mode == "GAMES" and not self.process:
             self.launch_selected_game()
         elif not self.process:
@@ -197,6 +205,8 @@ class LauncherApp:
         """Handle Escape key press (cancel/back action)."""
         if self.ui.alert_mode:
             self.ui.close_alert()
+        elif self.mode == "TROPHIES":
+            self.close_trophies()
         elif self.mode == "ROULETTE":
             self.close_roulette()
         elif self.mode == "GAMES":
@@ -405,6 +415,8 @@ class LauncherApp:
         # ====================================================================
         for game in self.art.take_finished():
             self.ui.games_art_changed(game)
+        if self.trophy_queue and not self.process and not self.ui.trophy_showing and not self.ui.alert_mode:
+            self.announce_trophy(self.trophy_queue.pop(0))
         if self.art.sgdb_missing != self._sgdb_missing_saved:
             self._sgdb_missing_saved = set(self.art.sgdb_missing)
             self.emu.settings.save_state(covers_not_found=sorted(self._sgdb_missing_saved))
@@ -425,6 +437,10 @@ class LauncherApp:
                     continue    # Ignore input while a game runs (no mid-game reassignment)
                 elif self.mode == "ROULETTE":
                     self.on_roulette_button(button)
+                elif self.mode == "TROPHIES":
+                    if button in (sdl.SDL_CONTROLLER_BUTTON_B, sdl.SDL_CONTROLLER_BUTTON_BACK,
+                                  sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
+                        self.close_trophies()
                 elif self.mode == "GAMES":
                     self.on_games_button(button)
                 else:
@@ -495,7 +511,7 @@ class LauncherApp:
                 self.close_roulette()
             return
         if button == sdl.SDL_CONTROLLER_BUTTON_A:
-            self.launch_game(self.roulette.chosen)
+            self.launch_game(self.roulette.chosen, from_roulette=True)
         elif button == sdl.SDL_CONTROLLER_BUTTON_X:
             self.start_roulette(exclude=self.roulette.chosen)
         elif button == sdl.SDL_CONTROLLER_BUTTON_B:
@@ -519,6 +535,8 @@ class LauncherApp:
                 self.remove_player(which)
         elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
             self.resume_last_game(which)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER:
+            self.show_trophies()
         elif button == sdl.SDL_CONTROLLER_BUTTON_X:
             self.toggle_profile_edit(which)         # Enter/exit profile selection
         elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
@@ -658,8 +676,8 @@ class LauncherApp:
 
     def update_hints(self):
         """Footer button hints for the current screen."""
-        if self.mode == "ROULETTE":
-            hints = []                          # the roulette draws its own
+        if self.mode in ("ROULETTE", "TROPHIES"):
+            hints = []                          # they draw their own
         elif self.mode == "GAMES":
             hints = [(("lb", "rb"), t("hint_page")), ("x", t("hint_surprise"))]
             joined = len(self.assignments)
@@ -680,7 +698,7 @@ class LauncherApp:
             if last:
                 title = last["title"] if len(last["title"]) <= 26 else last["title"][:25].rstrip() + "…"
                 hints.append(("y", t("hint_resume", title=title)))
-            hints += [("start", start), ("back", t("hint_quit"))]
+            hints += [("rb", t("hint_trophies")), ("start", start), ("back", t("hint_quit"))]
         self.ui.set_hints(hints)
 
     # ========================================================================
@@ -757,13 +775,14 @@ class LauncherApp:
         }
         self.games = sorted(self.games, key=orders[self.sort_mode])
 
-    def start_session(self, game):
+    def start_session(self, game, from_roulette=False):
         key = self.game_key(game)
         self.session = {"key": key, "start": time.monotonic(), "game": game}
         played = dict(self.emu.settings.state.get("play") or {})
         seconds = (list(played.get(key) or []) + [0])[0]
         played[key] = [seconds, int(time.time())]
         self.emu.settings.save_state(last_game=game["path"], play=played)
+        self.trophy_queue += self.achievements.game_started(game, key, len(self.assignments), from_roulette)
 
     def end_session(self):
         """The game closed (or was killed): add its play time."""
@@ -778,6 +797,7 @@ class LauncherApp:
         played[session["key"]] = [seconds + elapsed, last]
         self.emu.settings.save_state(play=played)
         log("INFO", "Play time", f"{session['key']}: +{elapsed // 60} min")
+        self.trophy_queue += self.achievements.game_ended(session["game"], session["key"], elapsed)
         if self.games:
             self.order_games()                  # "recent" / "most played" may have changed
             if session["game"] in self.games:
@@ -795,6 +815,7 @@ class LauncherApp:
         else:
             favorites.append(key)
         self.emu.settings.save_state(favorites=favorites)
+        self.trophy_queue += self.achievements.favorites_changed(len(favorites))
         self.sounds.play("toggle")
         self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["ACCENT"])
         self._reorder_keeping(game)
@@ -814,6 +835,37 @@ class LauncherApp:
         if game in self.shown_games:
             self.game_index = self.shown_games.index(game)
         self.show_games()
+
+    # ========================================================================
+    # ACHIEVEMENTS
+    # ========================================================================
+    def announce_trophy(self, achievement):
+        log("INFO", "Achievement unlocked", achievement)
+        self.sounds.play("trophy")
+        self.rumble_all(*WIN_RUMBLE)
+        self.ui.show_trophy(t(f"ach_{achievement}"), t(f"ach_{achievement}_desc"))
+
+    def show_trophies(self):
+        unlocked = self.achievements.unlocked
+        items = []
+        for achievement in ACHIEVEMENTS:
+            info = unlocked.get(achievement)
+            desc = t(f"ach_{achievement}_desc")
+            if info and info.get("game"):
+                desc += f" · {info['game']}"
+            date = time.strftime("%d/%m/%Y", time.localtime(info["at"])) if info else ""
+            items.append((t(f"ach_{achievement}"), desc, bool(info), date))
+        self._mode_before_trophies = self.mode
+        self.mode = "TROPHIES"
+        self.sounds.play("toggle")
+        self.ui.show_trophies(items, t("trophies_count", n=sum(1 for i in items if i[2]), total=len(items)))
+        self.update_hints()
+
+    def close_trophies(self):
+        self.ui.hide_trophies()
+        self.sounds.play("back")
+        self.mode = self._mode_before_trophies
+        self.update_hints()
 
     # ========================================================================
     # ROULETTE
@@ -844,6 +896,7 @@ class LauncherApp:
         self.sounds.play("win")
         self.rumble_all(*WIN_RUMBLE)
         self.ui.set_backdrop(game)
+        self.trophy_queue += self.achievements.roulette_picked(game, self.game_key(game))
 
     def close_roulette(self):
         """Back to the grid, on the drawn game if the spin finished."""
@@ -987,7 +1040,7 @@ class LauncherApp:
         if self.shown_games:
             self.launch_game(self.shown_games[self.game_index])
 
-    def launch_game(self, game):
+    def launch_game(self, game, from_roulette=False):
         """Back up the saves, remember the game, start it."""
         log("INFO", "Game selected", game["path"])
         self.roulette.close()
@@ -995,7 +1048,7 @@ class LauncherApp:
         if self.backup_keep > 0:
             root, folders = self.emu.save_folders(game)
             backup_saves(game, root, folders, self.backup_dir, self.backup_keep)
-        self.start_session(game)
+        self.start_session(game, from_roulette)
         self.mode = "GAMES"
         self.force_launch(self.emu.game_command(game["path"]))
 

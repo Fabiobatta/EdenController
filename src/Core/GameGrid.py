@@ -10,6 +10,8 @@ console - coloured against the number of controllers assigned:
     red     fewer players than joined
     grey    nothing to compare (unknown count, or a single player)
 
+The selected tile's border and glow take the main colour of the game's
+art (dynamic colours, Glyphs.vivid_color), yellow when the art is grey.
 Favourites carry a star in the top-right corner. The header shows the
 selected game's name, players, play time and when it was last played.
 
@@ -123,6 +125,19 @@ class GameGrid:
     # ------------------------------------------------------------------
     # Tiles
     # ------------------------------------------------------------------
+    def accent(self, game):
+        """Highlight colour for `game`: from its art, computed once per picture."""
+        if not self.ui.dynamic_colors:
+            return ACCENT
+        path = game.get("cover") or game.get("image") or game.get("background")
+        cached = game.get("_accent")
+        if cached and cached[0] == path:
+            return cached[1]
+        art = self.ui.load_art(path)
+        color = Glyphs.vivid_color(art, ACCENT) if art is not None else ACCENT
+        game["_accent"] = (path, color)
+        return color
+
     def _compose(self, game, width, height, selected, badge):
         ui = self.ui
         cover = ui.load_art(game.get("cover"))
@@ -159,7 +174,8 @@ class GameGrid:
             self._draw_star(tile)
         if selected:
             ImageDraw.Draw(tile).rounded_rectangle(
-                (0, 0, width - 1, height - 1), radius=radius, outline=ACCENT, width=max(2, ui.px(BORDER)))
+                (0, 0, width - 1, height - 1), radius=radius, outline=self.accent(game),
+                width=max(2, ui.px(BORDER)))
         return tile
 
     def _draw_badge(self, tile, players, state):
@@ -197,7 +213,7 @@ class GameGrid:
     def _tile(self, game, width, height, selected):
         badge = badge_state(game.get("players"), self.players)
         key = (game["path"], width, height, selected, badge, bool(game.get("cover")), bool(game.get("image")),
-               bool(game.get("favorite")))
+               bool(game.get("favorite")), self.accent(game) if selected else None)
         photo = self._tiles.get(key)
         if photo is None:
             photo = ImageTk.PhotoImage(self._compose(game, width, height, selected, badge))
@@ -330,6 +346,7 @@ class GameGrid:
             c.coords(halo, x + tile_w // 2, y + tile_h // 2)
             c.coords(tile, x + tile_w // 2, y + tile_h // 2)
             c.itemconfigure(tile, image=self._tile(selected, grow_w, grow_h, True))
+            c.itemconfigure(halo, image=self._halo(selected, grow_w, grow_h))
             c.delete("games-header")
             self._header(selected, count)
             self._shown_index = self.index
@@ -346,9 +363,7 @@ class GameGrid:
                 state="hidden" if item == self.index else "normal", tags=("games", "tiles"))
 
         x, y = position(self.index)
-        glow = ui.px(18)
-        halo = ui.photo(("halo", grow_w, grow_h), lambda: Glyphs.panel(
-            grow_w, grow_h, ui.px(RADIUS), (0, 0, 0, 0), glow=(ACCENT, glow)))
+        halo = self._halo(selected, grow_w, grow_h)
         self._selected_items = (
             c.create_image(x + tile_w // 2, y + tile_h // 2, image=halo, tags=("games", "tiles")),
             c.create_image(x + tile_w // 2, y + tile_h // 2, image=self._tile(selected, grow_w, grow_h, True),
@@ -369,6 +384,13 @@ class GameGrid:
             self._slide((self.first_row - previous_first) * (tile_h + gap))
         if self._preload_job is None:
             self._preload_job = ui.root.after_idle(self._preload, (tile_w, tile_h))
+
+    def _halo(self, game, width, height):
+        """Soft glow behind the selected tile, in the game's colour."""
+        ui = self.ui
+        color = self.accent(game)
+        return ui.photo(("halo", width, height, color), lambda: Glyphs.panel(
+            width, height, ui.px(RADIUS), (0, 0, 0, 0), glow=(color, ui.px(18))))
 
     def _clear(self):
         if self._anim_job:

@@ -8,6 +8,7 @@ icon, glass panels and fonts. Everything is drawn at 4x and scaled down
     button("lb", 28)           -> LB bumper pill
     people(2, 20, "#FFFFFF")   -> two-person icon
     star(20, "#F5D90A")        -> favourite star
+    trophy(24, "#F5D90A")      -> achievement cup
     panel(300, 120, 16, (0, 0, 0, 150), outline=("#F5D90A", 3))
 """
 
@@ -65,6 +66,38 @@ def cover_crop(image, width, height):
     image = image.resize(size, Image.LANCZOS if ratio < 1 else Image.BICUBIC)
     left, top = (image.width - width) // 2, (image.height - height) // 2
     return image.crop((left, top, left + width, top + height))
+
+
+def vivid_color(image, default):
+    """
+    The picture's most prominent saturated colour, pushed bright enough to
+    glow on the dark UI ("#RRGGBB"). `default` when the picture is mostly
+    grey (black-and-white art, dark screenshots...).
+
+    Hues are counted in 24 buckets weighted by saturation x brightness, so
+    a large grey sky loses to a smaller red kart.
+    """
+    import colorsys
+    small = image.resize((40, 40), Image.BOX, reducing_gap=2.0).convert("RGB")
+    buckets = {}
+    for r, g, b in small.getdata():
+        h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        weight = s * v
+        if s < 0.3 or v < 0.25:
+            continue
+        bucket = buckets.setdefault(int(h * 24) % 24, [0.0, 0.0, 0.0, 0.0])
+        bucket[0] += weight
+        bucket[1] += r * weight
+        bucket[2] += g * weight
+        bucket[3] += b * weight
+    if not buckets:
+        return default
+    total, r, g, b = max(buckets.values(), key=lambda x: x[0])
+    if total < 40:              # a few coloured pixels only
+        return default
+    h, s, v = colorsys.rgb_to_hsv(r / total / 255, g / total / 255, b / total / 255)
+    r, g, b = colorsys.hsv_to_rgb(h, max(s, 0.6), max(v, 0.92))
+    return "#%02X%02X%02X" % (int(r * 255), int(g * 255), int(b * 255))
 
 
 def _finish(image, size):
@@ -205,6 +238,26 @@ def star(height, color, outline=None):
     d.polygon(points, fill=_rgb(color) + (255,))
     if outline:
         d.line(points + points[:1], fill=_rgb(outline) + (255,), width=max(1, size // 14), joint="curve")
+    return _finish(img, (h, h))
+
+
+@lru_cache(maxsize=16)
+def trophy(height, color):
+    """A cup with handles on a small stand (achievements)."""
+    h = max(8, int(height))
+    s = SUPERSAMPLE
+    size = h * s
+    rgb = _rgb(color) + (255,)
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    line = max(1, int(size * 0.07))
+    # handles, then the cup over them
+    d.ellipse((size * 0.08, size * 0.14, size * 0.4, size * 0.48), outline=rgb, width=line)
+    d.ellipse((size * 0.6, size * 0.14, size * 0.92, size * 0.48), outline=rgb, width=line)
+    d.pieslice((size * 0.22, -size * 0.3, size * 0.78, size * 0.62), 0, 180, fill=rgb)
+    d.rectangle((size * 0.22, size * 0.06, size * 0.78, size * 0.17), fill=rgb)
+    d.rectangle((size * 0.45, size * 0.6, size * 0.55, size * 0.8), fill=rgb)
+    d.rounded_rectangle((size * 0.27, size * 0.78, size * 0.73, size * 0.94), radius=size * 0.04, fill=rgb)
     return _finish(img, (h, h))
 
 

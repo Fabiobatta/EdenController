@@ -9,7 +9,9 @@ Layers, bottom to top (canvas tags):
     header    title, clock, connected controllers
     footer    button hints ("[a] Play  [b] Back")
     roulette  the "tonight we play" spinner (Core/Roulette.py)
+    trophies  the achievements list
     toast     transient message
+    trophy    "achievement unlocked" banner
     alert     modal dialog
 
 Pictures come from Pillow (Core/Glyphs.py) and are cached per size, so a
@@ -127,6 +129,8 @@ class LauncherUi:
         set_backdrop(game, delay_ms)          blurred, slowly drifting backdrop
         show_games(...) / show_games_loading() / hide_games()
         show_toast(msg, color)
+        show_trophy(name, desc) / trophy_showing
+        show_trophies(items) / hide_trophies()
         show_alert(mode) / close_alert() / alert_mode
     """
 
@@ -165,11 +169,15 @@ class LauncherUi:
         self._bg_owner = None
         self._bg_job = None
         self.motion = True                  # background drift, see BACKGROUND MOTION
+        self.dynamic_colors = True          # selection colour from the game's art (GameGrid.accent)
         self._drift = (0, 0)
         self._motion_quiet_until = 0.0
         self.busy_overlay = False           # something animated on top (roulette): hold the backdrop still
         self._toast_job = None
         self._toast = None
+        self._trophy = None                 # (name, desc) on screen
+        self._trophy_job = None
+        self._trophies = None               # list screen items, None = closed
 
         from .GameGrid import GameGrid
         self.grid = GameGrid(self)
@@ -295,6 +303,10 @@ class LauncherUi:
         self._draw_footer()
         if self._toast:
             self._draw_toast(*self._toast)
+        if self._trophies is not None:
+            self._draw_trophies()
+        if self._trophy:
+            self._draw_trophy(*self._trophy)
         if self.alert_mode:
             self._draw_alert(self.alert_mode)
 
@@ -307,7 +319,7 @@ class LauncherUi:
             self.grid.draw(full=True)
 
     def _raise_overlays(self):
-        for tag in ("header", "footer", "roulette", "toast", "alert"):
+        for tag in ("header", "footer", "roulette", "trophies", "toast", "trophy", "alert"):
             self.canvas.tag_raise(tag)
 
     # ========================================================================
@@ -391,7 +403,8 @@ class LauncherUi:
 
     def _drift_tick(self):
         self.root.after(DRIFT_TICK_MS, self._drift_tick)
-        if not self.motion or not self.width or self.alert_mode or self.busy_overlay:
+        if not self.motion or not self.width or self.alert_mode or self.busy_overlay \
+                or self._trophies is not None:
             return
         now = time.monotonic()
         if now < self._motion_quiet_until:
@@ -607,6 +620,113 @@ class LauncherUi:
             self._raise_overlays()
         if game is self._bg_owner:
             self.set_backdrop(game)             # its backdrop picture may have changed
+
+    # ========================================================================
+    # ACHIEVEMENTS
+    # ========================================================================
+    @property
+    def trophy_showing(self):
+        return self._trophy is not None
+
+    def show_trophy(self, name, desc, duration_ms=4500):
+        """ "Achievement unlocked" banner at the top of the screen."""
+        self._trophy = (name, desc)
+        self._draw_trophy(name, desc)
+        if self._trophy_job:
+            self.root.after_cancel(self._trophy_job)
+        self._trophy_job = self.root.after(duration_ms, self._hide_trophy)
+
+    def _hide_trophy(self):
+        self._trophy = None
+        self._trophy_job = None
+        self.canvas.delete("trophy")
+
+    def _draw_trophy(self, name, desc):
+        c = self.canvas
+        c.delete("trophy")
+        if not self.width:
+            return
+        w, h = self.px(580), self.px(92)
+        x, y = self.width // 2, self.px(22) + h // 2
+        box = self.photo(("trophy-box", w, h), lambda: Glyphs.panel(
+            w, h, self.px(18), (18, 16, 8, 245), outline=(COLOR["ACCENT"], self.px(2)),
+            glow=(COLOR["ACCENT"], self.px(14))))
+        c.create_image(x, y, image=box, tags="trophy")
+        icon_h = self.px(52)
+        icon = self.photo(("trophy", icon_h, COLOR["ACCENT"]), lambda: Glyphs.trophy(icon_h, COLOR["ACCENT"]))
+        left = x - w // 2 + self.px(24)
+        c.create_image(left, y, image=icon, anchor="w", tags="trophy")
+        text_x = left + icon_h + self.px(18)
+        width = w - (text_x - (x - w // 2)) - self.px(20)
+        c.create_text(text_x, y - self.px(24), text=t("trophy_unlocked"), anchor="w", fill=COLOR["ACCENT"],
+                      font=self.font(12), tags="trophy")
+        c.create_text(text_x, y, text=self.truncate(name, self.font(21), width), anchor="w",
+                      fill=COLOR["TEXT"], font=self.font(21), tags="trophy")
+        c.create_text(text_x, y + self.px(25), text=self.truncate(desc, self.font(13, False), width), anchor="w",
+                      fill=COLOR["TEXT_DIM"], font=self.font(13, False), tags="trophy")
+        self._raise_overlays()
+
+    def show_trophies(self, items, count_text):
+        """
+        The achievements list over the current screen.
+
+        Args:
+            items (list[tuple]): (name, desc, unlocked, detail) in display order.
+        """
+        self._trophies = (items, count_text)
+        self._draw_trophies()
+
+    def hide_trophies(self):
+        self._trophies = None
+        self.canvas.delete("trophies")
+
+    def _draw_trophies(self):
+        c = self.canvas
+        c.delete("trophies")
+        if not self.width or self._trophies is None:
+            return
+        items, count_text = self._trophies
+        shade = self.photo(("trophies-overlay", self.width, self.height),
+                           lambda: Image.new("RGBA", (self.width, self.height), (8, 9, 13, 248)))
+        c.create_image(0, 0, image=shade, anchor="nw", tags="trophies")
+        left = self.px(MARGIN)
+        c.create_text(left, self.px(46), text=t("trophies_title"), anchor="w", fill=COLOR["TEXT"],
+                      font=self.font(32), tags="trophies")
+        c.create_text(left, self.px(86), text=count_text, anchor="w", fill=COLOR["ACCENT"],
+                      font=self.font(15), tags="trophies")
+
+        columns = 2
+        rows = (len(items) + columns - 1) // columns
+        gap = self.px(12)
+        top = self.px(116)
+        card_w = (self.width - 2 * left - gap) // columns
+        card_h = max(self.px(40), min(self.px(66), (self.height - top - self.px(84)) // max(1, rows) - gap))
+        icon_h = int(card_h * 0.62)
+        for i, (name, desc, unlocked, detail) in enumerate(items):
+            x = left + (i // rows) * (card_w + gap)
+            y = top + (i % rows) * (card_h + gap)
+            color = COLOR["ACCENT"] if unlocked else "#4B5060"
+            card = self.photo(("trophy-card", card_w, card_h, unlocked), lambda: Glyphs.panel(
+                card_w, card_h, self.px(12), (255, 214, 10, 22) if unlocked else (255, 255, 255, 10),
+                outline=(COLOR["ACCENT"] if unlocked else "#2E323B", max(1, self.px(1.5)))))
+            c.create_image(x, y, image=card, anchor="nw", tags="trophies")
+            icon = self.photo(("trophy", icon_h, color), lambda: Glyphs.trophy(icon_h, color))
+            c.create_image(x + self.px(14), y + card_h // 2, image=icon, anchor="w", tags="trophies")
+            text_x = x + self.px(14) + icon_h + self.px(14)
+            detail_w = self.font(12, False).measure(detail) + self.px(16) if detail else 0
+            width = x + card_w - text_x - self.px(14) - detail_w
+            c.create_text(text_x, y + card_h * 0.34, anchor="w", font=self.font(16),
+                          text=self.truncate(name, self.font(16), width),
+                          fill=COLOR["TEXT"] if unlocked else COLOR["TEXT_FAINT"], tags="trophies")
+            c.create_text(text_x, y + card_h * 0.7, anchor="w", font=self.font(12, False),
+                          text=self.truncate(desc, self.font(12, False), width),
+                          fill=COLOR["TEXT_DIM"] if unlocked else COLOR["TEXT_FAINT"], tags="trophies")
+            if detail:
+                c.create_text(x + card_w - self.px(14), y + card_h // 2, anchor="e", text=detail,
+                              fill=COLOR["TEXT_DIM"], font=self.font(12, False), tags="trophies")
+        self.rich(self.width - left, self.height - self.px(FOOTER_H / 2), t("trophies_close"), 15,
+                  COLOR["TEXT"], anchor="e", tags="trophies")
+        self._raise_overlays()
 
     # ========================================================================
     # TOAST

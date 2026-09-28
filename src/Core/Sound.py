@@ -52,6 +52,10 @@ SOUNDS = {
                 (0.27, _note(5), 0.10, 0.5), (0.38, _note(7), 0.10, 0.5), (0.49, _note(10), 0.55, 0.6),
                 (0.49, _note(7), 0.55, 0.35)],
 }
+# Achievement: a bell-like arpeggio, higher and longer than "win"
+SOUNDS["trophy"] = [(0.0, _note(5), 0.12, 0.45), (0.08, _note(7), 0.12, 0.45), (0.16, _note(9), 0.12, 0.45),
+                    (0.26, _note(10), 0.7, 0.55), (0.26, _note(12), 0.7, 0.3)]
+
 # Joining: one blip per pulse of the confirmation rumble, higher for each
 # player, and a brighter last one
 for _player in range(1, 9):

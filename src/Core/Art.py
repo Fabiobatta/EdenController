@@ -11,9 +11,6 @@ Per game (keys of the game dict), best source first:
                     covers/backgrounds/<id or title>.<ext>      (user files)
                     game["banner_url"] (eShop banner)           (downloaded)
     image       square icon (the emulator's own, else game["icon_url"])
-    screens     eShop screenshots for the slideshow background
-                    game["screen_urls"]                          (downloaded
-                    only for a game the user lingers on, see want_screens)
 
 Downloads run on one background thread, once per picture: files land in
 the covers folder and are reused from then on. Tk is not thread-safe, so
@@ -21,7 +18,6 @@ the thread only writes files and queues the games it updated; the UI loop
 collects them with take_finished().
 """
 
-import collections
 import json
 import os
 import re
@@ -76,10 +72,6 @@ class ArtLibrary:
         self.sgdb_missing = set(sgdb_missing)   # searched before, nothing found
         self._finished = []
         self._lock = threading.Lock()
-        self._queue = collections.deque()       # (game, key, fetch)
-        self._wake = threading.Event()
-        self._thread = None
-        self._screens_asked = set()
         self.busy = False
 
     # ------------------------------------------------------------------
@@ -95,11 +87,6 @@ class ArtLibrary:
         if not game.get("image") and game.get("icon_url"):
             path = _cached_download(game["icon_url"], self.eshop_dir)
             game["image"] = path if path and os.path.isfile(path) else None
-        game["screens"] = self._local_screens(game)
-
-    def _local_screens(self, game):
-        paths = (_cached_download(url, self.eshop_dir) for url in game.get("screen_urls") or ())
-        return [p for p in paths if p and os.path.isfile(p)]
 
     # ------------------------------------------------------------------
     # Downloads
@@ -154,64 +141,32 @@ class ArtLibrary:
                      if not g.get("cover") and (g.get("title_id") or g["title"]) not in self.sgdb_missing]
         return jobs
 
-    def _worker(self):
-        while True:
-            self._wake.wait()
-            with self._lock:
-                job = self._queue.popleft() if self._queue else None
-                if job is None:
-                    self._wake.clear()
-                    self.busy = False
-                    continue
-            game, key, fetch = job
-            try:
-                path = fetch()
-            except Exception as e:
-                log("WARNING", f"Download failed ({key})", f"{game['title']}: {e}")
-                continue        # network trouble: try again next launch
-            if path:
-                if key == "screens":
-                    game["screens"] = self._local_screens(game)
-                else:
+    def _run(self, jobs):
+        try:
+            for game, key, fetch in jobs:
+                try:
+                    path = fetch()
+                except Exception as e:
+                    log("WARNING", f"Download failed ({key})", f"{game['title']}: {e}")
+                    continue        # network trouble: try again next launch
+                if path:
                     game[key] = path
-                with self._lock:
-                    if game not in self._finished:
-                        self._finished.append(game)
-            elif key == "cover":
-                log("INFO", "No cover on SteamGridDB", game["title"])
-                self.sgdb_missing.add(game.get("title_id") or game["title"])
-
-    def _enqueue(self, jobs, urgent=False):
-        with self._lock:
-            if urgent:
-                self._queue.extendleft(reversed(jobs))
-            else:
-                self._queue.extend(jobs)
-            self.busy = True
-        if self._thread is None:
-            self._thread = threading.Thread(target=self._worker, daemon=True)
-            self._thread.start()
-        self._wake.set()
+                    with self._lock:
+                        if game not in self._finished:
+                            self._finished.append(game)
+                elif key == "cover":
+                    log("INFO", "No cover on SteamGridDB", game["title"])
+                    self.sgdb_missing.add(game.get("title_id") or game["title"])
+        finally:
+            self.busy = False
 
     def start(self, games):
         jobs = self._jobs(games)
         if not jobs:
             return
         log("INFO", "Downloading pictures", f"{len(jobs)} file(s)")
-        self._enqueue(jobs)
-
-    def want_screens(self, game):
-        """
-        The slideshow wants the screenshots of `game`: download the missing
-        ones ahead of everything else. Once per game and session.
-        """
-        if not self.eshop or game["path"] in self._screens_asked:
-            return
-        self._screens_asked.add(game["path"])
-        missing = [url for url in game.get("screen_urls") or ()
-                   if not os.path.isfile(_cached_download(url, self.eshop_dir) or "")]
-        if missing:
-            self._enqueue([(game, "screens", lambda u=url: self._eshop(u)) for url in missing], urgent=True)
+        self.busy = True
+        threading.Thread(target=self._run, args=(jobs,), daemon=True).start()
 
     def take_finished(self):
         """Games whose pictures arrived since the last call."""

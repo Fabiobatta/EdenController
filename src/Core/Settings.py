@@ -54,16 +54,8 @@ backup_dir = saves_backup
 ; Quanti backup tenere per ogni gioco (i piu' vecchi vengono cancellati)
 backup_keep = 10
 
-; Sfondo animato: ogni quanti secondi passare allo screenshot successivo
-; del gioco selezionato (scaricati dall'eShop). 0 = sfondo fisso
-slideshow_seconds = 8
-
-; All'avvio, proponi di aggiungere il launcher alle app di Moonlight
-; (Sunshine / Vibeshine installato su questo PC): true / false
-moonlight_prompt = true
-; Percorso di apps.json, solo se Sunshine/Vibeshine e' in una cartella
-; diversa da quella standard
-apps_json =
+; Sfondo animato: l'immagine sfocata del gioco si muove lentamente: true / false
+background_motion = true
 
 ; Combinazione da tenere premuta durante il gioco per chiudere l'emulatore.
 ; Tasti: a b x y back start lb rb ls rs up down left right, uniti da '+'

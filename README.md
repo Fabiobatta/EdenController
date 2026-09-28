@@ -134,21 +134,6 @@ I log del launcher finiscono nella cartella `log` di Eden
 
 ## Vibeshine / Sunshine / Apollo + Moonlight per Xbox
 
-**Automatico.** Al primo avvio sul PC host il launcher trova Vibeshine (o
-Sunshine) e chiede *"Aggiungere a Moonlight?"*: con `Ⓐ` aggiunge l'app "Eden" alla
-lista di Moonlight, con una copertina (`EdenLauncher.cover.png` accanto al
-launcher). Windows chiede una volta il permesso di amministratore, perché la
-lista delle app (`C:\Program Files\Sunshine\config\apps.json`) è nella
-cartella dei programmi. Le altre app restano come sono, e una copia della lista
-originale viene salvata in `apps.json.bak`. Se l'app non compare subito in
-Moonlight, riavvia Vibeshine.
-
-`Ⓑ` rimanda alla prossima volta, `Ⓨ` non lo chiede più. Per riproporre la domanda
-avvia `EdenLauncher.exe --streaming`. Se Vibeshine è installato in una cartella
-diversa, scrivi il percorso di `apps.json` in `apps_json` (vedi *Impostazioni*).
-
-**A mano**, se preferisci:
-
 1. Nell'interfaccia web dell'host apri **Applications → Add New**.
 2. **Application Name**: "Eden" (una sola app per tutti i giochi) oppure il nome
    di un gioco.
@@ -210,9 +195,7 @@ sound_volume = 70
 backup_saves = true
 backup_dir = saves_backup
 backup_keep = 10
-slideshow_seconds = 8
-moonlight_prompt = true
-apps_json =
+background_motion = true
 
 [Eden]
 layout = Xbox
@@ -236,15 +219,13 @@ fullscreen = true
 | `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
 | `covers_dir` | cartella | Dove cercare le copertine (predefinito `covers` accanto al launcher) |
 | `steamgriddb_api_key` | chiave API | Se impostata, scarica da sola le copertine mancanti da SteamGridDB |
-| `download_art` | `true`, `false` | Scarica dall'eShop banner (sfondi), icone e screenshot mancanti |
+| `download_art` | `true`, `false` | Scarica dall'eShop banner (sfondi) e icone mancanti |
 | `sounds` | `true`, `false` | Suoni dell'interfaccia (ingresso giocatori, conferme, roulette) |
 | `sound_volume` | `0`–`100` | Volume dei suoni |
 | `backup_saves` | `true`, `false` | Backup dei salvataggi prima di ogni gioco avviato dalla lista |
 | `backup_dir` | cartella | Dove mettere i backup (relativa al launcher o percorso completo) |
 | `backup_keep` | numero | Quanti backup tenere per gioco |
-| `slideshow_seconds` | secondi, `0` = spento | Ogni quanto lo sfondo passa allo screenshot successivo |
-| `moonlight_prompt` | `true`, `false` | Proporre di aggiungere il launcher a Moonlight (Sunshine / Vibeshine) |
-| `apps_json` | percorso | `apps.json` di Sunshine/Vibeshine, se non è nella cartella standard |
+| `background_motion` | `true`, `false` | Sfondo che si muove lentamente |
 | `[Players]` | `<Title ID o nome> = <numero>` | Corregge il numero di giocatori mostrato su un gioco |
 
 I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
@@ -282,12 +263,11 @@ azzerano tempi di gioco e preferiti.
 ## Lista giochi
 
 Una griglia di copertine in stile Playnite. Lo sfondo è l'immagine del gioco
-selezionato (il banner dell'eShop, se disponibile), sfocata e scurita. Se resti
-qualche secondo su un gioco, lo sfondo passa lentamente ai suoi **screenshot
-dell'eShop**, con una dissolvenza. Gli screenshot vengono scaricati solo per i
-giochi su cui ti fermi. L'animazione è leggera: le immagini vengono preparate in
-background e si ferma durante il gioco (`slideshow_seconds = 0` per lo sfondo
-fisso).
+selezionato (il banner dell'eShop, se disponibile), sfocata e scurita, e si muove
+molto lentamente. Per restare leggero l'animazione sposta l'immagine già pronta
+di un pixel alla volta (circa due volte al secondo). Si ferma mentre scorri la
+lista, con un dialogo aperto e durante il gioco (`background_motion = false` per
+lo sfondo fermo).
 
 **Ordine e preferiti.** Di default i giochi sono in ordine di **ultima partita**:
 il primo in alto è quello giocato più di recente. Con `☰` (Start) passi ad
@@ -314,7 +294,7 @@ In alto, accanto al titolo del gioco selezionato, compare anche "✓ Va bene per
 giocatori" oppure "✕ Max 2 · siete in 3". Con 2 o più giocatori, `Ⓨ` mostra solo i
 giochi adatti a tutti.
 
-I dati vengono da un indice compatto (~4 MB, con gli indirizzi degli screenshot) costruito da
+I dati vengono da un indice compatto (~2 MB) costruito da
 [titledb](https://github.com/blawar/titledb) durante la build e incluso nell'exe:
 nessun download all'avvio. Se un numero è sbagliato lo correggi nella sezione
 `[Players]` di `EdenLauncher.ini` (vedi sotto).
@@ -502,11 +482,10 @@ src/
 │   ├── Ui.py            #   schermo (una tela Tk): sfondo, schede, barra tasti, dialoghi
 │   ├── GameGrid.py      #   griglia giochi con badge dei giocatori
 │   ├── Glyphs.py        #   tasti Xbox disegnati, icone, pannelli
-│   ├── Art.py           #   copertine, sfondi, screenshot, download in background
+│   ├── Art.py           #   copertine, sfondi, download in background
 │   ├── Roulette.py      #   "Stasera si gioca a…"
 │   ├── Backup.py        #   zip dei salvataggi prima di ogni gioco
 │   ├── Sound.py         #   suoni sintetizzati dell'interfaccia
-│   ├── Sunshine.py      #   app "Eden" in apps.json di Sunshine/Vibeshine
 │   ├── Settings.py      #   EdenLauncher.ini, stato, cache
 │   ├── I18n.py          #   testi IT/EN
 │   └── ...              #   SDL, processi, log
@@ -514,7 +493,7 @@ src/
     ├── Eden.py          # percorsi, backend SDL, hint SDL identici a Eden
     ├── Config.py        # GUID/port, layout Xbox/Nintendo, modalità TV, scrittura di qt-config.ini
     ├── Games.py         # cartelle dei giochi di Eden, ricerca, nomi e icone dalla cache di Eden
-    ├── TitleDb.py       # giocatori, nomi, immagini e screenshot eShop dall'indice incluso
+    ├── TitleDb.py       # giocatori, nomi e immagini eShop dall'indice incluso
     ├── Switch.py        # Title ID da NSP/XCI (ticket, CNMT, intestazioni NCA)
     └── Ini.py           # editor INI che non altera il resto del file
 tools/build_titledb_index.py   # genera assets/titledb.json.gz (lo fanno gli script di build)

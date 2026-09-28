@@ -6,8 +6,7 @@ eShop facts about a game, from the index bundled with the launcher
     info = TitleDb.load().get("0100152000022000")
     info -> {"players": 4, "name": "Mario Kart 8 Deluxe",
              "icon_url": "https://img-eshop.cdn.nintendo.net/i/....jpg",
-             "banner_url": "https://img-eshop.cdn.nintendo.net/i/....jpg",
-             "screen_urls": ["https://img-eshop.cdn.nintendo.net/i/....jpg", ...]}
+             "banner_url": "https://img-eshop.cdn.nintendo.net/i/....jpg"}
 
 "players" is the most players one console supports (eShop "number of
 players"), i.e. local co-op/versus. Missing index or title -> None.
@@ -46,11 +45,10 @@ class TitleDb:
         row = self.games.get((title_id or "").upper())
         if not row:
             return None
-        players, name, icon, banner, screens = (list(row) + [None] * 5)[:5]
+        players, name, icon, banner = (list(row) + [None] * 4)[:4]
         return {
             "players": players,
             "name": name,
             "icon_url": CDN + icon if icon else None,
             "banner_url": CDN + banner if banner else None,
-            "screen_urls": [CDN + s for s in screens or []],
         }

@@ -87,16 +87,6 @@ STRINGS = {
         "roulette_pool_all":    "Drawing from {n} games",
         "roulette_hints":       "[a] Play      [x] Spin again      [b] Back",
         "roulette_none":        "No game for {n} players",
-        # Streaming host
-        "alert_stream_title":   "ADD TO MOONLIGHT?",
-        "alert_stream_text":    "{name} will show up in Moonlight's app list with its own cover "
-                                "(Sunshine / Vibeshine on this PC).",
-        "alert_stream_add":     "Add",
-        "alert_stream_later":   "Not now",
-        "alert_stream_never":   "Never",
-        "toast_stream_added":   "Added! Not in Moonlight yet? Restart Vibeshine",
-        "toast_stream_same":    "Already in Moonlight",
-        "toast_stream_failed":  "Could not change the app list (see the log)",
         "toast_disconnected":   "{name} disconnected",
         # Error dialogs
         "error_launch_title":   "Launch Error",
@@ -162,15 +152,6 @@ STRINGS = {
         "roulette_pool_all":    "Estrazione tra {n} giochi",
         "roulette_hints":       "[a] Gioca      [x] Ritira      [b] Indietro",
         "roulette_none":        "Nessun gioco per {n} giocatori",
-        "alert_stream_title":   "AGGIUNGERE A MOONLIGHT?",
-        "alert_stream_text":    "{name} comparirà tra le app di Moonlight con la sua copertina "
-                                "(Sunshine / Vibeshine su questo PC).",
-        "alert_stream_add":     "Aggiungi",
-        "alert_stream_later":   "Non ora",
-        "alert_stream_never":   "Mai",
-        "toast_stream_added":   "Aggiunto! Se non lo vedi in Moonlight, riavvia Vibeshine",
-        "toast_stream_same":    "È già in Moonlight",
-        "toast_stream_failed":  "Impossibile modificare la lista app (vedi il log)",
         "toast_disconnected":   "{name} scollegato",
         "error_launch_title":   "Errore di avvio",
         "error_launch_text":    "Impossibile avviare {name}.\n{error}",

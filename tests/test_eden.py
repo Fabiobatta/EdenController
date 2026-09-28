@@ -619,14 +619,11 @@ class TitleDbTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "titledb.json.gz")
             with gzip.open(path, "wt", encoding="utf-8") as f:
-                json.dump({"v": 1, "games": {"0100152000022000": [4, "Mario Kart 8 Deluxe", "i.jpg", "b.jpg",
-                                                                  ["s1.jpg", "s2.jpg"]],
+                json.dump({"v": 1, "games": {"0100152000022000": [4, "Mario Kart 8 Deluxe", "i.jpg", "b.jpg"],
                                              "0100AAAA00000000": [None, "No Count", None, None]}}, f)
             db = TitleDb.load(path)
         self.assertEqual(db.get("0100152000022000"), {"players": 4, "name": "Mario Kart 8 Deluxe",
-                                                      "icon_url": CDN + "i.jpg", "banner_url": CDN + "b.jpg",
-                                                      "screen_urls": [CDN + "s1.jpg", CDN + "s2.jpg"]})
-        self.assertEqual(db.get("0100AAAA00000000")["screen_urls"], [])     # older 4-field rows
+                                                      "icon_url": CDN + "i.jpg", "banner_url": CDN + "b.jpg"})
         self.assertIsNone(db.get("0100AAAA00000000")["players"])
         self.assertIsNone(db.get("0100BBBB00000000"))
         self.assertEqual(TitleDb.load(os.path.join("nope", "missing.gz")).games, {})
@@ -635,17 +632,14 @@ class TitleDbTests(unittest.TestCase):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tools"))
         from build_titledb_index import build
         cdn = "https://img-eshop.cdn.nintendo.net/i/" + "a" * 64 + ".jpg"
-        shot = "https://img-eshop.cdn.nintendo.net/i/" + "{}" * 64 + ".jpg"
         us = {"1": {"id": "0100152000022000", "name": "Mario Kart™ 8 Deluxe", "numberOfPlayers": 4,
-                    "iconUrl": cdn, "bannerUrl": None,
-                    "screenshots": [shot.replace("{}", c) for c in "bcde"] + ["https://elsewhere/x.jpg"]},
+                    "iconUrl": cdn, "bannerUrl": None},
               "2": {"id": "0100152000022800", "name": "Update", "numberOfPlayers": 4},
               "3": {"id": "0100AAAA00000000", "name": "Demo", "isDemo": True, "numberOfPlayers": 2}}
         gb = {"1": {"id": "0100152000022000", "name": "Other name", "numberOfPlayers": 8,
                     "bannerUrl": cdn}}
         self.assertEqual(build([us, gb]), {"0100152000022000": [4, "Mario Kart 8 Deluxe", "a" * 64 + ".jpg",
-                                                                 "a" * 64 + ".jpg",
-                                                                 [c * 64 + ".jpg" for c in "bcd"]]})
+                                                                 "a" * 64 + ".jpg"]})
 
 
 class LibraryCacheTests(unittest.TestCase):
@@ -800,63 +794,6 @@ class BackupTests(unittest.TestCase):
             self.assertEqual(found_root, root)
             self.assertEqual(len(folders), 2)
             self.assertEqual(eden.save_folders({"title_id": None}), (None, []))
-
-
-class SunshineTests(unittest.TestCase):
-    def test_register_keeps_other_apps(self):
-        import json
-        from Core import Sunshine
-        with tempfile.TemporaryDirectory() as tmp:
-            apps = os.path.join(tmp, "apps.json")
-            original = {"env": {"PATH": "x"}, "apps": [{"name": "Desktop", "image-path": "desktop.png"},
-                                                       {"name": "Eden", "cmd": "C:\\Eden\\eden.exe"}]}
-            with open(apps, "w") as f:
-                json.dump(original, f)
-            self.assertFalse(Sunshine.is_registered(apps))
-            self.assertEqual(Sunshine.register(apps, "Eden", "cover.png"), "added")
-            with open(apps) as f:
-                data = json.load(f)
-            self.assertEqual(data["env"], {"PATH": "x"})
-            self.assertEqual([a["name"] for a in data["apps"]], ["Desktop", "Eden", "Eden Launcher"])
-            self.assertEqual(data["apps"][2]["image-path"], "cover.png")
-            self.assertTrue(Sunshine.is_registered(apps))
-            self.assertEqual(Sunshine.register(apps, "Eden", "cover.png"), "unchanged")
-            self.assertEqual(Sunshine.register(apps, "Eden", "other.png"), "updated")
-            with open(apps + ".bak") as f:
-                self.assertEqual(json.load(f), original)
-
-    def test_find_apps_file(self):
-        from Core import Sunshine
-        with tempfile.TemporaryDirectory() as tmp:
-            self.assertIsNone(Sunshine.find_apps_file(os.path.join(tmp, "missing.json")))
-            if sys.platform == "win32":
-                return
-            config = os.path.join(tmp, "sunshine")
-            os.makedirs(config)
-            custom = os.path.join(config, "my_apps.json")
-            with open(custom, "w") as f:
-                f.write("{}")
-            with open(os.path.join(config, "sunshine.conf"), "w") as f:
-                f.write("# comment\nfile_apps = my_apps.json\n")
-            old = os.environ.get("XDG_CONFIG_HOME")
-            os.environ["XDG_CONFIG_HOME"] = tmp
-            try:
-                self.assertEqual(Sunshine.find_apps_file(), custom)
-            finally:
-                if old is None:
-                    del os.environ["XDG_CONFIG_HOME"]
-                else:
-                    os.environ["XDG_CONFIG_HOME"] = old
-
-    def test_cover(self):
-        from PIL import Image
-        from Core import Sunshine
-        from Core.Paths import resource_path
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Sunshine.make_cover(os.path.join(tmp, "c.png"),
-                                       resource_path(os.path.join("assets", "EdenLauncherPNG.png")), "Eden")
-            with Image.open(path) as image:
-                self.assertEqual((image.format, image.size), ("PNG", (600, 800)))
 
 
 class RouletteTests(unittest.TestCase):

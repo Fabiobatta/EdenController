@@ -31,12 +31,11 @@ import threading
 import time
 from tkinter import messagebox
 
-from . import Sunshine
 from .Art import ArtLibrary
 from .Backup import backup_saves
 from .I18n import t
 from .Log import log
-from .Paths import base_dir, resource_path
+from .Paths import base_dir
 from .Process import launch
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
@@ -120,14 +119,11 @@ class LauncherApp:
             if settings.get_bool(LAUNCHER_SECTION, "backup_saves", True) else 0
         self.backup_dir = os.path.join(base_dir(), os.path.expandvars(os.path.expanduser(
             settings.get(LAUNCHER_SECTION, "backup_dir", "saves_backup"))))
-        self.ui.slideshow_seconds = _int(settings.get(LAUNCHER_SECTION, "slideshow_seconds", "8"), 8)
-        self.ui.slides_wanted = self.art.want_screens
+        self.ui.motion = settings.get_bool(LAUNCHER_SECTION, "background_motion", True)
         self.roulette = Roulette(self.ui, on_tick=self.on_roulette_tick, on_done=self.on_roulette_done)
         state = settings.state or {}
         self.sort_mode = state.get("sort") if state.get("sort") in SORT_MODES else SORT_MODES[0]
         self.session = None                 # {"key", "start"} while a picked game runs
-        self._stream_apps = None            # apps.json offered in the "add to Moonlight" dialog
-        self._stream_result = None          # elevated registration outcome (thread -> loop)
 
         # Keyboard shortcuts for accessibility
         self.root.bind("<Return>", lambda e: self.handle_enter_key())
@@ -170,7 +166,6 @@ class LauncherApp:
             threading.Thread(target=self._scan_games, daemon=True).start()
 
         self.update_loop()
-        self.root.after(1200, self.offer_streaming)
 
     @staticmethod
     def _combo_names(text):
@@ -190,9 +185,6 @@ class LauncherApp:
             self.quit()
         elif self.ui.alert_mode == "KILL_CONFIRM":
             self.kill_and_quit()
-        elif self.ui.alert_mode == "STREAM":
-            self.ui.close_alert()
-            self.register_streaming()
         elif self.mode == "ROULETTE":
             if not self.roulette.spinning:
                 self.launch_game(self.roulette.chosen)
@@ -413,9 +405,6 @@ class LauncherApp:
         # ====================================================================
         for game in self.art.take_finished():
             self.ui.games_art_changed(game)
-        if self._stream_result is not None:
-            ok, self._stream_result = self._stream_result, None
-            self.on_streaming_registered("added" if ok else None)
         if self.art.sgdb_missing != self._sgdb_missing_saved:
             self._sgdb_missing_saved = set(self.art.sgdb_missing)
             self.emu.settings.save_state(covers_not_found=sorted(self._sgdb_missing_saved))
@@ -464,19 +453,7 @@ class LauncherApp:
         mode = self.ui.alert_mode
         if time.monotonic() - self.ui.alert_since < ALERT_GUARD_S:
             return      # a press meant for the screen underneath (e.g. A to join)
-        if mode == "STREAM":
-            if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                self.ui.close_alert()
-                self.register_streaming()
-            elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
-                self.ui.close_alert()
-                self.sounds.play("back")
-                self.emu.settings.save_state(streaming_prompt="never")
-                log("INFO", "Streaming host prompt disabled")
-            elif button == sdl.SDL_CONTROLLER_BUTTON_B:
-                self.ui.close_alert()
-                self.sounds.play("back")
-        elif mode == "KILL_CONFIRM":
+        if mode == "KILL_CONFIRM":
             if button == sdl.SDL_CONTROLLER_BUTTON_A:
                 self.kill_and_restart()             # Return to launcher
             elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
@@ -1030,64 +1007,6 @@ class LauncherApp:
         if not self.assignments:
             self.assign_player(instance_id)     # whoever pressed Y plays
         self.launch_game(last)
-
-    # ========================================================================
-    # STREAMING HOST ("add to Moonlight")
-    # ========================================================================
-    def offer_streaming(self):
-        """Ask once per start to add the launcher to Sunshine/Vibeshine, until it is there or refused."""
-        settings = self.emu.settings
-        forced = getattr(self.emu, "show_streaming_prompt", False)
-        if self.process or self.ui.alert_mode or self.has_game_args:
-            return
-        if self.assignments and not forced:
-            return      # players are joining: do not put a dialog under their A presses
-        if not forced and (not settings.get_bool(LAUNCHER_SECTION, "moonlight_prompt", True)
-                           or (settings.state or {}).get("streaming_prompt") == "never"):
-            return
-        path = Sunshine.find_apps_file(settings.get(LAUNCHER_SECTION, "apps_json", "") or None)
-        if not path:
-            log("INFO", "No Sunshine/Vibeshine app list found")
-            return
-        if Sunshine.is_registered(path):
-            if forced:
-                self.ui.show_toast(t("toast_stream_same"), COLOR["OK"])
-            return
-        self._stream_apps = path
-        self.sounds.play("toggle")
-        self.ui.show_alert("STREAM")
-
-    def register_streaming(self):
-        path = self._stream_apps
-        if not path:
-            return
-        self.sounds.play("select")
-        cover = Sunshine.cover_path(self.emu.name)
-        try:
-            Sunshine.make_cover(cover, resource_path(os.path.join("assets", f"{self.emu.name}LauncherPNG.png")),
-                                self.emu.name)
-        except Exception as e:
-            log("WARNING", "Could not write the Moonlight cover", e)
-        try:
-            self.on_streaming_registered(Sunshine.register(path, self.emu.name, cover))
-        except PermissionError:
-            if sys.platform != "win32":
-                self.on_streaming_registered(None)
-                return
-            log("INFO", "apps.json needs administrator rights - asking Windows")
-            Sunshine.register_elevated(path, lambda ok: setattr(self, "_stream_result", ok))
-        except Exception as e:
-            log("EXCEPTION", "Could not update the streaming host app list", e)
-            self.on_streaming_registered(None)
-
-    def on_streaming_registered(self, result):
-        if result in ("added", "updated"):
-            self.ui.show_toast(t("toast_stream_added"), COLOR["OK"])
-        elif result == "unchanged":
-            self.ui.show_toast(t("toast_stream_same"), COLOR["OK"])
-        else:
-            self.sounds.play("error")
-            self.ui.show_toast(t("toast_stream_failed"))
 
     # ========================================================================
     # CONFIG GENERATION & LAUNCH

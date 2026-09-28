@@ -20,9 +20,9 @@ view models and never touches widgets.
 
 import ctypes
 import os
+import math
 import re
 import sys
-import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -53,10 +53,12 @@ FOOTER_H = 64
 ART_MAX = 720           # art is kept in memory at most this big
 ART_CACHE = 48          # pictures kept decoded
 BG_CACHE = 8            # blurred backgrounds kept (screen-sized each)
-BG_SAMPLE_W = 128       # backdrop detail: the art is shrunk to this width...
-BG_BLUR = 1.8           # ...blurred, and stretched back to the screen
-FADE_STEPS = 6          # slideshow cross-fade frames
-FADE_FRAME_MS = 60
+BG_SAMPLE_W = 96        # backdrop detail: the art is shrunk to this width...
+BG_BLUR = 2.2           # ...blurred, and stretched back to the screen
+DRIFT = 16              # px (720p) the backdrop may wander from its place
+DRIFT_PERIODS = (97.0, 71.0)    # seconds for one horizontal / vertical swing
+DRIFT_TICK_MS = 250     # at most 4 moves a second (~2 at this speed)
+DRIFT_QUIET_S = 0.6     # no motion right after the screen changed
 
 COLOR = {
     "BG": "#0B0D12",
@@ -106,7 +108,6 @@ def compose_background(art, width, height, shade):
     if art is not None:
         sample = BG_SAMPLE_W
         small = Glyphs.cover_crop(art, sample, max(1, round(sample * height / width)))
-        small = small.point(lambda v: v * 4 // 5)           # bright screenshots must not wash out the UI
         image = small.filter(ImageFilter.GaussianBlur(BG_BLUR)).resize((width, height), Image.BILINEAR)
     else:
         # Default backdrop: deep blue with a soft teal glow
@@ -123,7 +124,7 @@ class LauncherUi:
         refresh(slots) / flash_slot(i)        player cards
         set_hints([...]) / set_tip(markup)    footer hints, tip line
         set_pads(n)                           connected controllers
-        set_backdrop(game, delay_ms)          blurred backdrop / slideshow
+        set_backdrop(game, delay_ms)          blurred, slowly drifting backdrop
         show_games(...) / show_games_loading() / hide_games()
         show_toast(msg, color)
         show_alert(mode) / close_alert() / alert_mode
@@ -163,14 +164,10 @@ class LauncherUi:
         self._bg_wanted = None
         self._bg_owner = None
         self._bg_job = None
-        self._slides = []
-        self._slide_index = 0
-        self._slide_job = None
-        self._fade_generation = 0
-        self._fade_photo = None
-        self.slideshow_seconds = 0          # 0 = no slideshow
-        self.slides_wanted = None           # callback(game): the slideshow could use screenshots
-        self.busy_overlay = False           # something animated on top (roulette): pause the slideshow
+        self.motion = True                  # background drift, see BACKGROUND MOTION
+        self._drift = (0, 0)
+        self._motion_quiet_until = 0.0
+        self.busy_overlay = False           # something animated on top (roulette): hold the backdrop still
         self._toast_job = None
         self._toast = None
 
@@ -179,6 +176,7 @@ class LauncherUi:
 
         self.canvas.bind("<Configure>", self._on_configure)
         self._tick_clock()
+        self._drift_tick()
 
     def _load_icon(self):
         """Window/taskbar icon: .ico on Windows, .png elsewhere."""
@@ -318,18 +316,14 @@ class LauncherUi:
     def set_backdrop(self, game, delay_ms=0):
         """
         Blurred art of `game` behind everything (None: the default backdrop).
-        delay_ms debounces fast scrolling. With screenshots (game["screens"])
-        the backdrop becomes a slow slideshow.
+        delay_ms debounces fast scrolling.
         """
+        self.hold_motion()
+        self._bg_owner = game
         path = art_of(game)
-        slides = [p for p in [path] + list((game or {}).get("screens") or ()) if p]
-        if game is self._bg_owner and path == self._bg_wanted:
-            if slides != self._slides:              # screenshots arrived
-                self._slides = slides
+        if path == self._bg_wanted and self.canvas.find_withtag("bg"):
             return
-        self._bg_owner, self._bg_wanted = game, path
-        self._slides, self._slide_index = slides, 0
-        self._fade_generation += 1                  # abandon a crossfade in progress
+        self._bg_wanted = path
         if self._bg_job:
             self.root.after_cancel(self._bg_job)
             self._bg_job = None
@@ -338,9 +332,9 @@ class LauncherUi:
         else:
             self._apply_background()
 
-    def _shade(self):
+    def _shade(self, width, height):
         """Brightness map: dim overall, darker at the edges and at the bottom."""
-        key = ("shade", self.width, self.height)
+        key = ("shade", width, height)
         if key not in self._photos:           # stored as a PIL image
             w, h = 160, 90
             mask = Image.new("L", (w, h), 0)
@@ -348,107 +342,75 @@ class LauncherUi:
             mask = mask.filter(ImageFilter.GaussianBlur(18))
             vignette = mask.point(lambda v: int(55 + v * 0.42))            # 55..162
             bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.45))
-            shade = ImageChops.multiply(vignette, bottom).resize((self.width, self.height), Image.BILINEAR)
+            shade = ImageChops.multiply(vignette, bottom).resize((width, height), Image.BILINEAR)
             self._photos[key] = Image.merge("RGB", (shade, shade, shade))
         return self._photos[key]
 
+    def _margin(self):
+        """How far the backdrop may drift: it is drawn this much larger on every side."""
+        return self.px(DRIFT) if self.motion else 0
+
     def _background_photo(self, path):
-        key = (path, self.width, self.height)
+        m = self._margin()
+        size = (self.width + 2 * m, self.height + 2 * m)
+        key = (path, *size)
         if key in self._backgrounds:
             self._backgrounds.move_to_end(key)
             return self._backgrounds[key]
-        image = compose_background(self.load_art(path), self.width, self.height, self._shade())
-        return self._keep_background(key, ImageTk.PhotoImage(image))
-
-    def _keep_background(self, key, photo):
+        photo = ImageTk.PhotoImage(compose_background(self.load_art(path), *size, self._shade(*size)))
         self._backgrounds[key] = photo
         if len(self._backgrounds) > BG_CACHE:
             self._backgrounds.popitem(last=False)
         return photo
 
-    def _show_background(self, photo):
-        item = self.canvas.find_withtag("bg")
-        if item:
-            self.canvas.itemconfigure(item[0], image=photo)
-        else:
-            self.canvas.create_image(0, 0, image=photo, anchor="nw", tags="bg")
-            self.canvas.tag_lower("bg")
-
     def _apply_background(self):
         self._bg_job = None
         if not self.width:
             return
-        path = self._slides[self._slide_index] if self._slides else self._bg_wanted
-        self._show_background(self._background_photo(path))
-        self._schedule_slide()
+        photo = self._background_photo(self._bg_wanted)
+        m = self._margin()
+        x, y = -m + self._drift[0], -m + self._drift[1]
+        item = self.canvas.find_withtag("bg")
+        if item:
+            self.canvas.itemconfigure(item[0], image=photo)
+            self.canvas.coords(item[0], x, y)
+        else:
+            self.canvas.create_image(x, y, image=photo, anchor="nw", tags="bg")
+            self.canvas.tag_lower("bg")
 
     # ========================================================================
-    # SLIDESHOW
-    # A new picture every slideshow_seconds, cross-faded in FADE_STEPS
-    # frames. The pictures and the fade frames are made on a worker thread;
-    # the UI thread only turns finished frames into PhotoImages. Paused while
-    # a game runs (window hidden), a dialog is open or the roulette spins.
+    # BACKGROUND MOTION
+    # The blurred backdrop drifts slowly around its centre, one pixel at a
+    # time. Moving it repaints the whole window, so it moves rarely (about
+    # twice a second - invisible steps on a blurred picture), never while
+    # the grid is being browsed, and not at all while a game runs, a dialog
+    # is open or the roulette spins.
     # ========================================================================
-    def _schedule_slide(self):
-        if self._slide_job:
-            self.root.after_cancel(self._slide_job)
-            self._slide_job = None
-        if self.slideshow_seconds > 0:
-            self._slide_job = self.root.after(int(self.slideshow_seconds * 1000), self._next_slide)
+    def hold_motion(self, seconds=DRIFT_QUIET_S):
+        self._motion_quiet_until = time.monotonic() + seconds
 
-    def _slideshow_paused(self):
-        try:
-            hidden = self.root.state() == "withdrawn"
-        except tk.TclError:
-            hidden = True
-        return hidden or bool(self.alert_mode) or self.busy_overlay
-
-    def _next_slide(self):
-        self._slide_job = None
-        if self._bg_owner is not None and self.slides_wanted:
-            self.slides_wanted(self._bg_owner)      # fetch screenshots for next time
-        if self._slideshow_paused() or len(self._slides) < 2 or not self.width:
-            self._schedule_slide()
+    def _drift_tick(self):
+        self.root.after(DRIFT_TICK_MS, self._drift_tick)
+        if not self.motion or not self.width or self.alert_mode or self.busy_overlay:
             return
-        current = self._slides[self._slide_index]
-        self._slide_index = (self._slide_index + 1) % len(self._slides)
-        target = self._slides[self._slide_index]
-        generation = self._fade_generation
-        size, shade = (self.width, self.height), self._shade()
-        result = {}
-
-        def work():
-            try:
-                old = compose_background(load_picture(current), *size, shade)
-                new = compose_background(load_picture(target), *size, shade)
-                result["frames"] = [Image.blend(old, new, (i + 1) / FADE_STEPS) for i in range(FADE_STEPS)]
-            except Exception:
-                result["frames"] = []
-        worker = threading.Thread(target=work, daemon=True)
-        worker.start()
-
-        def play(frames, i=0):
-            if generation != self._fade_generation or (self.width, self.height) != size:
-                return                              # the selection or the window changed meanwhile
-            if i < len(frames):
-                photo = ImageTk.PhotoImage(frames[i])
-                if i == len(frames) - 1:
-                    self._keep_background((target, *size), photo)
-                self._fade_photo = photo            # keep it alive while shown
-                self._show_background(photo)
-                self._slide_job = self.root.after(FADE_FRAME_MS, play, frames, i + 1)
-            else:
-                self._fade_photo = None
-                self._schedule_slide()
-
-        def wait():
-            if worker.is_alive():
-                self._slide_job = self.root.after(40, wait)
-            elif result.get("frames"):
-                play(result["frames"])
-            else:
-                self._schedule_slide()
-        wait()
+        now = time.monotonic()
+        if now < self._motion_quiet_until:
+            return
+        try:
+            if self.root.state() == "withdrawn":
+                return
+        except tk.TclError:
+            return
+        amplitude = self._margin() * 0.9
+        drift = (round(amplitude * math.sin(2 * math.pi * now / DRIFT_PERIODS[0])),
+                 round(amplitude * math.sin(2 * math.pi * now / DRIFT_PERIODS[1] + 1.3)))
+        if drift == self._drift:
+            return
+        self._drift = drift
+        item = self.canvas.find_withtag("bg")
+        if item:
+            m = self._margin()
+            self.canvas.coords(item[0], -m + drift[0], -m + drift[1])
 
     # ========================================================================
     # HEADER
@@ -644,7 +606,7 @@ class LauncherUi:
             self.grid.draw()
             self._raise_overlays()
         if game is self._bg_owner:
-            self.set_backdrop(game)             # new main picture, or more slides
+            self.set_backdrop(game)             # its backdrop picture may have changed
 
     # ========================================================================
     # TOAST
@@ -686,12 +648,10 @@ class LauncherUi:
                  (("a", "alert_yes"), ("b", "alert_no"))),
         "KILL_CONFIRM": ("alert_kill_title", "alert_kill_text", "TEXT",
                          (("a", "alert_kill_launcher"), ("y", "alert_kill_desktop"), ("b", "alert_kill_cancel"))),
-        "STREAM": ("alert_stream_title", "alert_stream_text", "TEXT",
-                   (("a", "alert_stream_add"), ("b", "alert_stream_later"), ("y", "alert_stream_never"))),
     }
 
     def show_alert(self, mode):
-        """Modal dialog: "LAUNCH", "EXIT", "KILL_CONFIRM" or "STREAM"."""
+        """Modal dialog: "LAUNCH", "EXIT", or "KILL_CONFIRM"."""
         self.alert_mode = mode
         self.alert_since = time.monotonic()
         self._draw_alert(mode)

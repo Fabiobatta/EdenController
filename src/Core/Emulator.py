@@ -154,7 +154,7 @@ class Emulator:
             list[dict]: in display order, with at least {"title", "path"}.
                         Optional: "title_id", "image" (square icon path),
                         "players" (max players on one console), "icon_url",
-                        "banner_url", "screen_urls" (downloaded by Core/Art.py).
+                        "banner_url" (downloaded by Core/Art.py).
                         An empty list disables the picker.
         """
         return []

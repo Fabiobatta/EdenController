@@ -1,7 +1,7 @@
 """
 Core/Ui.py
 All rendering for the launcher: theme, scaling, the 8-slot player grid,
-the game list, modal alerts and toasts. Every visible string comes from
+the game grid (Core/GameGrid.py), modal alerts and toasts. Every visible string comes from
 Core/I18n.py.
 
 Emulator-agnostic. The UI is fed plain view-model dicts by Core/App.py and
@@ -90,13 +90,6 @@ UI = {
 
     # === TOAST ===
     'TOAST_POSITION_Y': 0.95,       # Toast Y position (relative)
-
-    # === GAME LIST ===
-    'GAMES_VISIBLE_ROWS': 9,        # Rows shown at once
-    'GAMES_ROW_WIDTH': 900,         # Row width
-    'GAMES_ROW_HEIGHT': 44,         # Row height
-    'FONT_GAMES_SIZE': 22,          # Row text
-    'FONT_GAMES_INFO_SIZE': 16,     # "3 / 42" line
 }
 
 # ============================================================================
@@ -167,7 +160,7 @@ class LauncherUi:
         show_toast(msg, color)  - transient message
         show_alert(mode)        - modal dialog, mode readable via .alert_mode
         close_alert()
-        show_games(titles, i)   - replace the grid with the game list
+        show_games(games, i)    - cover the player grid with the game grid
         hide_games()
     """
 
@@ -184,8 +177,8 @@ class LauncherUi:
         self.emulator_name = emulator_name
         self.launch_text_value = launch_text
         self.on_rebuild = on_rebuild
-        self.games_view = None      # (titles, index) while the game list is shown
-        self.games_frame = None
+        self.games_view = None      # (games, index) while the game grid is shown
+        self.games_grid = None
 
         self.alert_mode = None      # Current alert type (if any)
         self.alert_frame = None     # Alert dialog container
@@ -445,8 +438,10 @@ class LauncherUi:
         self.lbl_toast.place(relx=0.5, rely=UI['TOAST_POSITION_Y'], anchor="center")
         self.lbl_toast.place_forget()
 
-        # A rebuild (resolution change) keeps the game list on screen
-        self.games_frame = None
+        # A rebuild (resolution change) redraws the game grid at the new scale
+        if self.games_grid is not None:
+            self.games_grid.destroy()
+            self.games_grid = None
         if self.games_view:
             self.show_games(*self.games_view)
 
@@ -560,75 +555,44 @@ class LauncherUi:
     # ========================================================================
     # GAME LIST
     # ========================================================================
-    def show_games(self, titles, index):
+    def show_games(self, games, index):
         """
-        Replace the player grid with a scrolling game list.
-
-        Only GAMES_VISIBLE_ROWS rows exist as widgets; moving the selection
-        re-labels them, so a library of thousands of games costs nothing.
+        Cover the player grid with the game grid (Core/GameGrid.py).
 
         Args:
-            titles (list[str]): Game titles in display order (not empty).
-            index  (int):       Selected entry.
+            games (list[dict]): {"title", "path", "image", "cover"} in display order.
+            index (int):        Selected entry.
         """
-        self.games_view = (titles, index)
-
-        if self.games_frame is None:
-            self.grid_frame.pack_forget()
-            self.lbl_title.configure(text=t("title_games"))
+        self.games_view = (games, index)
+        if self.games_grid is None:
+            from .GameGrid import GameGrid   # Pillow is only needed here
             self.launch_text.configure(text=t("footer_play"))
             self.quit_text.configure(text=t("footer_back"))
+            self.games_grid = GameGrid(self.root, self.scale, int(UI['FOOTER_HEIGHT'] * self.scale))
+        self.games_grid.render(games, index)
 
-            self.games_frame = ctk.CTkFrame(self.main_container, fg_color=COLOR['BG_DARK'], corner_radius=0)
-            self.games_frame.pack()
-            self.games_rows = []
-            for _ in range(UI['GAMES_VISIBLE_ROWS']):
-                row = ctk.CTkLabel(
-                    self.games_frame,
-                    text="",
-                    width=UI['GAMES_ROW_WIDTH'],
-                    height=UI['GAMES_ROW_HEIGHT'],
-                    anchor="w",
-                    corner_radius=UI['CARD_CORNER_RADIUS'],
-                    font=(UI['FONT_FAMILY'], UI['FONT_GAMES_SIZE'], "bold"),
-                )
-                row.pack(pady=2)
-                self.games_rows.append(row)
-            self.games_info = ctk.CTkLabel(
-                self.games_frame,
-                text="",
-                font=(UI['FONT_FAMILY'], UI['FONT_GAMES_INFO_SIZE']),
-                fg_color="transparent",
-                text_color=COLOR['TEXT_DIM'],
-            )
-            self.games_info.pack(pady=(UI['CARD_PADDING_Y'], 0))
+    def games_columns(self):
+        return self.games_grid.columns if self.games_grid else 1
 
-        # Keep the selection in the middle of the window where possible
-        visible = UI['GAMES_VISIBLE_ROWS']
-        first = max(0, min(index - visible // 2, len(titles) - visible))
-        for i, row in enumerate(self.games_rows):
-            item = first + i
-            if item >= len(titles):
-                row.configure(text="", fg_color="transparent")
-            elif item == index:
-                row.configure(text=f"  ▶  {titles[item]}", fg_color=COLOR['NEON_BLUE'],
-                              text_color=COLOR['BG_DARK'])
-            else:
-                row.configure(text=f"      {titles[item]}", fg_color=COLOR['BG_CARD'],
-                              text_color=COLOR['TEXT_WHITE'])
-        self.games_info.configure(text=t("games_position", index=index + 1, total=len(titles)))
+    def games_page(self):
+        return self.games_grid.page_size() if self.games_grid else 1
+
+    def games_art_changed(self, game):
+        """A cover arrived for `game`: redraw with it."""
+        if self.games_grid:
+            self.games_grid.forget_art(game)
+            if self.games_view:
+                self.games_grid.render(*self.games_view)
 
     def hide_games(self):
         """Back to the player grid."""
         self.games_view = None
-        if self.games_frame is None:
+        if self.games_grid is None:
             return
-        self.games_frame.destroy()
-        self.games_frame = None
-        self.lbl_title.configure(text=t("title_players"))
+        self.games_grid.destroy()
+        self.games_grid = None
         self.launch_text.configure(text=self.launch_text_value)
         self.quit_text.configure(text=t("footer_quit"))
-        self.grid_frame.pack()
 
     # ========================================================================
     # ALERT DIALOG SYSTEM

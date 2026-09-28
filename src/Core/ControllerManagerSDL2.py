@@ -165,6 +165,11 @@ class SDLManager:
         return found
 
     @staticmethod
+    def get_left_x(ctrl):
+        """Left stick horizontal position, -1.0 (left) to 1.0 (right)."""
+        return sdl2.SDL_GameControllerGetAxis(ctrl, sdl2.SDL_CONTROLLER_AXIS_LEFTX) / 32767.0
+
+    @staticmethod
     def get_left_y(ctrl):
         """Left stick vertical position, -1.0 (up) to 1.0 (down)."""
         return sdl2.SDL_GameControllerGetAxis(ctrl, sdl2.SDL_CONTROLLER_AXIS_LEFTY) / 32767.0

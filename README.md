@@ -66,7 +66,7 @@ Nella **lista giochi**:
 
 | Azione | Tasto (Xbox) |
 | :--- | :--- |
-| Su / giù (tenere premuto per scorrere) | Croce direzionale o levetta sinistra |
+| Muoversi nella griglia (tenere premuto per scorrere) | Croce direzionale o levetta sinistra |
 | Pagina precedente / successiva | `LB` / `RB` |
 | Avviare il gioco selezionato | `Ⓐ` |
 | Tornare ai controller | `Ⓑ` |
@@ -179,6 +179,8 @@ iniziano con `;` sono commenti.
 language = auto
 rumble = true
 kill_combo = back+lb+rb
+covers_dir = covers
+steamgriddb_api_key =
 
 [Eden]
 layout = Xbox
@@ -200,6 +202,8 @@ fullscreen = true
 | `game_picker` | `true`, `false` | Lista giochi quando il launcher parte senza un gioco |
 | `game_dirs` | cartelle separate da `;` | Dove cercare i giochi; vuoto = le cartelle configurate in Eden |
 | `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
+| `covers_dir` | cartella | Dove cercare le copertine (predefinito `covers` accanto al launcher) |
+| `steamgriddb_api_key` | chiave API | Se impostata, scarica da sola le copertine mancanti da SteamGridDB |
 
 I commenti vanno su righe proprie: dopo un valore `;` non è un commento, perché
 separa le cartelle in `game_dirs`.
@@ -217,13 +221,43 @@ separa le cartelle in `game_dirs`.
   disattiva mai). Una configurazione personalizzata del gioco in Eden che imposta
   una modalità diversa ha comunque la precedenza.
 * **game_dirs**: se vuoto, il launcher usa le cartelle dei giochi aggiunte in Eden
-  (rispettando l'opzione "scansione sottocartelle"). La lista mostra i file
-  `.nsp`, `.xci`, `.nro`; aggiornamenti e DLC con il title ID nel nome
-  (`[0100...800]`, `[0100...001]`) vengono nascosti. Il nome mostrato è il nome del
-  file ripulito dalle parti tra `[ ]`.
+  (rispettando l'opzione "scansione sottocartelle"). Vedi *Lista giochi* sotto.
 
 Accanto al file il launcher salva `EdenLauncher.state.json` (l'ultimo gioco
 giocato): si può cancellare senza problemi.
+
+---
+
+## Lista giochi
+
+Una griglia di copertine in stile Playnite. Lo sfondo è l'immagine del gioco
+selezionato, sfocata e scurita.
+
+**Quali giochi.** I file `.nsp`, `.xci` e `.nro` nelle cartelle dei giochi. Per ogni
+NSP/XCI il launcher legge il **Title ID dentro il file** (dal ticket, dal CNMT o
+decifrando l'intestazione NCA con la `header_key` di `prod.keys` di Eden), come fa
+Eden. Così aggiornamenti e DLC vengono nascosti anche quando il nome del file non
+lo dice ("Gioco v1.28.0.nsp", "Gioco Update 1.3.2.nsp"), e lo stesso gioco presente
+in più file compare una volta sola. Senza `prod.keys` si torna a indovinare dal nome.
+
+**Nome e immagine**, dal migliore:
+
+1. una **copertina** nella cartella `covers` accanto al launcher, chiamata con il
+   Title ID o con il nome del gioco (`covers\0100152000022000.png`,
+   `covers\Mario Kart 8 Deluxe.jpg`). Formato consigliato verticale 2:3
+   (es. 600×900), come quelle di Playnite;
+2. con `steamgriddb_api_key` impostata, le copertine mancanti vengono **scaricate da
+   sole** da [SteamGridDB](https://www.steamgriddb.com) in background, una volta per
+   gioco, e salvate in `covers` (la chiave è gratuita: profilo → *Preferences* →
+   *API*);
+3. l'**icona ufficiale** che Eden ha già salvato nella sua cache
+   (`cache\game_list\<TitleID>.jpeg`, opzione di Eden "Salva in cache i metadati
+   della lista giochi", attiva di default): basta aver aperto Eden una volta con
+   quei giochi in lista;
+4. altrimenti un riquadro colorato con il titolo.
+
+Il nome viene dalla cache di Eden (nome ufficiale del gioco) o, in mancanza, dal
+nome del file ripulito.
 
 ---
 
@@ -319,7 +353,8 @@ src/
 └── Eden/
     ├── Eden.py          # percorsi, backend SDL, hint SDL identici a Eden
     ├── Config.py        # GUID/port, layout Xbox/Nintendo, modalità TV, scrittura di qt-config.ini
-    ├── Games.py         # cartelle dei giochi di Eden, ricerca e nomi dei giochi
+    ├── Games.py         # cartelle dei giochi di Eden, ricerca, nomi e icone dalla cache di Eden
+    ├── Switch.py        # Title ID da NSP/XCI (ticket, CNMT, intestazioni NCA)
     └── Ini.py           # editor INI che non altera il resto del file
 tests/test_eden.py
 ```

@@ -196,6 +196,11 @@ class SDLManager:
         return found if len(found) == 4 else None
 
     @staticmethod
+    def get_left_x(ctrl):
+        """Left stick horizontal position, -1.0 (left) to 1.0 (right)."""
+        return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTX) / 32767.0
+
+    @staticmethod
     def get_left_y(ctrl):
         """Left stick vertical position, -1.0 (up) to 1.0 (down)."""
         return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTY) / 32767.0

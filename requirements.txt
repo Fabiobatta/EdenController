@@ -8,3 +8,5 @@ PySDL2==0.9.17
 PySDL3==0.9.10b0
 pywin32-ctypes==0.2.3
 setuptools==80.10.2
+Pillow>=10.1
+pycryptodome>=3.20

@@ -16,7 +16,7 @@ from Core.Log import log, fatal
 from Core.Paths import find_appimage, read_path_override, resource_path
 from Core.Process import mount_appimage, unmount_appimage
 
-from . import Config, Games
+from . import Config, Games, Switch
 from .Ini import IniFile, read_bool
 
 # Environment overrides
@@ -115,6 +115,7 @@ class Eden(Emulator):
     def __init__(self):
         super().__init__()
         self.user_dir = None
+        self.cache_dir = None
         self.backend = "SDL3"
         self.appimage_path = None
         self._sdl_dir = None
@@ -140,6 +141,7 @@ class Eden(Emulator):
             global_dir = os.path.join(os.getenv("APPDATA") or "", "eden")
             self.user_dir = portable if os.path.isdir(portable) else global_dir
             config_dir = os.path.join(self.user_dir, "config")
+            self.cache_dir = os.path.join(self.user_dir, "cache")
 
         else:
             if platform == "darwin":
@@ -159,17 +161,21 @@ class Eden(Emulator):
             if os.path.isdir(portable):
                 self.user_dir = portable
                 config_dir = os.path.join(portable, "config")
+                self.cache_dir = os.path.join(portable, "cache")
             else:
                 xdg_data = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
                 xdg_config = os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+                xdg_cache = os.getenv("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
                 self.user_dir = os.path.join(xdg_data, "eden")
                 config_dir = os.path.join(xdg_config, "eden")
+                self.cache_dir = os.path.join(xdg_cache, "eden")
 
         # Explicit override for unusual setups (custom data directory, ...)
         override = os.getenv(ENV_USER_DIR)
         if override:
             self.user_dir = override
             config_dir = os.path.join(override, "config")
+            self.cache_dir = os.path.join(override, "cache")
 
         self.config_path = os.path.join(config_dir, "qt-config.ini")
         self.profiles_dir = os.path.join(config_dir, "input")
@@ -326,7 +332,13 @@ class Eden(Emulator):
             except Exception as e:
                 log("EXCEPTION", "Could not read Eden's game folders", e)
         log("INFO", "Game folders", "; ".join(f for f, _ in folders) or "none")
-        return Games.find_games(folders)
+
+        # prod.keys lets the launcher read title IDs inside NSP/XCI files
+        keys_file = os.path.join(self.user_dir, "keys", "prod.keys")
+        header_key = Switch.load_header_key(keys_file)
+        if not header_key:
+            log("WARNING", "No header_key in prod.keys - updates/DLC recognised by name only", keys_file)
+        return Games.find_games(folders, header_key=header_key, cache_dir=self.cache_dir)
 
     def game_command(self, path):
         command = [self.exe]

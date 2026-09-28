@@ -21,10 +21,12 @@ import time
 from tkinter import messagebox
 
 from .I18n import t
+from .Covers import CoverDownloader, find_cover
 from .Log import log
+from .Paths import base_dir
 from .Process import launch
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
-from .Ui import COLOR, COLOR_POOL, UI, LauncherUi
+from .Ui import COLOR, COLOR_POOL, LauncherUi
 
 MAX_PLAYERS = 8
 POLL_INTERVAL_MS = 16
@@ -67,6 +69,18 @@ class LauncherApp:
         self.games = [] if self.has_game_args else emulator.list_games()
         log("INFO", "Game picker", f"{len(self.games)} game(s)" if self.games else "off")
 
+        # Portrait covers: the covers folder, plus SteamGridDB if configured
+        covers_dir = os.path.join(base_dir(), settings.get(LAUNCHER_SECTION, "covers_dir", "covers"))
+        for game in self.games:
+            game["cover"] = find_cover(covers_dir, game)
+        self.cover_downloader = None
+        api_key = settings.get(LAUNCHER_SECTION, "steamgriddb_api_key", "")
+        if self.games and api_key:
+            tried = (settings.state or {}).get("covers_not_found", [])
+            self.cover_downloader = CoverDownloader(api_key, covers_dir, tried)
+            self.cover_tried_saved = set(tried)
+            self.cover_downloader.start(self.games)
+
         if self.has_game_args:
             launch_text = t("footer_launch_game")
         elif self.games:
@@ -82,10 +96,9 @@ class LauncherApp:
         # Keyboard shortcuts for accessibility
         self.root.bind("<Return>", lambda e: self.handle_enter_key())
         self.root.bind("<Escape>", lambda e: self.handle_esc_key())
-        self.root.bind("<Up>", lambda e: self.move_game_selection(-1))
-        self.root.bind("<Down>", lambda e: self.move_game_selection(1))
-        self.root.bind("<Prior>", lambda e: self.move_game_selection(-UI['GAMES_VISIBLE_ROWS']))
-        self.root.bind("<Next>", lambda e: self.move_game_selection(UI['GAMES_VISIBLE_ROWS']))
+        for key, action in (("<Up>", "up"), ("<Down>", "down"), ("<Left>", "left"),
+                            ("<Right>", "right"), ("<Prior>", "page_up"), ("<Next>", "page_down")):
+            self.root.bind(key, lambda e, a=action: self.move_game_selection(a))
 
         # Initialize SDL2/SDL3 controller subsystem
         self.sdl.SDL_Init()
@@ -104,7 +117,7 @@ class LauncherApp:
         # Game list state
         self.mode = "PLAYERS"
         self.game_index = self._initial_game_index()
-        self.nav_direction = 0              # Held navigation direction (-1, 0, +1 or a page)
+        self.nav_direction = None           # Held navigation action ("up", "left", ...)
         self.nav_next_repeat = 0.0
 
         # Profile keys come from the emulator; the first one is the default
@@ -337,6 +350,8 @@ class LauncherApp:
         # ====================================================================
         if self.mode == "GAMES" and not self.ui.alert_mode and not self.process:
             self.poll_game_navigation()
+        if self.cover_downloader:
+            self.poll_covers()
 
         # ====================================================================
         # GAMEPAD BUTTON EVENT PROCESSING
@@ -627,59 +642,94 @@ class LauncherApp:
 
     def show_games(self):
         self.mode = "GAMES"
-        self.nav_direction = 0
-        self.ui.show_games([g["title"] for g in self.games], self.game_index)
+        self.nav_direction = None
+        self.ui.show_games(self.games, self.game_index)
 
     def show_players(self):
         self.mode = "PLAYERS"
         self.ui.hide_games()
         self.refresh_grid()
 
-    def move_game_selection(self, delta):
-        """Move the highlight; single steps wrap around, pages stop at the ends."""
+    def move_game_selection(self, action):
+        """
+        Move the highlight in the grid.
+
+        Args:
+            action (str): "left"/"right" (one game, wrapping), "up"/"down"
+                          (one row), "page_up"/"page_down" (one screen).
+        """
         if self.mode != "GAMES" or not self.games or self.ui.alert_mode or self.process:
             return
         count = len(self.games)
-        if abs(delta) == 1:
-            self.game_index = (self.game_index + delta) % count
-        else:
-            self.game_index = max(0, min(count - 1, self.game_index + delta))
-        self.ui.show_games([g["title"] for g in self.games], self.game_index)
+        columns = self.ui.games_columns()
+        index = self.game_index
+        if action == "left":
+            index = (index - 1) % count
+        elif action == "right":
+            index = (index + 1) % count
+        elif action == "up":
+            index = index - columns if index - columns >= 0 else index
+        elif action == "down":
+            if index + columns < count:
+                index += columns
+            elif index // columns < (count - 1) // columns:
+                index = count - 1          # partial last row: go to its last game
+        elif action == "page_up":
+            index = max(0, index - self.ui.games_page())
+        elif action == "page_down":
+            index = min(count - 1, index + self.ui.games_page())
+        if index != self.game_index:
+            self.game_index = index
+            self.ui.show_games(self.games, self.game_index)
 
     def poll_game_navigation(self):
         """
-        Read the held direction from every pad: D-pad or left stick for one
-        row, LB/RB for a page. Holding repeats, like a console menu.
+        Read the held direction from every pad: D-pad or left stick move one
+        game/row, LB/RB a page. Holding repeats, like a console menu.
         """
         sdl = self.sdl
-        page = UI['GAMES_VISIBLE_ROWS']
-        direction = 0
+        action = None
         for ctrl in self.controllers.values():
             try:
-                stick = sdl.get_left_y(ctrl)
+                stick_x, stick_y = sdl.get_left_x(ctrl), sdl.get_left_y(ctrl)
             except Exception:
-                stick = 0.0
-            if sdl.SDL_GameControllerGetButton(ctrl, sdl.SDL_CONTROLLER_BUTTON_DPAD_UP) or stick < -STICK_THRESHOLD:
-                direction = -1
-            elif sdl.SDL_GameControllerGetButton(ctrl, sdl.SDL_CONTROLLER_BUTTON_DPAD_DOWN) or stick > STICK_THRESHOLD:
-                direction = 1
-            elif sdl.SDL_GameControllerGetButton(ctrl, sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER):
-                direction = -page
-            elif sdl.SDL_GameControllerGetButton(ctrl, sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
-                direction = page
-            if direction:
+                stick_x = stick_y = 0.0
+            pressed = lambda button: sdl.SDL_GameControllerGetButton(ctrl, button)  # noqa: E731
+            if pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_UP) or stick_y < -STICK_THRESHOLD:
+                action = "up"
+            elif pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_DOWN) or stick_y > STICK_THRESHOLD:
+                action = "down"
+            elif pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT) or stick_x < -STICK_THRESHOLD:
+                action = "left"
+            elif pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT) or stick_x > STICK_THRESHOLD:
+                action = "right"
+            elif pressed(sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER):
+                action = "page_up"
+            elif pressed(sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
+                action = "page_down"
+            if action:
                 break
 
         now = time.monotonic()
-        if direction == 0:
-            self.nav_direction = 0
-        elif direction != self.nav_direction:
-            self.nav_direction = direction
+        if action is None:
+            self.nav_direction = None
+        elif action != self.nav_direction:
+            self.nav_direction = action
             self.nav_next_repeat = now + NAV_REPEAT_DELAY
-            self.move_game_selection(direction)
+            self.move_game_selection(action)
         elif now >= self.nav_next_repeat:
             self.nav_next_repeat = now + NAV_REPEAT_RATE
-            self.move_game_selection(direction)
+            self.move_game_selection(action)
+
+    def poll_covers(self):
+        """Show covers the background downloader has finished."""
+        done = self.cover_downloader.take_finished()
+        if done:
+            for game in done:
+                self.ui.games_art_changed(game)
+        if not self.cover_downloader.tried.issubset(self.cover_tried_saved):
+            self.cover_tried_saved = set(self.cover_downloader.tried)
+            self.emu.settings.save_state(covers_not_found=sorted(self.cover_tried_saved))
 
     def launch_selected_game(self):
         if not self.games:

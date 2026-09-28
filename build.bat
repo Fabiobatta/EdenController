@@ -59,7 +59,7 @@ echo [1/3] Using environment %VENV_DIR%
 rem An existing environment may predate requirements.txt - verify every build
 rem and runtime dependency is present. find_spec locates them without
 rem importing: importing sdl3 does network and binary resolution work.
-"%PY%" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','customtkinter','sdl2','sdl3')))" >nul 2>&1
+"%PY%" -c "import importlib.util,sys; sys.exit(any(importlib.util.find_spec(m) is None for m in ('PyInstaller','customtkinter','sdl2','sdl3','PIL','Crypto')))" >nul 2>&1
 if not errorlevel 1 goto :venv_done
 echo       Build dependencies missing - installing requirements...
 "%PY%" -m pip install -r requirements.txt

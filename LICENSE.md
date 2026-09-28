@@ -18,7 +18,7 @@ by **Artomos**, licensed under CC BY-NC 4.0.
   (commit `e9caa6c`). Changes: the window icon is picked per emulator name, SDL
   error messages no longer mention Ryujinx, all UI text is translatable
   (`Core/I18n.py`, English and Italian), a settings file (`Core/Settings.py`),
-  a game picker screen, confirmation rumble, a configurable kill combo, stable
+  a game picker grid (`Core/GameGrid.py`, `Core/Covers.py`), confirmation rumble, a configurable kill combo, stable
   keys for controllers without a device path, and the build scripts default to
   the Eden launcher and can bundle an SDL library from `sdl/`.
 * `src/Eden/`, `src/EdenLauncher.py`, `tests/`, the assets and the CI workflow

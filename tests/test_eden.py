@@ -387,6 +387,98 @@ class AppletTests(unittest.TestCase):
             self.assertEqual(ui["theme"], "default")   # rest of [UI] untouched
 
 
+def _pfs0(files, magic=b"PFS0", entry_size=0x18):
+    """Build a PFS0/HFS0 container from [(name, data)]."""
+    import struct
+    names = b"".join(n.encode() + b"\0" for n, _ in files)
+    entries, offset, name_offset = b"", 0, 0
+    for name, data in files:
+        entry = struct.pack("<QQI", offset, len(data), name_offset)
+        entries += entry + b"\0" * (entry_size - len(entry))
+        offset += len(data)
+        name_offset += len(name) + 1
+    header = magic + struct.pack("<III", len(files), len(names), 0)
+    return header + entries + names + b"".join(d for _, d in files)
+
+
+def _nca(key, content_type, program_id):
+    """A fake NCA: a real, encrypted 0xC00 header and nothing else."""
+    import struct
+    from Eden.Switch import xts_encrypt
+    header = bytearray(0xC00)
+    header[0x200:0x204] = b"NCA3"
+    header[0x205] = content_type
+    struct.pack_into("<Q", header, 0x210, int(program_id, 16))
+    return xts_encrypt(key, bytes(header))
+
+
+def _xci(secure_files):
+    import struct
+    secure = _pfs0(secure_files, b"HFS0", 0x40)
+    root = _pfs0([("update", b""), ("secure", secure)], b"HFS0", 0x40)
+    header = bytearray(0x200)
+    header[0x100:0x104] = b"HEAD"
+    struct.pack_into("<Q", header, 0x130, 0x200)
+    return bytes(header) + root
+
+
+class SwitchTests(unittest.TestCase):
+    KEY = bytes(range(32))
+
+    def test_xts_matches_ieee_1619_vector(self):
+        from Eden.Switch import xts_decrypt, xts_encrypt
+        # IEEE 1619-2007 vector 2 (little-endian data unit number, as the standard defines it)
+        key = bytes([0x11] * 16 + [0x22] * 16)
+        plain = bytes([0x44] * 32)
+        cipher = bytes.fromhex("c454185e6a16936e39334038acef838bfb186fff7480adc4289382ecd6d394f0")
+        self.assertEqual(xts_encrypt(key, plain, 0x3333333333, tweak_order="little"), cipher)
+        self.assertEqual(xts_decrypt(key, cipher, 0x3333333333, tweak_order="little"), plain)
+
+    def test_title_kinds(self):
+        from Eden.Switch import BASE, DLC, UPDATE, base_title_id, title_kind
+        self.assertEqual(title_kind("0100152000022000"), BASE)
+        self.assertEqual(title_kind("0100152000022800"), UPDATE)
+        self.assertEqual(title_kind("0100152000023001"), DLC)
+        self.assertEqual(base_title_id("0100152000022800"), "0100152000022000")
+        self.assertEqual(base_title_id("0100152000023001"), "0100152000022000")
+
+    def test_identify_nsp_and_xci(self):
+        from Eden.Switch import identify, load_header_key
+        with tempfile.TemporaryDirectory() as tmp:
+            def write(name, data):
+                path = os.path.join(tmp, name)
+                with open(path, "wb") as f:
+                    f.write(data)
+                return path
+
+            keys = write("prod.keys", ("header_key = " + self.KEY.hex() + "\n").encode())
+            key = load_header_key(keys)
+            self.assertEqual(key, self.KEY)
+
+            # Ticket name: no key needed
+            tik = write("a.nsp", _pfs0([("0100152000022800" + "0" * 16 + ".tik", b"x"),
+                                        ("abc.nca", b"y" * 0x10)]))
+            self.assertEqual(identify(tik), ("0100152000022800", "update"))
+
+            # CNMT XML
+            xml = write("b.nsp", _pfs0([("abc.cnmt.xml", b"<Id>0x0100152000022000</Id>")]))
+            self.assertEqual(identify(xml), ("0100152000022000", "base"))
+
+            # Encrypted NCA headers: the Meta NCA carries the content's ID
+            update = write("c.nsp", _pfs0([
+                ("p.nca", _nca(self.KEY, 0, "0100152000022000")),   # patch program: base ID
+                ("m.cnmt.nca", _nca(self.KEY, 1, "0100152000022800")),
+            ]))
+            self.assertEqual(identify(update, key), ("0100152000022800", "update"))
+            self.assertEqual(identify(update, None), (None, None))           # no keys
+            self.assertEqual(identify(update, bytes(32)), (None, None))      # wrong keys
+
+            xci = write("d.xci", _xci([("m.cnmt.nca", _nca(self.KEY, 1, "01006A800016E000")),
+                                       ("p.nca", _nca(self.KEY, 0, "01006A800016E000"))]))
+            self.assertEqual(identify(xci, key), ("01006A800016E000", "base"))
+            self.assertEqual(identify(write("e.nsp", b"garbage")), (None, None))
+
+
 class SettingsTests(unittest.TestCase):
     def test_defaults_are_created_and_user_values_win(self):
         from Core.Settings import load_settings
@@ -451,6 +543,35 @@ class GamesTests(unittest.TestCase):
         self.assertEqual(eden_game_dirs(items), [
             (os.path.normpath("D:/Giochi Switch"), True), (os.path.normpath("E:/Altri"), False)])
 
+    def test_find_games_by_title_id_with_eden_cache(self):
+        from Eden.Games import find_games
+        ids = {
+            "Dont Starve Together.nsp": ("0100AAAA00000000", "base"),
+            "Dont Starve Together v1.28.0.nsp": ("0100AAAA00000800", "update"),
+            "Strikers.xci": ("0100BBBB00000000", "base"),
+            "Strikers Update 1.3.2.nsp": ("0100BBBB00000800", "update"),
+            "Zz Strikers copy.nsp": ("0100BBBB00000000", "base"),   # same game twice
+            "Unknown Game.nsp": (None, None),
+            "Unknown Game v1.0.3.nsp": (None, None),                # unreadable: guessed by name
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            games_dir = os.path.join(tmp, "games")
+            cache = os.path.join(tmp, "cache", "game_list")
+            os.makedirs(games_dir)
+            os.makedirs(cache)
+            for name in ids:
+                open(os.path.join(games_dir, name), "w").close()
+            with open(os.path.join(cache, "0100AAAA00000000.appname.txt"), "w", encoding="utf-8") as f:
+                f.write("Don't Starve Together")
+            with open(os.path.join(cache, "0100AAAA00000000.jpeg"), "wb") as f:
+                f.write(b"jpeg")
+            games = find_games([(games_dir, False)], cache_dir=os.path.join(tmp, "cache"),
+                               identify=lambda path: ids[os.path.basename(path)])
+        self.assertEqual([g["title"] for g in games], ["Don't Starve Together", "Strikers", "Unknown Game"])
+        self.assertTrue(games[0]["image"].endswith("0100AAAA00000000.jpeg"))
+        self.assertIsNone(games[1]["image"])
+        self.assertEqual(games[1]["title_id"], "0100BBBB00000000")
+
     def test_find_games_hides_updates_and_dlc(self):
         from Eden.Games import clean_title, find_games
         self.assertEqual(clean_title("Super Game [0100ABCD12340000][v0] (USA).nsp"), "Super Game (USA)")
@@ -460,8 +581,9 @@ class GamesTests(unittest.TestCase):
                          "Zelda [01007EF00011F001][v0].nsp", "Kart.xci", "Kart.nsp",
                          "readme.txt", "sub/Deep Game.nsp"):
                 open(os.path.join(tmp, name), "w").close()
-            shallow = [g["title"] for g in find_games([(tmp, False)])]
-            deep = [g["title"] for g in find_games([(tmp, True)])]
+            no_id = lambda path: (None, None)  # noqa: E731
+            shallow = [g["title"] for g in find_games([(tmp, False)], identify=no_id)]
+            deep = [g["title"] for g in find_games([(tmp, True)], identify=no_id)]
         self.assertEqual(shallow, ["Kart (NSP)", "Kart (XCI)", "Zelda"])
         self.assertEqual(deep, ["Deep Game", "Kart (NSP)", "Kart (XCI)", "Zelda"])
 

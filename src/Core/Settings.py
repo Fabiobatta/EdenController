@@ -40,6 +40,14 @@ rumble = true
 ; Combinazione da tenere premuta durante il gioco per chiudere l'emulatore.
 ; Tasti: a b x y back start lb rb ls rs up down left right, uniti da '+'
 kill_combo = {DEFAULT_KILL_COMBO}
+
+; Copertine della lista giochi: immagini nella cartella indicata (accanto al
+; launcher), chiamate con il Title ID o il nome del gioco, es.
+;   covers\\0100152000022000.png   oppure   covers\\Mario Kart 8 Deluxe.jpg
+covers_dir = covers
+; Chiave API di SteamGridDB (gratuita: steamgriddb.com > Preferences > API)
+; per scaricare da sole le copertine mancanti. Vuoto = nessun download.
+steamgriddb_api_key =
 """
 
 

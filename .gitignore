@@ -1,0 +1,23 @@
+# Python Envs
+.venv/
+venv/
+__pycache__/
+
+# Distribution / Builds
+build/
+dist/
+*.spec
+
+# Drivers (We don't want to commit these binary files)
+*.dll
+*.dylib
+*.so
+
+# IDEs
+.vscode/
+.idea/
+# Local machine config (user emulator paths)
+*Path.config
+
+# SDL library bundled by the build scripts (downloaded, not committed)
+sdl/

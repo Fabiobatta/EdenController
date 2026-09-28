@@ -1,0 +1,89 @@
+name: Build Eden Launcher
+
+on:
+  push:
+    branches: [ "main", "master", "claude/**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  # Same SDL3 release line Eden builds against (cpmfile.json "sdl3")
+  SDL3_VERSION: "3.4.8"
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+    - name: Run tests
+      run: python -m unittest discover -s tests -v
+
+  build:
+    name: Build on ${{ matrix.os }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: EdenLauncher.exe
+            upload_name: EdenLauncher-Windows
+
+          - os: ubuntu-latest
+            artifact_name: EdenLauncher
+            upload_name: EdenLauncher-Linux
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    # Eden for Windows may link SDL statically, so the launcher carries its
+    # own SDL3.dll (picked up by build.bat from sdl\)
+    - name: Fetch SDL3.dll (Windows only)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $zip = "SDL3-$env:SDL3_VERSION-win32-x64.zip"
+        Invoke-WebRequest "https://github.com/libsdl-org/SDL/releases/download/release-$env:SDL3_VERSION/$zip" -OutFile $zip
+        Expand-Archive $zip -DestinationPath sdl-extract
+        New-Item -ItemType Directory -Force sdl | Out-Null
+        Get-ChildItem sdl-extract -Recurse -Filter SDL3.dll | Select-Object -First 1 | Copy-Item -Destination sdl\
+        if (-not (Test-Path sdl\SDL3.dll)) { throw "SDL3.dll not found in $zip" }
+
+    - name: Install Tk and build SDL3 (Linux only)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libsdl2-dev cmake build-essential python3-tk
+        git clone https://github.com/libsdl-org/SDL.git --branch "release-$SDL3_VERSION" --depth 1
+        cd SDL && cmake -B build -DSDL_SHARED=ON -DSDL_STATIC=OFF
+        cmake --build build --parallel
+        sudo cmake --install build
+
+    - name: Build with build.bat (Windows)
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: |
+        call .\build.bat Eden
+        if errorlevel 1 exit /b 1
+
+    - name: Build with build.sh (Linux)
+      if: runner.os != 'Windows'
+      run: ./build.sh Eden
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.upload_name }}
+        path: dist/${{ matrix.artifact_name }}

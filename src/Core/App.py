@@ -700,9 +700,10 @@ class LauncherApp:
         enumerated in the same OS order the emulator itself will see.
 
         Returns:
-            list[dict]: [{"path", "guid", "name"}, ...] in enumeration order.
-                        "guid" is the raw 32-char SDL hex string; turning it
-                        into an emulator-specific id is the emulator's job.
+            list[dict]: [{"path", "guid", "name", "face_buttons"}, ...] in
+                        enumeration order. "guid" is the raw 32-char SDL hex
+                        string; turning it into an emulator-specific id is the
+                        emulator's job. "face_buttons" is SDLManager.face_buttons().
         """
         sdl = self.sdl
 
@@ -717,7 +718,13 @@ class LauncherApp:
 
         hardware = []
         for pad in self.enumerate_pads():
-            hardware.append({"path": pad["path"], "guid": pad["guid"], "name": pad["name"]})
+            try:
+                face = sdl.face_buttons(pad["ctrl"])
+            except Exception as e:
+                log("WARNING", "Could not read face button bindings", e)
+                face = None
+            hardware.append({"path": pad["path"], "guid": pad["guid"], "name": pad["name"],
+                             "face_buttons": face})
             sdl.SDL_GameControllerClose(pad["ctrl"])
         return hardware
 

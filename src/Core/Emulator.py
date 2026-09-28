@@ -116,7 +116,9 @@ class Emulator:
             assignments (list[dict]): Player order, one entry per assigned pad:
                 {"path": hid path, "name": display name, "profile_key": str}
             hardware    (list[dict]): Fresh SDL enumeration, in OS order:
-                {"path": hid path, "guid": raw 32-char hex, "name": SDL name}
+                {"path": hid path, "guid": raw 32-char hex, "name": SDL name,
+                 "face_buttons": {"south", "east", "west", "north"} raw button
+                                 indices, or None if SDL cannot tell}
 
         Match the two by "path". Read the existing config and replace only the
         input section - never regenerate the whole file, or unrelated user

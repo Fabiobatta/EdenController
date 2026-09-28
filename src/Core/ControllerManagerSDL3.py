@@ -169,6 +169,33 @@ class SDLManager:
             pass
 
     @staticmethod
+    def face_buttons(ctrl):
+        """
+        Raw joystick button index behind each face button, by position:
+        {"south", "east", "west", "north"} (Xbox A, B, X, Y). None when SDL's
+        mapping does not bind all four to plain buttons.
+        """
+        wanted = {
+            sdl3.SDL_GAMEPAD_BUTTON_SOUTH: "south", sdl3.SDL_GAMEPAD_BUTTON_EAST: "east",
+            sdl3.SDL_GAMEPAD_BUTTON_WEST: "west", sdl3.SDL_GAMEPAD_BUTTON_NORTH: "north",
+        }
+        count = ctypes.c_int(0)
+        bindings = sdl3.SDL_GetGamepadBindings(ctrl, ctypes.byref(count))
+        if not bindings:
+            return None
+        found = {}
+        try:
+            for i in range(count.value):
+                binding = bindings[i].contents
+                if (binding.output_type == sdl3.SDL_GAMEPAD_BINDTYPE_BUTTON
+                        and binding.input_type == sdl3.SDL_GAMEPAD_BINDTYPE_BUTTON
+                        and binding.output.button in wanted):
+                    found[wanted[binding.output.button]] = int(binding.input.button)
+        finally:
+            sdl3.SDL_free(bindings)
+        return found if len(found) == 4 else None
+
+    @staticmethod
     def get_left_y(ctrl):
         """Left stick vertical position, -1.0 (up) to 1.0 (down)."""
         return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTY) / 32767.0

@@ -146,23 +146,47 @@ class ProfileTests(unittest.TestCase):
         self.assertEqual(set(template), {"button_a", "button_b", "lstick"})
         self.assertIn("deadzone:0.200000", template["lstick"])
 
-    def test_xbox_layout_swaps_face_buttons_and_is_default(self):
-        template = Config.load_template(IniFile(QT_CONFIG))
-        profiles = Config.load_profiles("/nonexistent", template)
-        self.assertEqual(list(profiles)[0], Config.DEFAULT_PROFILE)
-        xbox, nintendo = profiles[Config.XBOX_PROFILE], profiles[Config.NINTENDO_PROFILE]
-        # Eden auto-map: Switch A = raw button 1 (Xbox B). Xbox layout: Switch A = raw 0 (Xbox A)
-        self.assertIn("button:1,", nintendo["button_a"])
-        self.assertIn("button:0,", xbox["button_a"])
-        self.assertIn("button:1,", xbox["button_b"])
-        self.assertEqual(xbox["lstick"], nintendo["lstick"])
-        self.assertEqual(Config.to_label_layout(xbox), nintendo)
+    def build(self, template_config, profile_key, face=None):
+        profiles = Config.load_profiles("/nonexistent", Config.load_template(IniFile(template_config)))
+        hw = [{"path": "p1", "guid": RAW_GUID, "name": "Pad", "face_buttons": face}]
+        values, _ = Config.build_player_values(
+            [{"path": "p1", "name": "p1", "profile_key": profile_key}], hw, profiles)
+        return {k: unquote(v) for k, v in values.items()}
 
-    def test_fallback_xbox_layout_matches_xinput_labels(self):
-        xbox = Config.to_label_layout(Config.fallback_template())
-        # SDL XInput raw indices: A=0 B=1 X=2 Y=3
-        for key, index in (("button_a", 0), ("button_b", 1), ("button_x", 2), ("button_y", 3)):
-            self.assertTrue(xbox[key].startswith(f"button:{index},"), key)
+    def test_xbox_is_default_and_follows_labels(self):
+        profiles = Config.load_profiles("/nonexistent", Config.load_template(IniFile(QT_CONFIG)))
+        self.assertEqual(list(profiles)[:2], [Config.XBOX_PROFILE, Config.NINTENDO_PROFILE])
+        face = {"south": 0, "east": 1, "west": 2, "north": 3}
+        xbox = self.build(QT_CONFIG, Config.XBOX_PROFILE, face)
+        self.assertEqual(xbox["player_0_button_a"], f"button:0,engine:sdl,guid:{EDEN_GUID},port:0")
+        self.assertEqual(xbox["player_0_button_b"], f"button:1,engine:sdl,guid:{EDEN_GUID},port:0")
+        self.assertEqual(xbox["player_0_button_x"], f"button:2,engine:sdl,guid:{EDEN_GUID},port:0")
+        self.assertEqual(xbox["player_0_button_y"], f"button:3,engine:sdl,guid:{EDEN_GUID},port:0")
+        nintendo = self.build(QT_CONFIG, Config.NINTENDO_PROFILE, face)
+        self.assertTrue(nintendo["player_0_button_a"].startswith("button:1,"))
+        self.assertTrue(nintendo["player_0_button_x"].startswith("button:3,"))
+        self.assertEqual(xbox["player_0_lstick"], nintendo["player_0_lstick"])   # rest untouched
+
+    def test_layout_is_stable_when_eden_saved_it_back(self):
+        # Eden rewrites qt-config.ini on exit, so Player 1 may already hold the
+        # Xbox layout the launcher wrote: the next launch must not swap it back
+        face = {"south": 0, "east": 1, "west": 2, "north": 3}
+        saved_back = QT_CONFIG.replace(sdl_button(1, 0), "TMP").replace(sdl_button(0, 0), sdl_button(1, 0)) \
+                              .replace("TMP", sdl_button(0, 0))
+        first = self.build(QT_CONFIG, Config.XBOX_PROFILE, face)
+        second = self.build(saved_back, Config.XBOX_PROFILE, face)
+        for key in ("button_a", "button_b", "button_x", "button_y"):
+            self.assertEqual(first["player_0_" + key], second["player_0_" + key])
+
+    def test_face_buttons_follow_the_pad_bindings(self):
+        # A driver that numbers the face buttons differently
+        face = {"south": 1, "east": 2, "west": 0, "north": 3}
+        xbox = self.build(QT_CONFIG, Config.XBOX_PROFILE, face)
+        self.assertTrue(xbox["player_0_button_a"].startswith("button:1,"))
+        self.assertTrue(xbox["player_0_button_x"].startswith("button:0,"))
+        # No binding information: SDL's XInput order
+        guess = self.build(QT_CONFIG, Config.XBOX_PROFILE, None)
+        self.assertTrue(guess["player_0_button_a"].startswith("button:0,"))
 
     def test_keyboard_player_1_falls_back(self):
         ini = IniFile("[Controls]\nplayer_0_button_a\\default=false\nplayer_0_button_a=\"code:67,engine:keyboard\"\n")
@@ -312,6 +336,55 @@ class AdapterTests(unittest.TestCase):
         emu = Eden()
         emu.locate(self.eden_dir)
         self.assertEqual(emu.config_path, os.path.join(self.tmp.name, "user", "config", "qt-config.ini"))
+
+
+class ReconcileTests(unittest.TestCase):
+    # Same Xbox 360 model (vendor 045e, product 028e) seen through two SDL drivers
+    LAUNCHER_RAW = "030003f05e0400008e02000000007200"   # e.g. XInput ('x' = 0x78 would differ)
+    EDEN = "030000005e0400008e02000000007801"
+
+    def test_guid_mismatch_uses_edens_guid_and_ports(self):
+        pads = Config.enumerate_pads(
+            hardware(("p1", self.LAUNCHER_RAW), ("p2", self.LAUNCHER_RAW)), {self.EDEN})
+        self.assertEqual([(p["guid"], p["port"]) for p in pads], [(self.EDEN, 0), (self.EDEN, 1)])
+
+    def test_matching_or_ambiguous_guids_are_kept(self):
+        mine = Config.eden_guid(self.LAUNCHER_RAW)
+        self.assertEqual(Config.reconcile_guid(mine, {mine, self.EDEN}), mine)
+        other = "030000005e0400008e02000000009999"
+        self.assertEqual(Config.reconcile_guid(mine, {self.EDEN, other}), mine)   # two candidates
+        self.assertEqual(Config.reconcile_guid(mine, {OTHER_EDEN}), mine)          # other model
+        self.assertEqual(Config.reconcile_guid(mine, set()), mine)
+
+    def test_write_input_uses_guids_from_qt_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "qt-config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(QT_CONFIG)       # Eden's bindings use EDEN_GUID
+            profiles = Config.load_profiles(tmp, Config.load_template(IniFile.load(path)))
+            assignments = [{"path": "p1", "name": "p1", "profile_key": Config.DEFAULT_PROFILE}]
+            Config.write_input(path, assignments, hardware(("p1", self.LAUNCHER_RAW)), profiles)
+            controls = IniFile.load(path).items("Controls")
+        self.assertIn(f"guid:{EDEN_GUID}", controls["player_0_button_a"])
+
+
+class AppletTests(unittest.TestCase):
+    def test_controller_applet_option(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "qt-config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(QT_CONFIG)
+            profiles = Config.load_profiles(tmp, Config.load_template(IniFile.load(path)))
+            args = ([{"path": "p1", "name": "p1", "profile_key": Config.DEFAULT_PROFILE}],
+                    hardware(("p1", RAW_GUID)), profiles)
+
+            Config.write_input(path, *args, disable_controller_applet=None)
+            self.assertNotIn("disableControllerApplet", IniFile.load(path).items("UI"))
+            Config.write_input(path, *args, disable_controller_applet=True)
+            ui = IniFile.load(path).items("UI")
+            self.assertEqual((ui["disableControllerApplet"], ui["disableControllerApplet\\default"]),
+                             ("true", "false"))
+            self.assertEqual(ui["theme"], "default")   # rest of [UI] untouched
 
 
 class SettingsTests(unittest.TestCase):

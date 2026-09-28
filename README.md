@@ -102,7 +102,8 @@ Dal menu di chiusura: `Ⓐ` torna al launcher (per riassegnare i controller),
    regola deadzone, vibrazione ecc. e salva. Il launcher parte da questa
    mappatura per tutti i controller, cambiando solo `guid` e `port`, e di
    default la converte nel **layout Xbox** (vedi *Profili di mappatura*).
-   Non scambiare a mano A/B in Eden: ci pensa il launcher.
+   A/B/X/Y li imposta sempre il launcher, quindi non importa come sono mappati
+   in Eden.
 
    Se il Giocatore 1 non ha una mappatura SDL, il launcher usa un layout Xbox
    (XInput) integrato.
@@ -182,6 +183,7 @@ kill_combo = back+lb+rb
 [Eden]
 layout = Xbox
 docked = auto
+controller_applet = off
 game_picker = true
 game_dirs =
 fullscreen = true
@@ -194,6 +196,7 @@ fullscreen = true
 | `kill_combo` | es. `back+lb+rb` | Tasti da premere insieme per chiudere Eden durante il gioco |
 | `layout` | `Xbox`, `Nintendo`, nome di un profilo | Layout predefinito dei tasti (vedi *Profili di mappatura*) |
 | `docked` | `auto`, `always`, `never` | Modalità TV: con 2+ giocatori, sempre, o non toccarla |
+| `controller_applet` | `off`, `on`, `keep` | La finestra "controller" che alcuni giochi aprono: saltata (`off`), mostrata, o lasciata come in Eden |
 | `game_picker` | `true`, `false` | Lista giochi quando il launcher parte senza un gioco |
 | `game_dirs` | cartelle separate da `;` | Dove cercare i giochi; vuoto = le cartelle configurate in Eden |
 | `fullscreen` | `true`, `false` | Avvia a schermo intero i giochi scelti dalla lista |
@@ -204,6 +207,11 @@ separa le cartelle in `game_dirs`.
 * **kill_combo**: tasti disponibili `a b x y back start lb rb ls rs up down left
   right`, uniti da `+` (es. `back+start`). Se scrivi un nome sbagliato si usa
   `back+lb+rb`, così un errore non ti lascia senza modo di chiudere Eden.
+* **controller_applet**: alcuni giochi, all'avvio o prima del multigiocatore,
+  chiedono di "collegare i controller": Eden apre allora una sua finestra che si
+  usa solo con il mouse. Con `off` (predefinito) il launcher attiva l'opzione di
+  Eden *Disabilita applet controller*: il gioco prosegue subito con i giocatori
+  assegnati nel launcher.
 * **docked**: molti giochi accettano più controller solo in modalità TV. Con
   `auto` il launcher la attiva quando ci sono almeno 2 giocatori (non la
   disattiva mai). Una configurazione personalizzata del gioco in Eden che imposta
@@ -237,6 +245,11 @@ Due profili sono integrati, entrambi ricavati dalla mappatura del Giocatore 1:
 
 Levette, croce direzionale, dorsali, grilletti, Start e Back sono uguali nei due
 profili.
+
+I quattro tasti A/B/X/Y non vengono copiati dal Giocatore 1 ma **impostati a ogni
+avvio** leggendo da SDL quale tasto fisico del controller è in basso, a destra, a
+sinistra e in alto. Così il risultato è sempre lo stesso, anche se Eden, alla
+chiusura, ha salvato in `qt-config.ini` la mappatura scritta dal launcher.
 
 Il launcher elenca anche i profili che salvi in Eden (*Configura → Controlli →
 Profilo → Salva*), cioè i file `config\input\*.ini` che usano un controller SDL.

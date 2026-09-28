@@ -39,6 +39,14 @@ layout = {Config.XBOX_PROFILE}
 ;   never  = non toccare l'impostazione di Eden
 docked = auto
 
+; Finestra "controller" che alcuni giochi aprono all'avvio o prima del
+; multigiocatore. Non si puo' usare con il gamepad, quindi di default viene
+; saltata e il gioco usa i giocatori assegnati qui:
+;   off  = saltala (consigliato)
+;   on   = mostrala
+;   keep = non toccare l'impostazione di Eden
+controller_applet = off
+
 ; Lista dei giochi quando il launcher parte senza un gioco: true / false
 game_picker = true
 ; Cartelle dei giochi separate da ';' (sottocartelle incluse).
@@ -298,8 +306,10 @@ class Eden(Emulator):
     def write_input_config(self, assignments, hardware):
         docked = self._setting("docked", "auto").lower()
         force_docked = docked == "always" or (docked == "auto" and len(assignments) >= 2)
+        applet = self._setting("controller_applet", "off").lower()
+        disable_applet = {"off": True, "on": False}.get(applet)  # "keep" -> None
         Config.write_input(self.config_path, assignments, hardware, self.profiles,
-                           force_docked=force_docked)
+                           force_docked=force_docked, disable_controller_applet=disable_applet)
 
     # ------------------------------------------------------------------
     # 6. Game picker

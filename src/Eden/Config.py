@@ -39,6 +39,7 @@ from .Ini import IniFile, quote, unquote
 
 SECTION = "Controls"
 SYSTEM_SECTION = "System"
+UI_SECTION = "UI"
 
 # Settings::ConsoleMode (common/settings_enums.h): Handheld = 0, Docked = 1
 CONSOLE_DOCKED = 1
@@ -48,8 +49,20 @@ XBOX_PROFILE = "Xbox"          # A=A, B=B, X=X, Y=Y (by the label printed on the
 NINTENDO_PROFILE = "Nintendo"  # by position, like Eden's auto-map (Xbox B = Switch A)
 DEFAULT_PROFILE = XBOX_PROFILE
 
-# Face buttons whose bindings trade places between the two layouts
-FACE_SWAPS = (("button_a", "button_b"), ("button_x", "button_y"))
+# A built-in profile carries its face-button layout under this key. The four
+# face buttons are then written from the pad's own SDL bindings at launch,
+# never derived from the template: Eden saves qt-config.ini again on exit, so
+# the template may already be in either layout.
+LAYOUT_KEY = "@layout"
+
+# Switch face button -> physical position on the pad
+LAYOUTS = {
+    "xbox":     {"button_a": "south", "button_b": "east", "button_x": "west", "button_y": "north"},
+    "nintendo": {"button_a": "east", "button_b": "south", "button_x": "north", "button_y": "west"},
+}
+
+# Raw button indices of SDL's XInput driver, when SDL cannot report bindings
+XINPUT_FACE_BUTTONS = {"south": 0, "east": 1, "west": 2, "north": 3}
 
 # Settings::ControllerType::ProController
 PRO_CONTROLLER = 0
@@ -134,7 +147,49 @@ def eden_guid(raw_hex):
     return raw_hex[:4] + "0000" + raw_hex[8:32]
 
 
-def enumerate_pads(hardware):
+def guid_device(guid):
+    """
+    Vendor and product IDs inside a GUID (SDL layout: bus 0-3, crc 4-7,
+    vendor 8-11, product 16-19, all little-endian hex).
+    """
+    return guid[8:12], guid[16:20]
+
+
+def guids_in(values):
+    """Every SDL pad GUID referenced by a set of bindings."""
+    found = set()
+    for value in values:
+        pairs = parse_params(unquote(value))
+        if ["engine", "sdl"] not in pairs:
+            continue
+        for key, guid in pairs:
+            if key in ("guid", "guid2") and len(guid) == 32:
+                found.add(guid.lower())
+    return found
+
+
+def reconcile_guid(guid, known):
+    """
+    Prefer the GUID Eden itself recorded for this controller model.
+
+    The GUID also encodes which SDL driver (XInput, RawInput, WGI, HIDAPI)
+    and which device version SDL saw. If the launcher's SDL ends up with a
+    different one than Eden's, the bindings it writes would match nothing:
+    the pads go dead and games open the controller applet. When exactly one
+    GUID Eden already uses has the same vendor and product, that one wins.
+    """
+    if not known or guid in known:
+        return guid
+    same_model = {k for k in known if guid_device(k) == guid_device(guid)}
+    if len(same_model) == 1:
+        eden = same_model.pop()
+        log("WARNING", "Launcher and Eden see different GUIDs for the same controller model - using Eden's",
+            f"{guid} -> {eden}")
+        return eden
+    return guid
+
+
+def enumerate_pads(hardware, known_guids=None):
     """
     Attach Eden's (guid, port) to every pad of a fresh SDL scan.
 
@@ -142,16 +197,22 @@ def enumerate_pads(hardware):
     given GUID gets port n. It counts across every connected pad, not only
     the assigned ones.
 
+    Args:
+        known_guids (set[str]): GUIDs found in Eden's own bindings, used to
+                                correct a launcher/Eden GUID mismatch.
+
     Returns:
-        list[dict]: {"path", "name", "guid", "port"} in enumeration order.
+        list[dict]: {"path", "name", "guid", "port", "face_buttons"} in
+                    enumeration order.
     """
     counters = {}
     pads = []
     for hw in hardware:
-        guid = eden_guid(hw["guid"])
+        guid = reconcile_guid(eden_guid(hw["guid"]), known_guids)
         port = counters.get(guid, 0)
         counters[guid] = port + 1
-        pads.append({"path": hw["path"], "name": hw["name"], "guid": guid, "port": port})
+        pads.append({"path": hw["path"], "name": hw["name"], "guid": guid, "port": port,
+                     "face_buttons": hw.get("face_buttons")})
     return pads
 
 
@@ -247,22 +308,6 @@ def load_template(ini):
 # ============================================================================
 # PROFILES
 # ============================================================================
-def to_label_layout(mapping):
-    """
-    Turn a positional mapping into an Xbox-label one, or back.
-
-    Eden's auto-map (and the fallback above) follows the physical position:
-    Switch A is the east button, which an Xbox pad labels B. Swapping the
-    A/B and X/Y bindings makes every button do what its Xbox label says
-    (Xbox A, the bottom button, becomes Switch A). The swap is its own inverse.
-    """
-    result = dict(mapping)
-    for first, second in FACE_SWAPS:
-        if first in mapping and second in mapping:
-            result[first], result[second] = mapping[second], mapping[first]
-    return result
-
-
 def load_profiles(profiles_dir, template):
     """
     Load Eden input profiles (<config>/input/*.ini).
@@ -271,18 +316,19 @@ def load_profiles(profiles_dir, template):
     holds the same keys as qt-config.ini without the "player_N_" prefix.
     Only SDL profiles are offered, since the launcher assigns physical pads.
 
-    The two built-in profiles come first, both derived from `template`
-    (Player 1's mapping, assumed positional as Eden's auto-map makes it):
-        "Xbox"      A/B and X/Y follow the labels on the Xbox pad (default)
-        "Nintendo"  the template unchanged
+    The two built-in profiles come first. Both take sticks, shoulders,
+    D-pad, deadzones and motion from `template` (Player 1's mapping); their
+    A/B/X/Y are set at launch from each pad's SDL bindings:
+        "Xbox"      every button does what its Xbox label says (default)
+        "Nintendo"  by position, like Eden's auto-map
     A profile file with the same name as a built-in one replaces it.
 
     Returns:
         dict: {"display name": mapping dict}, default first.
     """
     profiles = {
-        XBOX_PROFILE: to_label_layout(template),
-        NINTENDO_PROFILE: dict(template),
+        XBOX_PROFILE: {**template, LAYOUT_KEY: "xbox"},
+        NINTENDO_PROFILE: {**template, LAYOUT_KEY: "nintendo"},
     }
 
     if os.path.isdir(profiles_dir):
@@ -311,7 +357,7 @@ def _bool(value):
     return "true" if value else "false"
 
 
-def build_player_values(assignments, hardware, profiles):
+def build_player_values(assignments, hardware, profiles, known_guids=None):
     """
     Compute every [Controls] key the launch needs to change.
 
@@ -322,7 +368,13 @@ def build_player_values(assignments, hardware, profiles):
     Returns:
         dict: {ini key: raw ini value}
     """
-    pads = enumerate_pads(hardware)
+    if known_guids is None:
+        known_guids = set()
+        for profile in profiles.values():
+            known_guids |= guids_in(profile.values())
+    pads = enumerate_pads(hardware, known_guids)
+    for pad in pads:
+        log("INFO", "Controller", f"{pad['name']} | guid {pad['guid']} port {pad['port']} | {pad['path']}")
     values = {}
     player = 0
 
@@ -348,6 +400,18 @@ def build_player_values(assignments, hardware, profiles):
                 continue
             values[prefix + key + "\\default"] = "false"
             values[prefix + key] = quote(retarget(profile[key], pad["guid"], pad["port"]))
+
+        layout = LAYOUTS.get(profile.get(LAYOUT_KEY))
+        if layout:
+            face = pad["face_buttons"] or XINPUT_FACE_BUTTONS
+            if not pad["face_buttons"]:
+                log("WARNING", "SDL did not report face buttons, assuming XInput order", pad["name"])
+            for key, position in layout.items():
+                values[prefix + key + "\\default"] = "false"
+                values[prefix + key] = quote(build_params(
+                    button=face[position], engine="sdl", guid=pad["guid"], port=pad["port"]))
+            log("INFO", f"Player {player + 1} face buttons", ", ".join(
+                f"{key[-1].upper()}=raw {face[position]}" for key, position in layout.items()))
         player += 1
 
     for unused in range(player, MAX_PLAYERS):
@@ -367,7 +431,21 @@ def docked_values():
     }
 
 
-def write_input(config_file, assignments, hardware, profiles, force_docked=False):
+def controller_applet_values(disabled):
+    """
+    [UI] keys for UISettings::controller_applet_disabled ("disableControllerApplet",
+    default false). Disabled, a game's "connect your controllers" request is
+    answered at once with the current players instead of opening Eden's
+    controller dialog, which cannot be used with a gamepad.
+    """
+    return {
+        "disableControllerApplet\\default": "false" if disabled else "true",
+        "disableControllerApplet": "true" if disabled else "false",
+    }
+
+
+def write_input(config_file, assignments, hardware, profiles, force_docked=False,
+                disable_controller_applet=None):
     """
     Rewrite the player_N_* keys of qt-config.ini for this launch.
 
@@ -377,6 +455,8 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
     Args:
         force_docked (bool): Also switch Eden to docked (TV) mode, which games
                              need to accept more than one controller.
+        disable_controller_applet (bool | None): Set Eden's "Disable controller
+                             applet" option; None leaves it untouched.
     """
     if not assignments:
         log("INFO", "No controllers assigned - leaving qt-config.ini untouched")
@@ -388,7 +468,14 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
         log("EXCEPTION", "Could not read qt-config.ini, Eden will use the old config", e)
         return
 
-    values, written = build_player_values(assignments, hardware, profiles)
+    # GUIDs Eden recorded itself: every SDL binding already in [Controls]
+    # (players, including ones mapped in Eden's dialog or controller applet)
+    # plus those in the profiles
+    known = guids_in(ini.items(SECTION).values())
+    for profile in profiles.values():
+        known |= guids_in(profile.values())
+
+    values, written = build_player_values(assignments, hardware, profiles, known)
     if written == 0:
         log("WARNING", "No assigned controller is connected - leaving qt-config.ini untouched")
         return
@@ -397,6 +484,9 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
     if force_docked:
         ini.set_many(SYSTEM_SECTION, docked_values())
         log("INFO", "Console mode", "docked (TV)")
+    if disable_controller_applet is not None:
+        ini.set_many(UI_SECTION, controller_applet_values(disable_controller_applet))
+        log("INFO", "Controller applet", "disabled" if disable_controller_applet else "enabled")
     try:
         os.makedirs(os.path.dirname(config_file), exist_ok=True)
         ini.save(config_file)

@@ -24,10 +24,67 @@ LAUNCHER_SECTION = "Launcher"
 # Button names accepted by kill_combo (see ControllerManagerSDL*.BUTTONS)
 DEFAULT_KILL_COMBO = "back+lb+rb"
 
-LAUNCHER_DEFAULTS = f"""\
+_DEFAULTS_EN = f"""\
 ; ============================================================================
-;  Impostazioni del launcher / Launcher settings
-;  Righe che iniziano con ';' sono commenti. / Lines starting with ';' are comments.
+;  Launcher settings
+;  Lines starting with ';' are comments.
+; ============================================================================
+
+[{LAUNCHER_SECTION}]
+; Interface language: auto (same as Windows), en, it
+language = auto
+
+; Rumble when a controller takes a player slot
+; (1 pulse = Player 1, 2 pulses = Player 2, ...): true / false
+rumble = true
+
+; Interface sounds (players joining, confirmations, roulette): true / false
+sounds = true
+; Sound volume, 0 to 100
+sound_volume = 70
+; To replace a sound, put a .wav file with the same name in a "sounds"
+; folder next to the launcher (join1..join8, blip1..blip8, select, back,
+; move, toggle, launch, tick, win, trophy, leave, error)
+
+; Back up a game's saves before starting it from the game grid: true / false
+backup_saves = true
+; Backup folder (relative to the launcher, or a full path such as a
+; OneDrive folder: %USERPROFILE%\\OneDrive\\Eden saves)
+backup_dir = saves_backup
+; Backups kept per game (the oldest are deleted)
+backup_keep = 10
+
+; Animated background: the blurred game art drifts slowly: true / false
+background_motion = true
+; The selected game's border and glow take the colour of its cover
+; (false = always yellow)
+dynamic_colors = true
+
+; Buttons to hold together during a game to close the emulator.
+; Buttons: a b x y back start lb rb ls rs up down left right, joined by '+'
+kill_combo = {DEFAULT_KILL_COMBO}
+
+; Game grid covers: pictures in this folder (next to the launcher), named
+; after the Title ID or the game name, e.g.
+;   covers\\0100152000022000.png   or   covers\\Mario Kart 8 Deluxe.jpg
+covers_dir = covers
+; Download missing banners (backgrounds) and icons from the eShop: true / false
+download_art = true
+; SteamGridDB API key (free: steamgriddb.com > Preferences > API) to
+; download missing covers automatically. Empty = no downloads.
+steamgriddb_api_key =
+
+; Player count shown on the covers, when the eShop's is wrong: remove
+; the ';' and write Title ID or game name = players
+; [Players]
+; 0100A8E016236000 = 4
+; Kirby's Dream Buffet = 4
+"""
+
+_DEFAULTS_IT = f"""\
+; ============================================================================
+;  Impostazioni del launcher
+;  Le righe che iniziano con ';' sono commenti.
 ; ============================================================================
 
 [{LAUNCHER_SECTION}]
@@ -49,7 +106,7 @@ sound_volume = 70
 ; Backup dei salvataggi prima di avviare un gioco dalla lista: true / false
 backup_saves = true
 ; Cartella dei backup (relativa al launcher, oppure un percorso completo,
-; es. una cartella di OneDrive: %USERPROFILE%\OneDrive\Salvataggi Eden)
+; es. una cartella di OneDrive: %USERPROFILE%\\OneDrive\\Salvataggi Eden)
 backup_dir = saves_backup
 ; Quanti backup tenere per ogni gioco (i piu' vecchi vengono cancellati)
 backup_keep = 10
@@ -80,6 +137,16 @@ steamgriddb_api_key =
 ; 0100A8E016236000 = 4
 ; Kirby's Dream Buffet = 4
 """
+
+
+# The settings file is written once, in the Windows language: {"en", "it"}
+LAUNCHER_DEFAULTS = {"en": _DEFAULTS_EN, "it": _DEFAULTS_IT}
+
+
+def defaults_language():
+    """Language of the comments in a new settings file."""
+    from .I18n import detect_language
+    return "it" if detect_language() == "it" else "en"
 
 
 # kill_combo names -> SDLManager button attribute
@@ -209,13 +276,16 @@ def _write_json(path, data, indent=2):
         log("WARNING", "Could not write", f"{path}: {e}")
 
 
-def load_settings(directory, launcher_name, emulator_defaults=""):
+def load_settings(directory, launcher_name, emulator_defaults="", language=None):
     """
     Load "<launcher_name>.ini" from `directory`, creating it with defaults if
     it does not exist. Never fails: an unreadable file means defaults.
     """
     path = os.path.join(directory, f"{launcher_name}.ini")
-    defaults = LAUNCHER_DEFAULTS + ("\n" + emulator_defaults if emulator_defaults else "")
+    language = language or defaults_language()
+    if isinstance(emulator_defaults, dict):
+        emulator_defaults = emulator_defaults.get(language) or emulator_defaults.get("en", "")
+    defaults = LAUNCHER_DEFAULTS[language] + ("\n" + emulator_defaults if emulator_defaults else "")
 
     if not os.path.exists(path):
         try:

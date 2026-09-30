@@ -502,6 +502,22 @@ class SettingsTests(unittest.TestCase):
             settings.save_state(last_game="x.nsp")
             self.assertEqual(load_settings(tmp, "TestLauncher").state, {"last_game": "x.nsp"})
 
+    def test_new_file_in_the_windows_language(self):
+        from Core.Settings import LAUNCHER_DEFAULTS, _parse, load_settings
+        from Eden.Eden import DEFAULT_SETTINGS
+        # Both languages define exactly the same options
+        self.assertEqual({s: set(v) for s, v in _parse(LAUNCHER_DEFAULTS["en"]).items()},
+                         {s: set(v) for s, v in _parse(LAUNCHER_DEFAULTS["it"]).items()})
+        self.assertEqual(_parse(DEFAULT_SETTINGS["en"]), _parse(DEFAULT_SETTINGS["it"]))
+        for language, marker in (("en", "; Interface language"), ("it", "; Lingua dell'interfaccia")):
+            with tempfile.TemporaryDirectory() as tmp:
+                settings = load_settings(tmp, "TestLauncher", DEFAULT_SETTINGS, language=language)
+                with open(os.path.join(tmp, "TestLauncher.ini"), encoding="utf-8") as f:
+                    text = f.read()
+                self.assertIn(marker, text)
+                self.assertIn("%USERPROFILE%\\OneDrive\\", text)     # single backslashes in the file
+                self.assertEqual(settings.get("Eden", "docked"), "auto")
+
 
 class I18nTests(unittest.TestCase):
     def test_languages_have_the_same_keys(self):

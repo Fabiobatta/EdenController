@@ -40,7 +40,8 @@ class Emulator:
     name = "Emulator"   # branding: window title, "<Name>Path.config", log filename
 
     # Emulator-specific part of "<Name>Launcher.ini", appended to the generic
-    # [Launcher] section when the file is first created
+    # [Launcher] section when the file is first created: a string, or
+    # {"en": ..., "it": ...} to follow the language of the new file
     default_settings = ""
 
     def __init__(self):

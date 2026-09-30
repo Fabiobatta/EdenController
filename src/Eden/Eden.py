@@ -26,7 +26,38 @@ ENV_USER_DIR = "EDEN_LAUNCHER_USER_DIR"     # Eden's user folder (holds config/)
 
 SETTINGS_SECTION = "Eden"
 
-DEFAULT_SETTINGS = f"""\
+_SETTINGS_EN = f"""\
+[{SETTINGS_SECTION}]
+; Default A/B/X/Y layout:
+;   Xbox     = every button does what its label says (bottom A = Switch A)
+;   Nintendo = by position, like Eden's auto-mapping
+; or the name of a profile saved in Eden. Each player can change it with X.
+layout = {Config.XBOX_PROFILE}
+
+; Docked (TV) mode, which many games need for more than one controller:
+;   auto   = turn it on with 2 or more players
+;   always = always turn it on
+;   never  = leave Eden's setting alone
+docked = auto
+
+; The "controllers" window some games open at start or before multiplayer.
+; It cannot be used with a gamepad, so by default it is skipped and the game
+; uses the players assigned here:
+;   off  = skip it (recommended)
+;   on   = show it
+;   keep = leave Eden's setting alone
+controller_applet = off
+
+; Game grid when the launcher starts without a game: true / false
+game_picker = true
+; Game folders separated by ';' (subfolders included).
+; Empty = the folders already configured in Eden.
+game_dirs =
+; Start games from the grid in fullscreen: true / false
+fullscreen = true
+"""
+
+_SETTINGS_IT = f"""\
 [{SETTINGS_SECTION}]
 ; Layout predefinito dei tasti A/B/X/Y:
 ;   Xbox     = ogni tasto fa quello che c'e' scritto sopra (A in basso = A di Switch)
@@ -56,6 +87,8 @@ game_dirs =
 ; Avvia i giochi della lista a schermo intero: true / false
 fullscreen = true
 """
+
+DEFAULT_SETTINGS = {"en": _SETTINGS_EN, "it": _SETTINGS_IT}
 
 register({
     "en": {

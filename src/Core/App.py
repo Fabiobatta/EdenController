@@ -17,6 +17,11 @@ Screens (self.mode):
 Remembered between sessions (Settings state file): the last game, play time
 and last-played date per game, favourites and the grid's sort order.
 
+A controller that disconnects once the players are set (during a game, in
+the game grid) keeps its player slot: the slot "waits" and goes back to the
+same pad, or to the next pad of the same model, when one connects. Only on
+the player cards does a disconnect free the slot at once.
+
 Work kept off the 16 ms loop:
     - controllers are opened once, when they appear (sync_pads)
     - the game library is scanned on a background thread while players join
@@ -65,8 +70,53 @@ SORT_MODES = ("recent", "az", "most")
 ALERT_GUARD_S = 0.6         # dialogs ignore buttons this long after they open
 MIN_SESSION_S = 10          # shorter runs (crash at boot...) are not play time
 
+# What the close menu reports as held (diagnostics for stuck buttons):
+# (glyph, SDLManager button attribute), in display order
+HELD_BUTTONS = (
+    ("a", "SDL_CONTROLLER_BUTTON_A"), ("b", "SDL_CONTROLLER_BUTTON_B"),
+    ("x", "SDL_CONTROLLER_BUTTON_X"), ("y", "SDL_CONTROLLER_BUTTON_Y"),
+    ("lb", "SDL_CONTROLLER_BUTTON_LEFT_SHOULDER"), ("rb", "SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER"),
+    ("ls", "SDL_CONTROLLER_BUTTON_LEFT_STICK"), ("rs", "SDL_CONTROLLER_BUTTON_RIGHT_STICK"),
+    ("back", "SDL_CONTROLLER_BUTTON_BACK"), ("start", "SDL_CONTROLLER_BUTTON_START"),
+)
+DPAD_BUTTONS = ("SDL_CONTROLLER_BUTTON_DPAD_UP", "SDL_CONTROLLER_BUTTON_DPAD_DOWN",
+                "SDL_CONTROLLER_BUTTON_DPAD_LEFT", "SDL_CONTROLLER_BUTTON_DPAD_RIGHT")
+TRIGGER_PRESSED = 0.5
+HELD_POLL_S = 0.1
+
 # kill_combo button names -> button picture
 COMBO_GLYPHS = {"select": "back", "up": "dpad", "down": "dpad", "left": "dpad", "right": "dpad"}
+
+
+def match_reconnects(waiting, free_pads):
+    """
+    Which newly available pad takes which waiting player slot.
+
+    A pad with the slot's old device path wins; otherwise the slot goes to a
+    pad of the same model (GUID), the slot that has waited longest first.
+    Identical virtual pads (Sunshine / Vibeshine) cannot be told apart, so
+    for them "same model" is the best possible match.
+
+    Args:
+        waiting   (list[dict]): waiting assignments, oldest first ("path", "guid").
+        free_pads (list[dict]): connected pads not used by any player ("path", "guid").
+
+    Returns:
+        list[tuple[dict, dict]]: (assignment, pad) pairs.
+    """
+    pairs, pads, slots = [], list(free_pads), list(waiting)
+    for slot in list(slots):
+        pad = next((p for p in pads if p["path"] == slot["path"]), None)
+        if pad:
+            pairs.append((slot, pad))
+            pads.remove(pad)
+            slots.remove(slot)
+    for slot in slots:
+        pad = next((p for p in pads if p["guid"] == slot.get("guid")), None)
+        if pad:
+            pairs.append((slot, pad))
+            pads.remove(pad)
+    return pairs
 
 
 class LauncherApp:
@@ -145,7 +195,11 @@ class LauncherApp:
         self.pads = {}                      # {instance_id: {"ctrl", "path", "raw_path", "guid", "name"}}
         self._pad_order = []                # instance ids in SDL enumeration order
         self._not_gamepads = set()          # joysticks that are not gamepads (flight sticks...)
-        self.assignments = []               # [{"path", "name", "profile_key", "is_editing"}] - player order
+        self.assignments = []               # [{"path", "guid", "name", "profile_key", "is_editing",
+                                            #   "waiting"}] - player order
+        self._carried_keys = None           # path-less pad keys kept across scan_hardware()
+        self._held = None                   # close menu: last held-buttons report
+        self._held_next = 0.0
         self.color_pool = list(COLOR_POOL)
         random.shuffle(self.color_pool)
         self.hid_colors = {}                # {path: color} for the session
@@ -294,22 +348,42 @@ class LauncherApp:
                 "name": name.decode() if name else "Controller"}
 
     @staticmethod
-    def _assign_keys(pads, order):
+    def _assign_keys(pads, order, preferred=None):
         """
         The key identifying each pad ("path"): its device path, or - for
-        pads the OS gives no path - its GUID plus its order among path-less
-        pads with that GUID. Computed the same way on every scan, so a pad
-        keeps its key across the SDL re-initialisation in scan_hardware().
+        pads the OS gives no path - its GUID plus a number.
+
+        A pad keeps its key while it stays connected. A new path-less pad
+        takes the lowest number free for its GUID, which is what Eden does
+        with ports (SDLDriver::InitJoystick reuses the first freed slot), so
+        a pad that drops and comes back lines up with the same player in
+        both programs.
+
+        Args:
+            preferred (dict): {guid: [keys]} handed out first, in order, to
+                              new path-less pads of that GUID - the keys the
+                              pads had before an SDL re-initialisation (SDL
+                              enumerates them in the same order again).
         """
-        pathless = {}
+        preferred = {guid: list(keys) for guid, keys in (preferred or {}).items()}
         for instance_id in order:
             pad = pads[instance_id]
+            if pad.get("path"):
+                continue
             if pad["raw_path"]:
                 pad["path"] = pad["raw_path"]
-            else:
-                n = pathless.get(pad["guid"], 0)
-                pathless[pad["guid"]] = n + 1
-                pad["path"] = f"UNK_{pad['guid']}_{n}"
+                continue
+            used = {p.get("path") for p in pads.values() if p["guid"] == pad["guid"]}
+            queue = preferred.get(pad["guid"], [])
+            while queue and queue[0] in used:
+                queue.pop(0)
+            if queue:
+                pad["path"] = queue.pop(0)
+                continue
+            n = 0
+            while f"UNK_{pad['guid']}_{n}" in used:
+                n += 1
+            pad["path"] = f"UNK_{pad['guid']}_{n}"
 
     def sync_pads(self):
         """
@@ -344,30 +418,120 @@ class LauncherApp:
                 log("INFO", "Controller connected", self.pads[instance_id]["name"])
 
         self._pad_order = [i for i in order if i in self.pads]
-        self._assign_keys(self.pads, self._pad_order)
+        self._assign_keys(self.pads, self._pad_order, self._carried_keys)
+        self._carried_keys = None
         return True
 
     def on_pads_changed(self):
-        """Update the counter and drop players whose controller disconnected."""
+        """
+        Update the counter, give waiting slots back to returning controllers,
+        and free or hold the slots of controllers that disconnected.
+        """
         self.ui.set_pads(len(self.pads))
+        self._restore_waiting()
         connected = {pad["path"] for pad in self.pads.values()}
-        dropped = [a for a in self.assignments if a["path"] not in connected]
+        dropped = [a for a in self.assignments if not a.get("waiting") and a["path"] not in connected]
         if not dropped:
+            return
+        if self.process or self.mode != "PLAYERS":
+            # Players are set: keep the slot for when the controller comes back
+            for assignment in dropped:
+                assignment["waiting"] = True
+                assignment["waiting_since"] = time.monotonic()
+                player = self.assignments.index(assignment) + 1
+                log("INFO", f"Controller disconnected - Player {player} waits for it", assignment["name"])
+            first = dropped[0]
+            self.ui.show_toast(t("toast_waiting", n=self.assignments.index(first) + 1),
+                               self.hid_colors.get(first["path"], COLOR["NEON_RED"]))
             return
         self.assignments = [a for a in self.assignments if a["path"] in connected]
         self.ui.show_toast(t("toast_disconnected", name=dropped[0]["name"]),
                            self.hid_colors.get(dropped[0]["path"], COLOR["NEON_RED"]))
         for assignment in dropped:
             log("INFO", "Controller disconnected", assignment["name"])
-            color = self.hid_colors.pop(assignment["path"], None)
-            if color:
-                self.color_pool.append(color)
-            self.hid_profiles.pop(assignment["path"], None)  # Clear profile on hardware disconnect
+            self._forget_controller(assignment["path"])
         self.refresh_grid()
-        if self.mode == "GAMES":
-            self.show_games()                   # badges depend on the number of players
-        elif self.mode == "PLAYERS":
-            self.update_hints()
+        self.update_hints()
+
+    def _forget_controller(self, path):
+        color = self.hid_colors.pop(path, None)
+        if color:
+            self.color_pool.append(color)
+        self.hid_profiles.pop(path, None)       # Clear profile on hardware disconnect
+
+    def _restore_waiting(self):
+        """Hand waiting slots to controllers that (re)connected."""
+        waiting = sorted((a for a in self.assignments if a.get("waiting")), key=lambda a: a["waiting_since"])
+        if not waiting:
+            return
+        used = {a["path"] for a in self.assignments if not a.get("waiting")}
+        free = [{**pad, "id": instance_id} for instance_id, pad in self.pads.items() if pad["path"] not in used]
+        for assignment, pad in match_reconnects(waiting, free):
+            old = assignment["path"]
+            if old != pad["path"]:
+                # The colour and the chosen layout follow the player, not the device path
+                if old in self.hid_colors:
+                    self.hid_colors[pad["path"]] = self.hid_colors.pop(old)
+                if old in self.hid_profiles:
+                    self.hid_profiles[pad["path"]] = self.hid_profiles.pop(old)
+            assignment.update(path=pad["path"], guid=pad["guid"], name=pad["name"], waiting=False)
+            player = self.assignments.index(assignment) + 1
+            log("INFO", f"Controller reconnected -> Player {player}", pad["name"])
+            self.ui.show_toast(t("toast_reconnected", n=player), self.get_assigned_color(pad["path"]))
+            if not self.process:
+                self.confirm_player_number(pad["id"], player)
+
+    def drop_waiting(self):
+        """Back on the player cards: slots still waiting are freed."""
+        gone = [a for a in self.assignments if a.get("waiting")]
+        if not gone:
+            return
+        self.assignments = [a for a in self.assignments if not a.get("waiting")]
+        for assignment in gone:
+            log("INFO", "Waiting slot freed", assignment["name"])
+            self._forget_controller(assignment["path"])
+        self.ui.show_toast(t("toast_disconnected", name=gone[0]["name"]))
+
+    def held_buttons(self, ctrl):
+        """Glyph names of everything held on a pad right now (stuck-button check)."""
+        sdl = self.sdl
+        pressed = lambda attr: sdl.SDL_GameControllerGetButton(ctrl, getattr(sdl, attr))  # noqa: E731
+        try:
+            left, right = sdl.get_triggers(ctrl)
+            held = []
+            for name, attr in HELD_BUTTONS:
+                if pressed(attr):
+                    held.append(name)
+                if name == "rb":            # triggers right after the bumpers
+                    held += [n for n, value in (("lt", left), ("rt", right)) if value > TRIGGER_PRESSED]
+            if any(pressed(attr) for attr in DPAD_BUTTONS):
+                held.append("dpad")
+        except Exception:
+            return []
+        return held
+
+    def report_held_buttons(self):
+        """
+        While the close menu is open: show (and log) what every player's
+        controller holds. With hands off the controllers, anything listed
+        is stuck before Eden (client, streaming host or driver).
+        """
+        now = time.monotonic()
+        if now < self._held_next:
+            return
+        self._held_next = now + HELD_POLL_S
+        pads = {pad["path"]: pad for pad in self.pads.values()}
+        rows = []
+        for i, assignment in enumerate(self.assignments):
+            pad = None if assignment.get("waiting") else pads.get(assignment["path"])
+            rows.append((f"P{i + 1}", self.get_assigned_color(assignment["path"]),
+                         None if pad is None else tuple(self.held_buttons(pad["ctrl"]))))
+        if rows != self._held:
+            self._held = rows
+            self.ui.set_alert_detail(rows)
+            log("INFO", "Close menu - held buttons", " | ".join(
+                f"{label} {' '.join(h).upper() or '-'}" if h is not None else f"{label} disconnected"
+                for label, _, h in rows))
 
     def kill_combo_pressed(self):
         sdl = self.sdl
@@ -402,6 +566,7 @@ class LauncherApp:
             if self.process and self.kill_combo_pressed():
                 self.root.deiconify()  # Bring launcher to foreground
                 log("INFO", "Kill combo detected - showing menu")
+                self._held, self._held_next = None, 0.0
                 self.ui.show_alert("KILL_CONFIRM")
 
         # ====================================================================
@@ -409,6 +574,8 @@ class LauncherApp:
         # ====================================================================
         if self.sync_pads():
             self.on_pads_changed()
+        if self.ui.alert_mode == "KILL_CONFIRM":
+            self.report_held_buttons()
 
         # ====================================================================
         # BACKGROUND WORK RESULTS
@@ -564,6 +731,7 @@ class LauncherApp:
         profile_key = self.hid_profiles.get(pad["path"], self.default_profile)
         self.assignments.append({
             "path": pad["path"],
+            "guid": pad["guid"],
             "name": pad["name"],
             "profile_key": profile_key,
             "is_editing": False,
@@ -865,6 +1033,9 @@ class LauncherApp:
         self.ui.hide_trophies()
         self.sounds.play("back")
         self.mode = self._mode_before_trophies
+        if self.mode == "PLAYERS":
+            self.drop_waiting()
+            self.refresh_grid()
         self.update_hints()
 
     # ========================================================================
@@ -947,6 +1118,7 @@ class LauncherApp:
     def show_players(self):
         self.mode = "PLAYERS"
         self.waiting_for_games = False
+        self.drop_waiting()
         self.ui.hide_games()
         last = self._last_game()
         if last:
@@ -1079,6 +1251,13 @@ class LauncherApp:
         """
         sdl = self.sdl
 
+        # Path-less pads keep their keys across the re-initialisation
+        previous = {}
+        for instance_id in self._pad_order:
+            pad = self.pads[instance_id]
+            if not pad["raw_path"]:
+                previous.setdefault(pad["guid"], []).append(pad["path"])
+
         # Close all existing controller handles; sync_pads() reopens them later
         for pad in self.pads.values():
             sdl.SDL_GameControllerClose(pad["ctrl"])
@@ -1099,7 +1278,12 @@ class LauncherApp:
                 continue
             pads[instance_id] = self._describe(ctrl)
             order.append(instance_id)
-        self._assign_keys(pads, order)
+        self._assign_keys(pads, order, previous)
+        carried = {}
+        for instance_id in order:
+            if not pads[instance_id]["raw_path"]:
+                carried.setdefault(pads[instance_id]["guid"], []).append(pads[instance_id]["path"])
+        self._carried_keys = carried            # for sync_pads() reopening them
 
         hardware = []
         for instance_id in order:
@@ -1137,7 +1321,11 @@ class LauncherApp:
                 emulator's command with this launcher's own arguments (e.g. a
                 game path from Playnite) passed straight through.
         """
-        self.emu.write_input_config(self.assignments, self.scan_hardware())
+        playing = [a for a in self.assignments if not a.get("waiting")]
+        if len(playing) < len(self.assignments):
+            log("WARNING", "Starting without the players whose controller is still disconnected",
+                ", ".join(f"P{i + 1}" for i, a in enumerate(self.assignments) if a.get("waiting")))
+        self.emu.write_input_config(playing, self.scan_hardware())
 
         if cmd_args is None:
             cmd_args = self.emu.command(sys.argv)

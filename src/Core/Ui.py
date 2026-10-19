@@ -153,6 +153,7 @@ class LauncherUi:
         self.width = self.height = 0
         self.scale = 1.0
         self.alert_mode = None
+        self.alert_detail = None
         self.alert_since = 0.0
         self.view = "players"
         self.slots = []
@@ -778,7 +779,21 @@ class LauncherUi:
 
     def close_alert(self):
         self.alert_mode = None
+        self.alert_detail = None
         self.canvas.delete("alert")
+
+    def set_alert_detail(self, rows):
+        """
+        Live "held buttons" lines under the close menu's choices.
+
+        Args:
+            rows (list[tuple]): (label, color, held) per player; held is a
+                tuple of glyph names, empty when nothing is pressed, None
+                when the controller is disconnected.
+        """
+        self.alert_detail = rows
+        if self.alert_mode:
+            self._draw_alert(self.alert_mode)
 
     def _draw_alert(self, mode):
         c = self.canvas
@@ -789,15 +804,47 @@ class LauncherUi:
         shade = self.photo(("overlay", self.width, self.height),
                            lambda: Image.new("RGBA", (self.width, self.height), (0, 0, 0, 175)))
         c.create_image(0, 0, image=shade, anchor="nw", tags="alert")
-        w, h = self.px(600), self.px(270)
+        detail = self.alert_detail if mode == "KILL_CONFIRM" else None
+        per_row = 4
+        rows = (len(detail) + per_row - 1) // per_row if detail else 0
+        w = self.px(760 if rows else 600)
+        h = self.px(270) + (self.px(48 + 36 * rows) if rows else 0)
         cx, cy = self.width // 2, self.height // 2
+        top = cy - h // 2
         box = self.photo(("dialog", w, h), lambda: Glyphs.panel(
             w, h, self.px(20), (22, 24, 31, 248), outline=("#3A3F4B", max(1, self.px(1.5)))))
         c.create_image(cx, cy, image=box, tags="alert")
-        c.create_text(cx, cy - self.px(72), text=t(title), fill=COLOR[color], font=self.font(26),
+        c.create_text(cx, top + self.px(63), text=t(title), fill=COLOR[color], font=self.font(26),
                       tags="alert")
-        c.create_text(cx, cy - self.px(20), text=t(text, name=self.emulator_name), fill=COLOR["TEXT_DIM"],
+        c.create_text(cx, top + self.px(115), text=t(text, name=self.emulator_name), fill=COLOR["TEXT_DIM"],
                       font=self.font(16, False), width=w - self.px(80), justify="center", tags="alert")
         markup = "      ".join(f"[{b}] {t(label)}" for b, label in buttons)
-        self.rich(cx, cy + self.px(70), markup, 18, COLOR["TEXT"], anchor="center", tags="alert")
+        self.rich(cx, top + self.px(205), markup, 18, COLOR["TEXT"], anchor="center", tags="alert")
+        if rows:
+            self._draw_held(detail, cx - w // 2, top + self.px(262), w, per_row)
         c.tag_raise("alert")
+
+    def _draw_held(self, detail, left, y, width, per_row):
+        """The held-buttons report: a caption, then "P1 [a] [lb]" cells, four per line."""
+        c = self.canvas
+        pad = self.px(40)
+        c.create_line(left + pad, y - self.px(18), left + width - pad, y - self.px(18),
+                      fill="#3A3F4B", width=max(1, self.px(1)), tags="alert")
+        c.create_text(left + pad, y, text=t("held_title"), anchor="w", fill=COLOR["TEXT_FAINT"],
+                      font=self.font(12, False), tags="alert")
+        cell = (width - 2 * pad) // per_row
+        label_font = self.font(14)
+        for i, (label, color, held) in enumerate(detail):
+            x = left + pad + (i % per_row) * cell
+            row_y = y + self.px(34) + (i // per_row) * self.px(36)
+            item = c.create_text(x, row_y, text=label, anchor="w", fill=color, font=label_font, tags="alert")
+            x = c.bbox(item)[2] + self.px(6)
+            if held is None:
+                c.create_text(x, row_y, text=t("held_disconnected"), anchor="w", fill=COLOR["BAD"],
+                              font=self.font(12, False), tags="alert")
+            elif held:
+                self.rich(x, row_y, "".join(f"[{name}]" for name in held), 13, COLOR["TEXT"],
+                          tags="alert")
+            else:
+                c.create_text(x + self.px(4), row_y, text="—", anchor="w", fill=COLOR["TEXT_FAINT"],
+                              font=label_font, tags="alert")

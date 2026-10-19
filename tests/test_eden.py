@@ -751,6 +751,7 @@ class GlyphTests(unittest.TestCase):
         self.assertEqual(Glyphs.star(20, "#F5D90A").size, (20, 20))
         self.assertEqual(Glyphs.clock(18, "#FFFFFF").size, (18, 18))
         self.assertEqual(Glyphs.trophy(30, "#F5D90A").size, (30, 30))
+        self.assertEqual(Glyphs.button("lt", 24).size, Glyphs.button("lb", 24).size)
         self.assertEqual(Glyphs.panel(100, 40, 8, (0, 0, 0, 128), glow=("#FF0000", 6)).size, (112, 52))
         with self.assertRaises(ValueError):
             Glyphs.button("nope", 24)
@@ -909,6 +910,108 @@ class TimeLabelTests(unittest.TestCase):
             self.assertEqual(last_played_label(now - 90 * 86400, now), "30/06/2026")
         finally:
             set_language("en")
+
+
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class ReconnectTests(unittest.TestCase):
+    PAD = "030000005e0400008e02000000007801"
+
+    def _app(self, mode="GAMES", process=None):
+        from Core.App import LauncherApp
+        app = LauncherApp.__new__(LauncherApp)
+        toasts, confirmed = [], []
+        app.ui = types.SimpleNamespace(set_pads=lambda n: None, show_toast=lambda m, c=None: toasts.append(m))
+        app.toasts, app.confirmed = toasts, confirmed
+        app.confirm_player_number = lambda instance_id, n: confirmed.append((instance_id, n))
+        app.refresh_grid = app.update_hints = lambda: None
+        app.mode, app.process = mode, process
+        app.hid_colors, app.hid_profiles, app.color_pool = {}, {}, ["#111111", "#222222", "#333333"]
+        app.pads = {1: {"path": "XInput#0", "guid": self.PAD, "name": "Pad"},
+                    2: {"path": "XInput#1", "guid": self.PAD, "name": "Pad"}}
+        app.assignments = [{"path": "XInput#0", "guid": self.PAD, "name": "Pad", "profile_key": "Xbox"},
+                           {"path": "XInput#1", "guid": self.PAD, "name": "Pad", "profile_key": "Nintendo"}]
+        for a in app.assignments:
+            app.get_assigned_color(a["path"])
+            app.hid_profiles[a["path"]] = a["profile_key"]
+        return app
+
+    def test_slot_waits_during_a_game_and_comes_back(self):
+        from Core.I18n import set_language
+        set_language("en")
+        app = self._app(mode="GAMES", process=object())
+        color = app.hid_colors["XInput#1"]
+        del app.pads[2]                                     # P2's pad drops mid-game
+        app.on_pads_changed()
+        self.assertEqual(len(app.assignments), 2)
+        self.assertTrue(app.assignments[1]["waiting"])
+        self.assertEqual(app.toasts[-1], "P2 disconnected · the slot waits for it")
+        app.pads[3] = {"path": "XInput#2", "guid": self.PAD, "name": "Pad"}    # back in another slot
+        app.on_pads_changed()
+        p2 = app.assignments[1]
+        self.assertFalse(p2["waiting"])
+        self.assertEqual(p2["path"], "XInput#2")
+        self.assertEqual(app.hid_colors["XInput#2"], color)                     # same colour, same layout
+        self.assertEqual(app.hid_profiles["XInput#2"], "Nintendo")
+        self.assertEqual(app.confirmed, [])                                     # no rumble while Eden runs
+        self.assertEqual(app.toasts[-1], "P2 is back")
+
+    def test_player_cards_free_the_slot(self):
+        app = self._app(mode="PLAYERS")
+        del app.pads[2]
+        app.on_pads_changed()
+        self.assertEqual([a["path"] for a in app.assignments], ["XInput#0"])
+        self.assertNotIn("XInput#1", app.hid_colors)
+
+    def test_waiting_slots_are_freed_on_the_player_cards(self):
+        app = self._app(mode="GAMES")
+        del app.pads[2]
+        app.on_pads_changed()
+        app.drop_waiting()
+        self.assertEqual(len(app.assignments), 1)
+
+    def test_pathless_keys_follow_eden_ports(self):
+        from Core.App import LauncherApp
+        g = self.PAD
+        new = lambda: {"raw_path": "", "guid": g}                               # noqa: E731
+        pads = {1: new(), 2: new(), 3: new()}
+        LauncherApp._assign_keys(pads, [1, 2, 3])
+        self.assertEqual([pads[i]["path"][-2:] for i in (1, 2, 3)], ["_0", "_1", "_2"])
+        del pads[2]                                     # the middle pad drops: the others keep their keys
+        LauncherApp._assign_keys(pads, [1, 3])
+        self.assertEqual([pads[i]["path"][-2:] for i in (1, 3)], ["_0", "_2"])
+        pads[4] = new()                                 # a pad comes back: it takes the freed number,
+        LauncherApp._assign_keys(pads, [1, 3, 4])       # like Eden reuses the freed port
+        self.assertEqual(pads[4]["path"][-2:], "_1")
+        # After an SDL re-initialisation the same pads get their old keys back, in order
+        fresh = {7: new(), 8: new()}
+        LauncherApp._assign_keys(fresh, [7, 8], {g: [pads[1]["path"], pads[3]["path"]]})
+        self.assertEqual([fresh[i]["path"][-2:] for i in (7, 8)], ["_0", "_2"])
+        withpath = {9: {"raw_path": "XInput#0", "guid": g}}
+        LauncherApp._assign_keys(withpath, [9])
+        self.assertEqual(withpath[9]["path"], "XInput#0")
+
+    def test_held_buttons_report(self):
+        from Core.App import LauncherApp
+        app = LauncherApp.__new__(LauncherApp)
+        held = {"A", "RB", "UP"}
+        app.sdl = types.SimpleNamespace(
+            SDL_GameControllerGetButton=lambda ctrl, button: button in held,
+            get_triggers=lambda ctrl: (0.9, 0.1),
+            **{f"SDL_CONTROLLER_BUTTON_{n}": n for n in ("A", "B", "X", "Y", "BACK", "START", "LEFT_STICK",
+                                                         "RIGHT_STICK", "DPAD_LEFT", "DPAD_RIGHT", "DPAD_DOWN")},
+            SDL_CONTROLLER_BUTTON_LEFT_SHOULDER="LB", SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER="RB",
+            SDL_CONTROLLER_BUTTON_DPAD_UP="UP")
+        self.assertEqual(app.held_buttons(None), ["a", "rb", "lt", "dpad"])
+
+    def test_match_prefers_the_same_path_then_the_oldest_slot(self):
+        from Core.App import match_reconnects
+        g = self.PAD
+        waiting = [{"path": "XInput#1", "guid": g}, {"path": "XInput#3", "guid": g}]
+        pads = [{"path": "XInput#3", "guid": g}, {"path": "XInput#0", "guid": g}, {"path": "X", "guid": "other"}]
+        pairs = match_reconnects(waiting, pads)
+        self.assertEqual([(s["path"], p["path"]) for s, p in pairs], [("XInput#3", "XInput#3"),
+                                                                      ("XInput#1", "XInput#0")])
+        self.assertEqual(match_reconnects(waiting, [{"path": "X", "guid": "other"}]), [])
 
 
 @unittest.skipUnless(HAS_TK, "needs Tk")

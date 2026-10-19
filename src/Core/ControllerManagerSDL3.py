@@ -206,6 +206,12 @@ class SDLManager:
         return sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFTY) / 32767.0
 
     @staticmethod
+    def get_triggers(ctrl):
+        """Left and right trigger, 0.0 (released) to 1.0 (fully pressed)."""
+        return (sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0,
+                sdl3.SDL_GetGamepadAxis(ctrl, sdl3.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 32767.0)
+
+    @staticmethod
     def SDL_GetJoystickInstanceIDs():
         """
         [(open id, instance id)] of connected joysticks, in enumeration order.

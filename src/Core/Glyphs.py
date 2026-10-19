@@ -80,7 +80,9 @@ def vivid_color(image, default):
     import colorsys
     small = image.resize((40, 40), Image.BOX, reducing_gap=2.0).convert("RGB")
     buckets = {}
-    for r, g, b in small.getdata():
+    data = small.tobytes()
+    for i in range(0, len(data), 3):
+        r, g, b = data[i], data[i + 1], data[i + 2]
         h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
         weight = s * v
         if s < 0.3 or v < 0.25:
@@ -113,16 +115,19 @@ def button(name, height):
     """
     A controller button prompt, `height` px tall.
 
-    Names: a b x y (face buttons), lb rb (bumpers), ls rs (stick clicks),
-    start, back, dpad.
+    Names: a b x y (face buttons), lb rb (bumpers), lt rt (triggers),
+    ls rs (stick clicks), start, back, dpad.
     """
     h = max(8, int(height))
     s = SUPERSAMPLE
-    if name in ("lb", "rb"):
+    if name in ("lb", "rb", "lt", "rt"):
         w = int(h * 1.7)
         img = Image.new("RGBA", (w * s, h * s), (0, 0, 0, 0))
         d = ImageDraw.Draw(img)
-        d.rounded_rectangle((0, 0, w * s - 1, h * s - 1), radius=h * s // 2, fill=NEUTRAL + (255,))
+        # Bumpers are pills, triggers rounded only on top (their shape on the pad)
+        radius = h * s // 2 if name in ("lb", "rb") else h * s // 3
+        d.rounded_rectangle((0, 0, w * s - 1, h * s - 1), radius=radius, fill=NEUTRAL + (255,),
+                            corners=None if name in ("lb", "rb") else (True, True, False, False))
         d.text((w * s / 2, h * s / 2), name.upper(), font=font(h * s * 0.48), fill=(255, 255, 255),
                anchor="mm")
         return _finish(img, (w, h))

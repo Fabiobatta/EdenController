@@ -1,6 +1,8 @@
 """
 Eden/Switch.py
 Read the title ID and content type of an NSP or XCI without Eden.
+Their compressed forms are read the same way: NSZ is an NSP and XCZ an XCI
+whose NCAs are NCZ files, which keep the NCA header as it is.
 
 The game list must tell base games from updates and DLC even when the file
 name says nothing ("Game v1.28.0.nsp"), and needs the title ID to find the
@@ -231,9 +233,9 @@ def read_title_ids(path, header_key=None):
     ext = os.path.splitext(path)[1].lower()
     try:
         with open(path, "rb") as f:
-            if ext == ".nsp":
+            if ext in (".nsp", ".nsz"):
                 return _nsp_ids(f, header_key)
-            if ext == ".xci":
+            if ext in (".xci", ".xcz"):
                 return _xci_ids(f, header_key)
     except Exception as e:
         log("WARNING", "Could not read title ID", f"{os.path.basename(path)}: {e}")

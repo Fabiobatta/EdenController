@@ -134,9 +134,10 @@ class LauncherUi:
         show_alert(mode) / close_alert() / alert_mode
     """
 
-    def __init__(self, root, emulator_name):
+    def __init__(self, root, emulator_name, display_name=None):
         self.root = root
-        self.emulator_name = emulator_name
+        self.emulator_name = emulator_name          # branding: window title, icons, footer
+        self.display_name = display_name or emulator_name   # the emulator in messages
 
         root.title(f"{emulator_name} Launcher")
         root.configure(bg=COLOR["BG"])
@@ -816,7 +817,7 @@ class LauncherUi:
         c.create_image(cx, cy, image=box, tags="alert")
         c.create_text(cx, top + self.px(63), text=t(title), fill=COLOR[color], font=self.font(26),
                       tags="alert")
-        c.create_text(cx, top + self.px(115), text=t(text, name=self.emulator_name), fill=COLOR["TEXT_DIM"],
+        c.create_text(cx, top + self.px(115), text=t(text, name=self.display_name), fill=COLOR["TEXT_DIM"],
                       font=self.font(16, False), width=w - self.px(80), justify="center", tags="alert")
         markup = "      ".join(f"[{b}] {t(label)}" for b, label in buttons)
         self.rich(cx, top + self.px(205), markup, 18, COLOR["TEXT"], anchor="center", tags="alert")

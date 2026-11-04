@@ -40,6 +40,18 @@ from .Ini import IniFile, quote, unquote
 SECTION = "Controls"
 SYSTEM_SECTION = "System"
 UI_SECTION = "UI"
+APPLET_SECTION = "LibraryApplet"
+
+# How a build turns off the controller applet (see write_input):
+#   "ui"    [UI] disableControllerApplet (UISettings::controller_applet_disabled),
+#           older Eden builds (still in September 2026)
+#   "mode"  [LibraryApplet] controller_applet_mode = Disabled, newer Eden and
+#           Eglantine (the UI option was removed)
+APPLET_UI = "ui"
+APPLET_MODE = "mode"
+# Settings::AppletMode (common/settings_enums.h): HLE = 0, LLE = 1, Disabled = 2
+APPLET_MODE_HLE = "0"
+APPLET_MODE_DISABLED = "2"
 
 # Settings::ConsoleMode (common/settings_enums.h): Handheld = 0, Docked = 1
 CONSOLE_DOCKED = 1
@@ -444,8 +456,32 @@ def controller_applet_values(disabled):
     }
 
 
+def controller_applet_mode_values(disabled, current):
+    """
+    [LibraryApplet] keys for Settings::controller_applet_mode, on builds
+    that have no [UI] option any more.
+
+    Turning the applet back on only undoes the launcher's own "Disabled":
+    a user's choice of HLE or LLE is left alone.
+
+    Args:
+        current (str): the value in qt-config.ini now ("" if absent).
+    """
+    if disabled:
+        return {
+            "controller_applet_mode\\default": "false",
+            "controller_applet_mode": APPLET_MODE_DISABLED,
+        }
+    if current == APPLET_MODE_DISABLED:
+        return {
+            "controller_applet_mode\\default": "true",
+            "controller_applet_mode": APPLET_MODE_HLE,
+        }
+    return {}
+
+
 def write_input(config_file, assignments, hardware, profiles, force_docked=False,
-                disable_controller_applet=None):
+                disable_controller_applet=None, applet_scheme=APPLET_UI):
     """
     Rewrite the player_N_* keys of qt-config.ini for this launch.
 
@@ -457,6 +493,8 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
                              need to accept more than one controller.
         disable_controller_applet (bool | None): Set Eden's "Disable controller
                              applet" option; None leaves it untouched.
+        applet_scheme (str): APPLET_UI or APPLET_MODE - which setting this
+                             build reads (Eden.applet_scheme() finds out).
     """
     if not assignments:
         log("INFO", "No controllers assigned - leaving qt-config.ini untouched")
@@ -485,8 +523,15 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
         ini.set_many(SYSTEM_SECTION, docked_values())
         log("INFO", "Console mode", "docked (TV)")
     if disable_controller_applet is not None:
-        ini.set_many(UI_SECTION, controller_applet_values(disable_controller_applet))
-        log("INFO", "Controller applet", "disabled" if disable_controller_applet else "enabled")
+        if applet_scheme == APPLET_MODE:
+            current = unquote(ini.items(APPLET_SECTION).get("controller_applet_mode", "")).strip()
+            values = controller_applet_mode_values(disable_controller_applet, current)
+            if values:
+                ini.set_many(APPLET_SECTION, values)
+        else:
+            ini.set_many(UI_SECTION, controller_applet_values(disable_controller_applet))
+        log("INFO", "Controller applet", ("disabled" if disable_controller_applet else "enabled")
+            + f" ({applet_scheme})")
     try:
         os.makedirs(os.path.dirname(config_file), exist_ok=True)
         ini.save(config_file)

@@ -151,7 +151,7 @@ class LauncherApp:
         self._scan_result = None            # handed over by the scan thread
         self.waiting_for_games = False      # START pressed while still scanning
 
-        self.ui = LauncherUi(root, emulator.name)
+        self.ui = LauncherUi(root, emulator.name, emulator.display_name)
 
         # Launcher options
         self.rumble_enabled = settings.get_bool(LAUNCHER_SECTION, "rumble", True)
@@ -219,7 +219,7 @@ class LauncherApp:
         self.default_profile = self.profile_keys[0] if self.profile_keys else ""
 
         combo_markup = " + ".join(f"[{COMBO_GLYPHS.get(n, n)}]" for n in self._combo_names(combo))
-        self.ui.set_tip(t("tip_kill", combo=combo_markup, name=emulator.name))
+        self.ui.set_tip(t("tip_kill", combo=combo_markup, name=emulator.display_name))
         self.update_hints()
 
         if self.picker:
@@ -860,7 +860,7 @@ class LauncherApp:
             elif self.picker:
                 start = t("hint_choose")
             else:
-                start = t("hint_launch", name=self.emu.name)
+                start = t("hint_launch", name=self.emu.display_name)
             hints = [("a", t("hint_join"))]
             last = self._last_game() if self.picker else None
             if last:
@@ -1340,7 +1340,7 @@ class LauncherApp:
                 log("EXCEPTION", "Launch failed", e)
                 messagebox.showerror(
                     t("error_launch_title"),
-                    t("error_launch_text", name=self.emu.name, error=e)
+                    t("error_launch_text", name=self.emu.display_name, error=e)
                 )
                 sys.exit()
         else:

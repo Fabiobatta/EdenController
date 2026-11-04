@@ -19,7 +19,8 @@ from Core.Log import log
 
 from .Ini import unquote
 
-GAME_EXTENSIONS = (".nsp", ".xci", ".nro")
+# NSZ / XCZ: compressed NSP / XCI, opened by current Eden and Eglantine
+GAME_EXTENSIONS = (".nsp", ".xci", ".nsz", ".xcz", ".nro")
 
 # Eden's built-in pseudo folders in the game dir list
 _VIRTUAL_DIRS = {"SDMC", "UserNAND", "SysNAND"}

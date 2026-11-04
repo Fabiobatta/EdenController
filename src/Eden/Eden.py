@@ -5,6 +5,11 @@ The Eden implementation of the Core.Emulator contract.
 Everything Eden-specific enters the launcher through this class: where the
 binary and qt-config.ini live, which SDL major version to use, and which SDL
 hints make the launcher see controllers exactly the way Eden will.
+
+Also drives Eglantine, Eden's Switch 2 fork: it keeps Eden's data folder,
+qt-config.ini format, SDL version and input code, and only renames the
+binary (eglantine.exe). Whichever binary sits in the folder is used, Eden
+first.
 """
 
 import os
@@ -25,6 +30,36 @@ ENV_SDL_BACKEND = "EDEN_LAUNCHER_SDL"       # "SDL2" or "SDL3"
 ENV_USER_DIR = "EDEN_LAUNCHER_USER_DIR"     # Eden's user folder (holds config/)
 
 SETTINGS_SECTION = "Eden"
+
+# The Eden family: (display name, binary name), preferred first
+BINARIES = (("Eden", "eden"), ("Eglantine", "eglantine"))
+
+# Strings compiled into the emulator binary that show how it turns off the
+# controller applet: a build that still has the [UI] option contains its key
+APPLET_PROBES = ((Config.APPLET_UI, b"disableControllerApplet"),
+                 (Config.APPLET_MODE, b"controller_applet_mode"))
+PROBE_CHUNK = 8 * 1024 * 1024
+
+
+def probe_binary(path, needles):
+    """The byte strings of `needles` that occur in the file at `path`."""
+    found = set()
+    overlap = max(len(n) for n in needles) - 1
+    tail = b""
+    with open(path, "rb") as f:
+        while len(found) < len(needles):
+            block = f.read(PROBE_CHUNK)
+            if not block:
+                break
+            data = tail + block
+            found.update(n for n in needles if n in data)
+            tail = data[-overlap:]
+    return found
+
+
+def _pick_binary(candidates):
+    """(display name, path) of the first candidate that exists, else the first one."""
+    return next(((name, path) for name, path in candidates if os.path.isfile(path)), candidates[0])
 
 _SETTINGS_EN = f"""\
 [{SETTINGS_SECTION}]
@@ -94,8 +129,8 @@ register({
     "en": {
         "eden_missing_title": "Eden Missing",
         "eden_missing_text": "Could not find {exe} in:\n{dir}\n\n"
-                             "Place the launcher next to Eden, or write Eden's folder\n"
-                             "into EdenPath.config next to the launcher.",
+                             "Place the launcher next to Eden (or Eglantine), or write\n"
+                             "its folder into EdenPath.config next to the launcher.",
         "eden_config_title": "Configuration Error",
         "eden_config_text": "Could not read Eden's qt-config.ini.\n\n"
                             "Open Eden manually once so it writes a valid configuration,\n"
@@ -104,8 +139,8 @@ register({
     "it": {
         "eden_missing_title": "Eden non trovato",
         "eden_missing_text": "Impossibile trovare {exe} in:\n{dir}\n\n"
-                             "Metti il launcher nella cartella di Eden, oppure scrivi\n"
-                             "la cartella di Eden in EdenPath.config accanto al launcher.",
+                             "Metti il launcher nella cartella di Eden (o di Eglantine),\n"
+                             "oppure scrivi quella cartella in EdenPath.config accanto al launcher.",
         "eden_config_title": "Errore di configurazione",
         "eden_config_text": "Impossibile leggere qt-config.ini di Eden.\n\n"
                             "Apri Eden una volta a mano per creare una configurazione valida,\n"
@@ -170,7 +205,8 @@ class Eden(Emulator):
         platform = _platform()
 
         if platform == "win32":
-            self.exe = os.path.join(self.dir, "eden.exe")
+            self.display_name, self.exe = _pick_binary(
+                [(name, os.path.join(self.dir, stem + ".exe")) for name, stem in BINARIES])
             portable = os.path.join(self.dir, "user")
             global_dir = os.path.join(os.getenv("APPDATA") or "", "eden")
             self.user_dir = portable if os.path.isdir(portable) else global_dir
@@ -179,15 +215,24 @@ class Eden(Emulator):
 
         else:
             if platform == "darwin":
-                bundle = os.path.join(self.dir, "Eden.app", "Contents", "MacOS", "eden")
-                self.exe = bundle if os.path.exists(bundle) else os.path.join(self.dir, "eden")
+                self.display_name, self.exe = _pick_binary(
+                    [(name, path) for name, stem in BINARIES
+                     for path in (os.path.join(self.dir, f"{name}.app", "Contents", "MacOS", stem),
+                                  os.path.join(self.dir, stem))])
             else:
-                self.appimage_path = find_appimage(self.dir, "eden")
+                family = list(BINARIES)
+                for name, stem in BINARIES:
+                    self.appimage_path = find_appimage(self.dir, stem)
+                    if self.appimage_path:
+                        # Look for that AppImage's own binary first
+                        family.sort(key=lambda entry: entry[0] != name)
+                        break
                 self.is_appimage = self.appimage_path is not None
                 if self.is_appimage:
                     mount_point = mount_appimage(self.appimage_path)
                     self.dir = os.path.join(mount_point, "usr", "bin")
-                self.exe = os.path.join(self.dir, "eden")
+                self.display_name, self.exe = _pick_binary(
+                    [(name, os.path.join(self.dir, stem)) for name, stem in family])
 
             # Eden checks "user" in its working directory, which it inherits
             # from the launcher
@@ -215,9 +260,10 @@ class Eden(Emulator):
         self.profiles_dir = os.path.join(config_dir, "input")
 
         if not os.path.exists(self.exe):
+            extension = os.path.splitext(self.exe)[1]
             fatal(
                 t("eden_missing_title"),
-                t("eden_missing_text", exe=os.path.basename(self.exe), dir=self.dir),
+                t("eden_missing_text", exe=" / ".join(stem + extension for _, stem in BINARIES), dir=self.dir),
                 "Eden binary not found", self.exe
             )
 
@@ -229,6 +275,7 @@ class Eden(Emulator):
     # ------------------------------------------------------------------
     def prepare(self):
         """Pick the SDL backend, snapshot the child env, then set SDL hints."""
+        log("INFO", "Emulator", self.display_name)
         self.backend, self._sdl_dir = self._pick_sdl()
 
         # Snapshot first: SDL reads hints from the environment, and an env
@@ -348,8 +395,45 @@ class Eden(Emulator):
         force_docked = docked == "always" or (docked == "auto" and len(assignments) >= 2)
         applet = self._setting("controller_applet", "off").lower()
         disable_applet = {"off": True, "on": False}.get(applet)  # "keep" -> None
+        scheme = self.applet_scheme() if disable_applet is not None else None
         Config.write_input(self.config_path, assignments, hardware, self.profiles,
-                           force_docked=force_docked, disable_controller_applet=disable_applet)
+                           force_docked=force_docked, disable_controller_applet=disable_applet,
+                           applet_scheme=scheme)
+
+    def applet_scheme(self):
+        """
+        Which setting turns off the controller applet in this binary: the
+        [UI] option of older Eden builds, or controller_applet_mode in newer
+        ones and Eglantine. Writing the new one on an old build would be
+        wrong - its AppletMode has no "Disabled" and would pick LLE instead -
+        so the binary is checked for the old option's key. Read once per
+        binary (size and date), then remembered.
+        """
+        # An AppImage is mounted at a new path every run: remember it by its file
+        key = self.appimage_path or self.exe
+        try:
+            stat = os.stat(key)
+        except OSError:
+            return Config.APPLET_UI
+        signature = [stat.st_size, int(stat.st_mtime)]
+        cache = self.settings.load_cache("emulator") if self.settings else {}
+        entry = cache.get(key)
+        if entry and entry[:2] == signature:
+            return entry[2]
+        try:
+            found = probe_binary(self.exe, [needle for _, needle in APPLET_PROBES])
+            scheme = next((s for s, needle in APPLET_PROBES if needle in found), None)
+        except OSError as e:
+            log("WARNING", "Could not read the emulator binary", e)
+            scheme = None
+        if scheme is None:
+            log("WARNING", "Unknown controller applet option - using the [UI] one", self.exe)
+            scheme = Config.APPLET_UI
+        log("INFO", "Controller applet option", scheme)
+        cache[key] = signature + [scheme]
+        if self.settings:
+            self.settings.save_cache("emulator", cache)
+        return scheme
 
     # ------------------------------------------------------------------
     # 6. Game picker

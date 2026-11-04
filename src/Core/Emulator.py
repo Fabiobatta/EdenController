@@ -28,6 +28,11 @@ Attributes an implementation must set during locate():
     config_path  str   the emulator's config file
     is_appimage  bool  purely informational, used in the startup banner
 
+and may set:
+
+    display_name str   what the user sees ("Close {name}"), when the binary
+                       found is a fork with its own name; defaults to `name`
+
 and during prepare():
 
     env          dict  environment handed to the emulator process
@@ -45,6 +50,7 @@ class Emulator:
     default_settings = ""
 
     def __init__(self):
+        self.display_name = self.name
         self.dir = None
         self.exe = None
         self.config_path = None

@@ -2,7 +2,7 @@
 
 **Pick which controller is Player 1, 2, 3… for the [Eden](https://eden-emu.dev) Switch emulator, using only your controllers, right before the game starts.**
 
-Made for game streaming (**Sunshine / Vibeshine / Apollo** host + **Moonlight** client), and just as useful on a couch PC.
+Made for game streaming (**Sunshine / Vibeshine / Apollo** host + **Moonlight** client), and just as useful on a couch PC. Also works with **[Eglantine](https://github.com/Djihads80/Eglantine)**, Eden's experimental Switch 2 fork.
 
 **[⬇ Download EdenLauncher.exe](https://github.com/Fabiobatta/EdenController/releases/latest)** (Windows)
 
@@ -51,7 +51,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 
 ## Setup
 
-1. Put `EdenLauncher.exe` **in the same folder as `eden.exe`**. Or anywhere else, with an `EdenPath.config` file next to it containing Eden's folder path.
+1. Put `EdenLauncher.exe` **in the same folder as `eden.exe`** (or `eglantine.exe`). Or anywhere else, with an `EdenPath.config` file next to it containing that folder's path.
 2. In Eden, set up **Player 1** once with an Xbox controller (Configure → Controls → Auto-map) and save. The launcher copies that mapping to every player.
 3. In Sunshine / Vibeshine, add an application:
    - **Command**: `"C:\Emulators\Eden\EdenLauncher.exe"`. Game grid included.
@@ -62,6 +62,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 **Tips**
 
 - **More than 4 players**: Windows XInput stops at 4 pads. Set the host's gamepad emulation to **DS4** for up to 8.
+- **Eglantine** keeps Eden's data folder (`%APPDATA%\eden`): installed normally, both share config and saves. Make Eglantine portable (an empty `user` folder next to `eglantine.exe`) to keep them apart. Switch 2 games have no player count or eShop art yet: add them under `[Players]` (e.g. `Mario Kart World = 4`) so the roulette can pick them.
 - **Per-game input profiles** set in Eden (custom game config) override the launcher. Keep game controls on the global config.
 - **A button stuck in game?** Open the close menu (**Back + LB + RB**) and let go of the controllers: it lists what each player's controller is holding right now. If something shows up there, the stuck input comes from the streaming client/host, not from Eden or the game.
 - **Logs**: `%APPDATA%\eden\log\EdenLauncher_*.log`, or `<Eden>\user\log` for portable Eden.

@@ -332,6 +332,61 @@ class AdapterTests(unittest.TestCase):
         emu.settings = Settings({"eden": {"fullscreen": "false"}})
         self.assertEqual(emu.game_command("g.nsp"), [emu.exe, "-g", "g.nsp"])
 
+    def test_eglantine_binary(self):
+        from Eden import Eden
+        os.remove(os.path.join(self.eden_dir, "eden"))
+        open(os.path.join(self.eden_dir, "eglantine"), "w").close()
+        emu = Eden()
+        emu.locate(self.eden_dir)
+        self.assertEqual((emu.display_name, emu.exe), ("Eglantine", os.path.join(self.eden_dir, "eglantine")))
+        # Same data folder and config file as Eden
+        self.assertEqual(emu.config_path, os.path.join(self.tmp.name, "cfg", "eden", "qt-config.ini"))
+        open(os.path.join(self.eden_dir, "eden"), "w").close()       # both: Eden first
+        emu = Eden()
+        emu.locate(self.eden_dir)
+        self.assertEqual((emu.display_name, os.path.basename(emu.exe)), ("Eden", "eden"))
+
+    def test_missing_binary_names_both(self):
+        import importlib
+        adapter = importlib.import_module("Eden.Eden")
+        os.remove(os.path.join(self.eden_dir, "eden"))
+        calls = []
+        saved, adapter.fatal = adapter.fatal, lambda *a: calls.append(a)
+        try:
+            adapter.Eden().locate(self.eden_dir)
+        finally:
+            adapter.fatal = saved
+        self.assertIn("eden / eglantine", calls[0][1])
+
+    def test_applet_scheme_from_the_binary(self):
+        import importlib
+        adapter = importlib.import_module("Eden.Eden")
+        from Eden import Eden
+        cache = {}
+        settings = types.SimpleNamespace(load_cache=lambda name: dict(cache),
+                                         save_cache=lambda name, data: cache.update(data))
+        saved = adapter.PROBE_CHUNK
+        adapter.PROBE_CHUNK = 16               # the key straddles two reads
+        try:
+            for content, scheme in ((b"x" * 30 + b"disableControllerApplet" + b"controller_applet_mode", "ui"),
+                                    (b"y" * 13 + b"controller_applet_mode" + b"z" * 40, "mode"),
+                                    (b"nothing to see here", "ui")):
+                exe = os.path.join(self.eden_dir, "eden")
+                with open(exe, "wb") as f:
+                    f.write(content)
+                os.utime(exe, (1, len(content)))
+                cache.clear()
+                emu = Eden()
+                emu.locate(self.eden_dir)
+                emu.settings = settings
+                self.assertEqual(emu.applet_scheme(), scheme)
+                self.assertEqual(cache[exe][2], scheme)
+            # Remembered: a cached answer for the same size and date is reused
+            cache[exe][2] = "mode"
+            self.assertEqual(emu.applet_scheme(), "mode")
+        finally:
+            adapter.PROBE_CHUNK = saved
+
     def test_portable_user_folder_wins(self):
         from Eden import Eden
         os.makedirs(os.path.join(self.tmp.name, "user", "config"))
@@ -387,6 +442,31 @@ class AppletTests(unittest.TestCase):
             self.assertEqual((ui["disableControllerApplet"], ui["disableControllerApplet\\default"]),
                              ("true", "false"))
             self.assertEqual(ui["theme"], "default")   # rest of [UI] untouched
+
+    def test_controller_applet_mode_on_newer_builds(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "qt-config.ini")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(QT_CONFIG)
+            profiles = Config.load_profiles(tmp, Config.load_template(IniFile.load(path)))
+            args = ([{"path": "p1", "name": "p1", "profile_key": Config.DEFAULT_PROFILE}],
+                    hardware(("p1", RAW_GUID)), profiles)
+            mode = lambda: IniFile.load(path).items("LibraryApplet")              # noqa: E731
+
+            Config.write_input(path, *args, disable_controller_applet=True, applet_scheme=Config.APPLET_MODE)
+            self.assertEqual((mode()["controller_applet_mode"], mode()["controller_applet_mode\\default"]),
+                             ("2", "false"))
+            self.assertNotIn("disableControllerApplet", IniFile.load(path).items("UI"))
+            # "on" undoes only the launcher's own Disabled ...
+            Config.write_input(path, *args, disable_controller_applet=False, applet_scheme=Config.APPLET_MODE)
+            self.assertEqual((mode()["controller_applet_mode"], mode()["controller_applet_mode\\default"]),
+                             ("0", "true"))
+            # ... and leaves a user's LLE choice alone
+            ini = IniFile.load(path)
+            ini.set_many("LibraryApplet", {"controller_applet_mode\\default": "false", "controller_applet_mode": "1"})
+            ini.save(path)
+            Config.write_input(path, *args, disable_controller_applet=False, applet_scheme=Config.APPLET_MODE)
+            self.assertEqual(mode()["controller_applet_mode"], "1")
 
 
 def _pfs0(files, magic=b"PFS0", entry_size=0x18):
@@ -479,6 +559,13 @@ class SwitchTests(unittest.TestCase):
                                        ("p.nca", _nca(self.KEY, 0, "01006A800016E000"))]))
             self.assertEqual(identify(xci, key), ("01006A800016E000", "base"))
             self.assertEqual(identify(write("e.nsp", b"garbage")), (None, None))
+
+            # Compressed forms: NCZ files keep the encrypted NCA header
+            nsz = write("f.nsz", _pfs0([("m.cnmt.nca", _nca(self.KEY, 1, "0100152000022000")),
+                                        ("p.ncz", _nca(self.KEY, 0, "0100152000022000"))]))
+            self.assertEqual(identify(nsz, key), ("0100152000022000", "base"))
+            xcz = write("g.xcz", _xci([("m.cnmt.nca", _nca(self.KEY, 1, "01006A800016E000"))]))
+            self.assertEqual(identify(xcz, key), ("01006A800016E000", "base"))
 
 
 class SettingsTests(unittest.TestCase):

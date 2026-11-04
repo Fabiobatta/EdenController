@@ -18,7 +18,7 @@ import sys
 from Core.Emulator import Emulator
 from Core.I18n import register, t
 from Core.Log import log, fatal
-from Core.Paths import find_appimage, read_path_override, resource_path
+from Core.Paths import base_dir, find_appimage, read_path_override, resource_path
 from Core.Process import mount_appimage, unmount_appimage
 
 from . import Config, Games, Switch
@@ -461,8 +461,9 @@ class Eden(Emulator):
         if not header_key:
             log("WARNING", "No header_key in prod.keys - updates/DLC recognised by name only", keys_file)
         known = self.settings.load_cache("library")
+        icon_dir = os.path.join(base_dir(), self.settings.get("Launcher", "covers_dir", "covers"), "nup")
         games = Games.find_games(folders, header_key=header_key, cache_dir=self.cache_dir,
-                                 titledb=TitleDb.load(), known=known)
+                                 titledb=TitleDb.load(), known=known, icon_dir=icon_dir)
         self.settings.save_cache("library", known)
         return games
 

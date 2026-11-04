@@ -10,6 +10,10 @@ Every NSP/XCI is identified by the title ID stored inside it (Switch.py), so
 updates and DLC are hidden even when the file name does not say what they
 are. With the title ID, the official name and icon come from Eden's own game
 list cache. Files that cannot be read fall back to name-based guesses.
+
+Switch 2 games for Eglantine (Nx2.py) are found too: NUP archives, named
+and pictured from their own metadata, and loose dumps (folders with
+exefs/main), which show up even in folders without "scan subfolders".
 """
 
 import os
@@ -17,10 +21,12 @@ import re
 
 from Core.Log import log
 
+from . import Nx2
 from .Ini import unquote
 
-# NSZ / XCZ: compressed NSP / XCI, opened by current Eden and Eglantine
-GAME_EXTENSIONS = (".nsp", ".xci", ".nsz", ".xcz", ".nro")
+# NSZ / XCZ: compressed NSP / XCI, opened by current Eden and Eglantine;
+# NUP: Eglantine's Switch 2 package
+GAME_EXTENSIONS = (".nsp", ".xci", ".nsz", ".xcz", ".nup", ".nro")
 
 # Eden's built-in pseudo folders in the game dir list
 _VIRTUAL_DIRS = {"SDMC", "UserNAND", "SysNAND"}
@@ -61,9 +67,9 @@ def eden_game_dirs(ui_items):
     return dirs
 
 
-def clean_title(filename):
+def clean_title(filename, folder=False):
     """"Super Game [0100ABCD12340000][v0] (USA).nsp" -> "Super Game (USA)"."""
-    stem = os.path.splitext(filename)[0]
+    stem = filename if folder else os.path.splitext(filename)[0]
     title = _BRACKETS.sub(" ", stem).replace("_", " ")
     title = _SPACES.sub(" ", title).strip(" -.")
     return title or stem
@@ -100,15 +106,56 @@ def eden_cached(cache_dir, title_id):
     return name, icon if os.path.isfile(icon) and os.path.getsize(icon) > 0 else None
 
 
-def _files(folder, deep):
-    if deep:
-        for root, subdirs, files in os.walk(folder):
-            subdirs[:] = sorted(d for d in subdirs if not d.startswith("."))
-            for name in sorted(files):
-                yield os.path.join(root, name)
-    else:
-        for name in sorted(os.listdir(folder)):
-            yield os.path.join(folder, name)
+def _entries(folder, deep, depth=0):
+    """
+    ("file", path) for the files of a game folder (and its subfolders with
+    deep scan), ("dump", main) for every loose Switch 2 dump.
+
+    Loose dumps are looked for in the folder and one level of subfolders
+    even without deep scan, since a dump is always a folder. A dump's own
+    folders (exefs, romfs...) are never walked: a RomFS holds thousands of
+    files.
+    """
+    try:
+        names = sorted(os.listdir(folder))
+    except OSError:
+        if depth == 0:
+            raise
+        return
+    main = Nx2.loose_dump(folder, names)
+    if main:
+        yield "dump", main
+        return
+    for name in names:
+        if name.startswith("."):
+            continue
+        path = os.path.join(folder, name)
+        if os.path.isdir(path):
+            if deep and not os.path.islink(path):           # like os.walk: no link loops
+                yield from _entries(path, True, depth + 1)
+            elif depth == 0:
+                main = Nx2.loose_dump(path)
+                if main:
+                    yield "dump", main
+        else:
+            yield "file", path
+
+
+def _save_icon(icon_dir, title_id, data):
+    """Write a NUP's icon once; returns its path or None."""
+    if not icon_dir or not title_id or not data:
+        return None
+    path = os.path.join(icon_dir, title_id + Nx2.icon_extension(data))
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) != len(data):
+            os.makedirs(icon_dir, exist_ok=True)
+            with open(path + ".part", "wb") as f:
+                f.write(data)
+            os.replace(path + ".part", path)
+        return path
+    except OSError as e:
+        log("WARNING", "Could not save NUP icon", e)
+        return None
 
 
 def cached_identify(identify, known):
@@ -134,7 +181,8 @@ def cached_identify(identify, known):
     return lookup
 
 
-def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=None, known=None):
+def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=None, known=None,
+               icon_dir=None):
     """
     Scan folders for games.
 
@@ -146,6 +194,7 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
         titledb    (TitleDb|None):  eShop facts: players, name, icon/banner URLs.
         known      (dict | None):   identify() cache, see cached_identify().
                                     Entries of files that are gone are dropped.
+        icon_dir   (str | None):    where icons stored in NUP archives are saved.
 
     Returns:
         list[dict]: one entry per game, sorted by title:
@@ -168,16 +217,26 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
             log("WARNING", "Game folder not found", folder)
             continue
         try:
-            for path in _files(folder, deep):
-                name = os.path.basename(path)
-                if not name.lower().endswith(GAME_EXTENSIONS) or not os.path.isfile(path):
+            for entry, path in _entries(folder, deep):
+                # Loose dumps are named after their folder, files after themselves
+                name = os.path.basename(Nx2.dump_root(path) if entry == "dump" else path)
+                if entry == "file" and not name.lower().endswith(GAME_EXTENSIONS):
                     continue
                 key = os.path.normcase(os.path.abspath(path))
                 if key in seen_files:
                     continue
                 seen_files.add(key)
 
-                title_id, kind = identify(path) if not name.lower().endswith(".nro") else (None, None)
+                nup = None
+                if entry == "dump":
+                    title_id, kind = Nx2.dump_title_id(path), "base"
+                elif name.lower().endswith(".nup"):
+                    nup = Nx2.read_nup(path) or {}
+                    title_id, kind = nup.get("title_id"), nup.get("kind")
+                elif name.lower().endswith(".nro"):
+                    title_id, kind = None, None
+                else:
+                    title_id, kind = identify(path)
                 if kind is None and looks_like_extra(name):
                     kind = "extra"
                 if kind not in (None, "base"):
@@ -191,8 +250,11 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
 
                 cached_name, icon = eden_cached(cache_dir, title_id)
                 info = (titledb.get(title_id) if titledb and title_id else None) or {}
+                if nup:
+                    icon = icon or _save_icon(icon_dir, title_id, nup.get("icon"))
+                    cached_name = cached_name or nup.get("name")
                 games.append({
-                    "title": cached_name or info.get("name") or clean_title(name),
+                    "title": cached_name or info.get("name") or clean_title(name, folder=entry == "dump"),
                     "path": path,
                     "title_id": title_id,
                     "image": icon,
@@ -213,7 +275,8 @@ def find_games(folders, header_key=None, cache_dir=None, identify=None, titledb=
         counts[game["title"].lower()] = counts.get(game["title"].lower(), 0) + 1
     for game in games:
         if counts[game["title"].lower()] > 1:
-            game["title"] += f" ({os.path.splitext(game['path'])[1][1:].upper()})"
+            kind = os.path.splitext(game["path"])[1][1:].upper() or "DUMP"
+            game["title"] += f" ({kind})"
 
     games.sort(key=lambda g: g["title"].lower())
     return games

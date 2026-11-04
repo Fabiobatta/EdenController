@@ -568,6 +568,118 @@ class SwitchTests(unittest.TestCase):
             self.assertEqual(identify(xcz, key), ("01006A800016E000", "base"))
 
 
+def _npdm(program_id):
+    """A minimal NPDM: META header pointing at an ACI0 with the program ID."""
+    import struct
+    data = bytearray(0xC0)
+    data[0:4] = b"META"
+    struct.pack_into("<II", data, 0x70, 0x80, 0x40)
+    data[0x80:0x84] = b"ACI0"
+    struct.pack_into("<Q", data, 0x90, int(program_id, 16))
+    return bytes(data)
+
+
+def _nup(packages):
+    """
+    A NUP archive (Eglantine's layout) from [(title_id, kind, version, has_exefs, {tlv type: bytes})].
+    Only the superblock, TOC header, package records and meta TLVs are real.
+    """
+    import struct
+    from Eden import Nx2
+    count = len(packages)
+    toc_size = Nx2.TOC_HEADER.size + count * Nx2.PACKAGE_RECORD.size
+    meta_start = Nx2.NUP_SUPERBLOCK_SIZE + toc_size
+    metas, records, offset = b"", b"", meta_start
+    for title_id, kind, version, has_exefs, meta in packages:
+        block = b"".join(Nx2.TLV_HEADER.pack(t, 0, len(v)) + v for t, v in meta.items())
+        records += Nx2.PACKAGE_RECORD.pack(int(title_id, 16), 0, 1 if has_exefs else Nx2.NO_DIR, Nx2.NO_DIR,
+                                           version, kind, 0, 0, 0, offset if block else 0, len(block), bytes(20))
+        metas += block
+        offset += len(block)
+    toc = Nx2.TOC_HEADER.pack(Nx2.TOC_MAGIC, count, 1, 0, toc_size, 0, 0) + records
+    size = meta_start + len(metas)
+    superblock = Nx2.NUP_SUPERBLOCK.pack(Nx2.NUP_MAGIC, 0x80, 1, Nx2.NUP_SUPERBLOCK_SIZE, toc_size, bytes(32),
+                                         size, size, count, 0)
+    return superblock + bytes(Nx2.NUP_SUPERBLOCK_SIZE - len(superblock)) + toc + metas
+
+
+class Nx2Tests(unittest.TestCase):
+    PNG = b"\x89PNG\r\n\x1a\nfake-icon"
+
+    def test_read_nup(self):
+        from Eden import Nx2
+        base, update = "0100B3F000BE2000", "0100B3F000BE2800"
+        cases = [
+            # Base + update: the update's name/version/icon win, the base's ID is the game's
+            ([(base, Nx2.KIND_BASE, 0, True, {Nx2.META_TITLE_NAME: b"Old name"}),
+              (update, Nx2.KIND_UPDATE, 917504, True, {Nx2.META_TITLE_NAME: b"Mario Kart World",
+                                                       Nx2.META_DISPLAY_VERSION: b"1.8.0",
+                                                       Nx2.META_ICON: self.PNG, 0x000A: b"x" * 50})],
+             {"title_id": base, "kind": "base", "name": "Mario Kart World", "version": "1.8.0", "icon": self.PNG}),
+            # An update that carries its executable boots on its own
+            ([(update, Nx2.KIND_UPDATE, 1, True, {})], {"title_id": base, "kind": "base"}),
+            ([(update, Nx2.KIND_UPDATE, 1, False, {})], {"title_id": base, "kind": "update"}),
+            ([("0100B3F000BE3001", Nx2.KIND_ADDON, 0, False, {})], {"kind": "extra"}),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "game.nup")
+            for packages, expected in cases:
+                with open(path, "wb") as f:
+                    f.write(_nup(packages))
+                info = Nx2.read_nup(path)
+                self.assertEqual({k: info[k] for k in expected}, expected)
+            with open(path, "wb") as f:
+                f.write(b"NUP\x01" + b"\0" * 20)
+            self.assertIsNone(Nx2.read_nup(path))
+        self.assertEqual(Nx2.npdm_program_id(_npdm("0100B3F000BE2000")), "0100B3F000BE2000")
+        self.assertIsNone(Nx2.npdm_program_id(b"nope" * 40))
+
+    def _dump(self, root, parts, program_id="0100A1B2C3D4E000"):
+        for part in parts:
+            exefs = os.path.join(root, *part, "exefs")
+            os.makedirs(exefs)
+            open(os.path.join(exefs, "main"), "wb").close()
+            with open(os.path.join(exefs, "main.npdm"), "wb") as f:
+                f.write(_npdm(program_id))
+            os.makedirs(os.path.join(root, *part, "romfs"))
+
+    def test_loose_dumps(self):
+        from Eden import Nx2
+        with tempfile.TemporaryDirectory() as tmp:
+            game = os.path.join(tmp, "Pokemon Pokopia v1.2")
+            self._dump(game, [("base",), ("updates", "65536"), ("updates", "655360")])
+            main = Nx2.loose_dump(game)
+            self.assertEqual(main, os.path.join(game, "updates", "655360", "exefs", "main"))  # newest update
+            self.assertEqual(Nx2.dump_root(main), game)
+            self.assertEqual(Nx2.dump_title_id(main), "0100A1B2C3D4E000")
+            bare = os.path.join(tmp, "Bare")
+            self._dump(bare, [()])
+            self.assertEqual(Nx2.loose_dump(bare), os.path.join(bare, "exefs", "main"))
+            self.assertIsNone(Nx2.loose_dump(tmp))
+
+    def test_game_list_finds_switch2_games(self):
+        from Eden.Games import find_games
+        from Eden import Nx2
+        with tempfile.TemporaryDirectory() as tmp:
+            games_dir = os.path.join(tmp, "games")
+            os.makedirs(games_dir)
+            with open(os.path.join(games_dir, "mkw.nup"), "wb") as f:
+                f.write(_nup([("0100B3F000BE2000", Nx2.KIND_BASE, 0, True,
+                               {Nx2.META_TITLE_NAME: b"Mario Kart World", Nx2.META_ICON: self.PNG})]))
+            self._dump(os.path.join(games_dir, "Pokemon Pokopia v1.2"), [("base",)])
+            # A file inside a dump's RomFS is game data, never a game
+            open(os.path.join(games_dir, "Pokemon Pokopia v1.2", "base", "romfs", "data.nsp"), "wb").close()
+            icons = os.path.join(tmp, "icons")
+            for deep in (False, True):          # dumps are found even without "scan subfolders"
+                games = find_games([(games_dir, deep)], identify=lambda p: (None, None), icon_dir=icons)
+                self.assertEqual([(g["title"], os.path.basename(g["path"]), g["title_id"]) for g in games],
+                                 [("Mario Kart World", "mkw.nup", "0100B3F000BE2000"),
+                                  ("Pokemon Pokopia v1.2", "main", "0100A1B2C3D4E000")])
+            with open(games[0]["image"], "rb") as f:
+                self.assertEqual(f.read(), self.PNG)
+            self.assertTrue(games[0]["image"].endswith("0100B3F000BE2000.png"))
+
+
 class SettingsTests(unittest.TestCase):
     def test_defaults_are_created_and_user_values_win(self):
         from Core.Settings import load_settings

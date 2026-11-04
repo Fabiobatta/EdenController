@@ -62,7 +62,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 **Tips**
 
 - **More than 4 players**: Windows XInput stops at 4 pads. Set the host's gamepad emulation to **DS4** for up to 8.
-- **Eglantine** keeps Eden's data folder (`%APPDATA%\eden`): installed normally, both share config and saves. Make Eglantine portable (an empty `user` folder next to `eglantine.exe`) to keep them apart. Switch 2 games have no player count or eShop art yet: add them under `[Players]` (e.g. `Mario Kart World = 4`) so the roulette can pick them.
+- **Eglantine** keeps Eden's data folder (`%APPDATA%\eden`): installed normally, both share config and saves. Make Eglantine portable (an empty `user` folder next to `eglantine.exe`) to keep them apart. The game grid lists Switch 2 games both as `.nup` files (with their own name and icon) and as extracted dump folders (`<game>/exefs/main`, `<game>/base/...`, `<game>/updates/<version>/...`), even when Eglantine's own list misses them because "Scan subfolders" is off for that folder. They have no player count yet: add them under `[Players]` (e.g. `Mario Kart World = 4`) so the roulette can pick them.
 - **Per-game input profiles** set in Eden (custom game config) override the launcher. Keep game controls on the global config.
 - **A button stuck in game?** Open the close menu (**Back + LB + RB**) and let go of the controllers: it lists what each player's controller is holding right now. If something shows up there, the stuck input comes from the streaming client/host, not from Eden or the game.
 - **Logs**: `%APPDATA%\eden\log\EdenLauncher_*.log`, or `<Eden>\user\log` for portable Eden.

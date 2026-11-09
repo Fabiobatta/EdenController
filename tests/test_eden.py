@@ -1182,6 +1182,24 @@ class SoundTests(unittest.TestCase):
                 self.assertGreater(w.getnframes(), RATE // 100)
 
 
+@unittest.skipUnless(HAS_TK, "Tk not available")
+class PlayerColorTests(unittest.TestCase):
+    def test_first_four_players_have_clearly_different_hues(self):
+        import colorsys
+        from Core.Ui import PLAYER_COLORS, player_color
+        self.assertEqual(len(set(PLAYER_COLORS)), 8)
+        self.assertEqual(player_color(8), player_color(0))
+
+        def hue(color):
+            r, g, b = (int(color[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            return colorsys.rgb_to_hsv(r, g, b)[0] * 360
+        hues = [hue(player_color(i)) for i in range(4)]
+        for i in range(4):
+            for j in range(i + 1, 4):
+                gap = abs(hues[i] - hues[j])
+                self.assertGreater(min(gap, 360 - gap), 40, (i + 1, j + 1))
+
+
 class MixerTests(unittest.TestCase):
     def test_sounds_overlap_instead_of_cutting(self):
         from array import array
@@ -1270,13 +1288,12 @@ class ReconnectTests(unittest.TestCase):
         app.confirm_player_number = lambda instance_id, n: confirmed.append((instance_id, n))
         app.refresh_grid = app.update_hints = lambda: None
         app.mode, app.process = mode, process
-        app.hid_colors, app.hid_profiles, app.color_pool = {}, {}, ["#111111", "#222222", "#333333"]
+        app.hid_profiles = {}
         app.pads = {1: {"path": "XInput#0", "guid": self.PAD, "name": "Pad"},
                     2: {"path": "XInput#1", "guid": self.PAD, "name": "Pad"}}
         app.assignments = [{"path": "XInput#0", "guid": self.PAD, "name": "Pad", "profile_key": "Xbox"},
                            {"path": "XInput#1", "guid": self.PAD, "name": "Pad", "profile_key": "Nintendo"}]
         for a in app.assignments:
-            app.get_assigned_color(a["path"])
             app.hid_profiles[a["path"]] = a["profile_key"]
         return app
 
@@ -1284,7 +1301,7 @@ class ReconnectTests(unittest.TestCase):
         from Core.I18n import set_language
         set_language("en")
         app = self._app(mode="GAMES", process=object())
-        color = app.hid_colors["XInput#1"]
+        color = app.get_assigned_color("XInput#1")
         del app.pads[2]                                     # P2's pad drops mid-game
         app.on_pads_changed()
         self.assertEqual(len(app.assignments), 2)
@@ -1295,7 +1312,7 @@ class ReconnectTests(unittest.TestCase):
         p2 = app.assignments[1]
         self.assertFalse(p2["waiting"])
         self.assertEqual(p2["path"], "XInput#2")
-        self.assertEqual(app.hid_colors["XInput#2"], color)                     # same colour, same layout
+        self.assertEqual(app.get_assigned_color("XInput#2"), color)             # same colour, same layout
         self.assertEqual(app.hid_profiles["XInput#2"], "Nintendo")
         self.assertEqual(app.confirmed, [])                                     # no rumble while Eden runs
         self.assertEqual(app.toasts[-1], "P2 is back")
@@ -1305,7 +1322,7 @@ class ReconnectTests(unittest.TestCase):
         del app.pads[2]
         app.on_pads_changed()
         self.assertEqual([a["path"] for a in app.assignments], ["XInput#0"])
-        self.assertNotIn("XInput#1", app.hid_colors)
+        self.assertNotIn("XInput#1", app.hid_profiles)
 
     def test_waiting_slots_are_freed_on_the_player_cards(self):
         app = self._app(mode="GAMES")

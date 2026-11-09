@@ -47,7 +47,7 @@ from .Process import launch
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
-from .Ui import COLOR, COLOR_POOL, LauncherUi
+from .Ui import COLOR, LauncherUi, player_color
 
 MAX_PLAYERS = 8
 POLL_INTERVAL_MS = 16
@@ -200,9 +200,6 @@ class LauncherApp:
         self._carried_keys = None           # path-less pad keys kept across scan_hardware()
         self._held = None                   # close menu: last held-buttons report
         self._held_next = 0.0
-        self.color_pool = list(COLOR_POOL)
-        random.shuffle(self.color_pool)
-        self.hid_colors = {}                # {path: color} for the session
         self.hid_profiles = {}              # {path: profile_key} across reconnects
         self.process = None                 # Emulator subprocess handle
         self.returning_to_launcher = False  # Flag for kill -> restart flow
@@ -444,11 +441,11 @@ class LauncherApp:
                 log("INFO", f"Controller disconnected - Player {player} waits for it", assignment["name"])
             first = dropped[0]
             self.ui.show_toast(t("toast_waiting", n=self.assignments.index(first) + 1),
-                               self.hid_colors.get(first["path"], COLOR["NEON_RED"]))
+                               self.get_assigned_color(first["path"]))
             return
+        dropped_color = self.get_assigned_color(dropped[0]["path"])
         self.assignments = [a for a in self.assignments if a["path"] in connected]
-        self.ui.show_toast(t("toast_disconnected", name=dropped[0]["name"]),
-                           self.hid_colors.get(dropped[0]["path"], COLOR["NEON_RED"]))
+        self.ui.show_toast(t("toast_disconnected", name=dropped[0]["name"]), dropped_color)
         for assignment in dropped:
             log("INFO", "Controller disconnected", assignment["name"])
             self._forget_controller(assignment["path"])
@@ -456,9 +453,6 @@ class LauncherApp:
         self.update_hints()
 
     def _forget_controller(self, path):
-        color = self.hid_colors.pop(path, None)
-        if color:
-            self.color_pool.append(color)
         self.hid_profiles.pop(path, None)       # Clear profile on hardware disconnect
 
     def _restore_waiting(self):
@@ -471,9 +465,7 @@ class LauncherApp:
         for assignment, pad in match_reconnects(waiting, free):
             old = assignment["path"]
             if old != pad["path"]:
-                # The colour and the chosen layout follow the player, not the device path
-                if old in self.hid_colors:
-                    self.hid_colors[pad["path"]] = self.hid_colors.pop(old)
+                # The chosen layout follows the player, not the device path
                 if old in self.hid_profiles:
                     self.hid_profiles[pad["path"]] = self.hid_profiles.pop(old)
             assignment.update(path=pad["path"], guid=pad["guid"], name=pad["name"], waiting=False)
@@ -833,12 +825,9 @@ class LauncherApp:
     # UI UPDATE METHODS
     # ========================================================================
     def get_assigned_color(self, path):
-        """Persistent colour for a controller during the session."""
-        if path not in self.hid_colors:
-            if not self.color_pool:
-                self.color_pool = list(COLOR_POOL)
-            self.hid_colors[path] = self.color_pool.pop(0)
-        return self.hid_colors[path]
+        """The colour of the player this controller is: one per player number."""
+        index = next((i for i, a in enumerate(self.assignments) if a["path"] == path), None)
+        return COLOR["NEON_RED"] if index is None else player_color(index)
 
     def refresh_grid(self):
         """Build the view models for the player cards and hand them to the UI."""

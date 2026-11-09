@@ -75,11 +75,24 @@ COLOR = {
 }
 
 # Controller colours (Material 300 palette: bright, distinct, easy on the eyes)
-COLOR_POOL = [
-    "#4FC3F7", "#FF8A65", "#AED581", "#BA68C8", "#FFD54F", "#4DB6AC", "#F06292",
-    "#7986CB", "#E57373", "#81C784", "#64B5F6", "#FFB74D", "#9575CD", "#4DD0E1",
-    "#DCE775", "#F48FB1", "#FFF176", "#80CBC4", "#A1887F", "#90A4AE",
-]
+# One colour per player number, far apart on the colour wheel: the first four
+# (the usual group) are blue, red, green and yellow, never two of a kind
+PLAYER_COLORS = (
+    "#4FA3FF",  # P1 blue
+    "#FF5C5C",  # P2 red
+    "#5CD65C",  # P3 green
+    "#FFD23F",  # P4 yellow
+    "#B57BFF",  # P5 purple
+    "#FF9A3C",  # P6 orange
+    "#3DDCCB",  # P7 teal
+    "#FF6FB5",  # P8 pink
+)
+COLOR_POOL = PLAYER_COLORS
+
+
+def player_color(index):
+    """Colour of player index + 1 (P1 = 0)."""
+    return PLAYER_COLORS[index % len(PLAYER_COLORS)]
 
 _TOKEN = re.compile(r"\[(\w+)\]")
 

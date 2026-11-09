@@ -98,6 +98,59 @@ def _job():
 
 
 # ============================================================================
+# CHILD ENVIRONMENT
+# ============================================================================
+# Variables PyInstaller's bootloader and its runtime hooks set for the
+# launcher itself; the emulator must not see them
+_FROZEN_VARS = ("TCL_LIBRARY", "TK_LIBRARY", "_MEIPASS2", "_PYI_APPLICATION_HOME_DIR",
+                "_PYI_ARCHIVE_FILE", "_PYI_PARENT_PROCESS_LEVEL", "_PYI_SPLASH_IPC")
+_LIBRARY_PATHS = ("PATH", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH")
+
+
+def clean_child_env(env, bundle_dir=None):
+    """
+    The environment for the emulator without the launcher's bundle in it.
+
+    A PyInstaller one-file exe unpacks its Python, Tcl/Tk, SDL and C runtime
+    libraries into a temp folder (sys._MEIPASS) and points the library
+    search path at it (LD_LIBRARY_PATH on Linux, keeping the user's value in
+    LD_LIBRARY_PATH_ORIG). Inherited by the emulator, that folder would feed
+    it the launcher's older copies of libraries it ships or expects from the
+    system - and a mismatched C/C++ runtime can stop a game from booting.
+    """
+    env = dict(env)
+    bundle_dir = bundle_dir if bundle_dir is not None else getattr(sys, "_MEIPASS", None)
+    for name in _FROZEN_VARS:
+        env.pop(name, None)
+    if "LD_LIBRARY_PATH_ORIG" in env:
+        original = env.pop("LD_LIBRARY_PATH_ORIG")
+        if original:
+            env["LD_LIBRARY_PATH"] = original
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    if bundle_dir:
+        root = os.path.normcase(os.path.abspath(bundle_dir))
+        for name in _LIBRARY_PATHS:
+            if not env.get(name):
+                continue
+            kept = [entry for entry in env[name].split(os.pathsep) if entry and not
+                    os.path.normcase(os.path.abspath(entry)).startswith(root)]
+            if kept:
+                env[name] = os.pathsep.join(kept)
+            else:
+                env.pop(name)
+    return env
+
+
+def _set_dll_directory(path):
+    """SetDllDirectoryW: None restores Windows' default DLL search order."""
+    try:
+        ctypes.windll.kernel32.SetDllDirectoryW(path)
+    except Exception as e:
+        log("WARNING", "SetDllDirectoryW failed", e)
+
+
+# ============================================================================
 # LAUNCH
 # ============================================================================
 def launch(cmd_args, env):
@@ -112,9 +165,22 @@ def launch(cmd_args, env):
         subprocess.Popen: The running emulator process.
     """
     if sys.platform == "win32":
-        # CREATE_SUSPENDED so the process is attached to the Job Object before
-        # it can spawn anything of its own
-        process = subprocess.Popen(cmd_args, env=env, creationflags=0x00000004)
+        # The bootloader pointed the DLL search path at the launcher's bundle,
+        # and child processes inherit it: the emulator would load the
+        # launcher's VCRUNTIME140.dll, SDL3.dll... instead of its own or the
+        # system's. Restore the default search order just for this
+        # CreateProcess (the launcher still loads its own DLLs afterwards).
+        bundle_dir = getattr(sys, "_MEIPASS", None)
+        env = clean_child_env(env, bundle_dir)
+        if bundle_dir:
+            _set_dll_directory(None)
+        try:
+            # CREATE_SUSPENDED so the process is attached to the Job Object
+            # before it can spawn anything of its own
+            process = subprocess.Popen(cmd_args, env=env, creationflags=0x00000004)
+        finally:
+            if bundle_dir:
+                _set_dll_directory(bundle_dir)
         job = _job()
         if job:
             result = ctypes.windll.kernel32.AssignProcessToJobObject(
@@ -133,7 +199,7 @@ def launch(cmd_args, env):
         else:
             _libc = ctypes.CDLL("libc.so.6", use_errno=True)
             _preexec = lambda: _libc.prctl(1, _signal.SIGKILL, 0, 0, 0)  # PR_SET_PDEATHSIG
-        process = subprocess.Popen(cmd_args, env=env, preexec_fn=_preexec)
+        process = subprocess.Popen(cmd_args, env=clean_child_env(env), preexec_fn=_preexec)
     return process
 
 
@@ -162,6 +228,7 @@ def mount_appimage(appimage_path):
         [appimage_path, "--appimage-mount"],
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
+        env=clean_child_env(os.environ),
         preexec_fn=lambda: libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
     )
 

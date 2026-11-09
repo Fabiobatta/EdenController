@@ -226,6 +226,16 @@ class WriteTests(unittest.TestCase):
     def assignments(self, *paths):
         return [{"path": p, "name": p, "profile_key": Config.DEFAULT_PROFILE} for p in paths]
 
+    def test_original_config_is_kept_once(self):
+        hw = hardware(("p1", RAW_GUID), ("p2", RAW_GUID))
+        Config.write_input(self.path, self.assignments("p1"), hw, self.profiles)
+        backup = self.path + Config.ORIGINAL_SUFFIX
+        with open(backup, encoding="utf-8", newline="") as f:
+            self.assertEqual(f.read(), QT_CONFIG)
+        Config.write_input(self.path, self.assignments("p2", "p1"), hw, self.profiles)
+        with open(backup, encoding="utf-8", newline="") as f:
+            self.assertEqual(f.read(), QT_CONFIG)             # never overwritten
+
     def test_players_follow_assignment_order_not_connection_order(self):
         # Pads connected as p1, p2, p3 but the players picked p3 then p1
         hw = hardware(("p1", RAW_GUID), ("p2", RAW_GUID), ("p3", RAW_GUID))
@@ -937,6 +947,28 @@ class ArtTests(unittest.TestCase):
             self.assertEqual(done, [game])
             with open(game["background"], "rb") as f:
                 self.assertEqual(f.read(), b"jpegdata")
+
+
+class ChildEnvTests(unittest.TestCase):
+    def test_launcher_bundle_is_removed(self):
+        from Core.Process import clean_child_env
+        bundle = os.path.join(tempfile.gettempdir(), "_MEI12345")
+        env = {"PATH": os.pathsep.join([os.path.join(bundle, "bin"), "/usr/bin"]),
+               "LD_LIBRARY_PATH": bundle, "LD_LIBRARY_PATH_ORIG": "/opt/lib",
+               "TCL_LIBRARY": os.path.join(bundle, "_tcl_data"), "_PYI_ARCHIVE_FILE": "x",
+               "HOME": "/home/me"}
+        clean = clean_child_env(env, bundle)
+        self.assertEqual(clean["PATH"], "/usr/bin")
+        self.assertEqual(clean["LD_LIBRARY_PATH"], "/opt/lib")
+        for name in ("LD_LIBRARY_PATH_ORIG", "TCL_LIBRARY", "_PYI_ARCHIVE_FILE"):
+            self.assertNotIn(name, clean)
+        self.assertEqual(clean["HOME"], "/home/me")
+        self.assertIn("TCL_LIBRARY", env)                       # the input is not changed
+
+    def test_no_library_path_without_original(self):
+        from Core.Process import clean_child_env
+        clean = clean_child_env({"LD_LIBRARY_PATH": "/tmp/_MEIabc", "LD_LIBRARY_PATH_ORIG": ""}, "/tmp/_MEIabc")
+        self.assertNotIn("LD_LIBRARY_PATH", clean)
 
 
 class GlyphTests(unittest.TestCase):

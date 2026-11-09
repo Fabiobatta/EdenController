@@ -32,6 +32,7 @@ Core never looks inside any of this; profile payloads are opaque to it.
 
 import glob
 import os
+import shutil
 
 from Core.Log import log
 
@@ -456,6 +457,25 @@ def controller_applet_values(disabled):
     }
 
 
+ORIGINAL_SUFFIX = ".before-EdenLauncher"
+
+
+def keep_original(config_file):
+    """
+    Copy qt-config.ini to qt-config.ini.before-EdenLauncher the first time
+    the launcher changes it, so Eden's own settings can always be compared
+    or restored by hand. Never overwritten afterwards.
+    """
+    backup = config_file + ORIGINAL_SUFFIX
+    if os.path.exists(backup) or not os.path.isfile(config_file):
+        return
+    try:
+        shutil.copy2(config_file, backup)
+        log("INFO", "Original qt-config.ini kept", backup)
+    except OSError as e:
+        log("WARNING", "Could not copy the original qt-config.ini", e)
+
+
 def controller_applet_mode_values(disabled, current):
     """
     [LibraryApplet] keys for Settings::controller_applet_mode, on builds
@@ -532,6 +552,7 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
             ini.set_many(UI_SECTION, controller_applet_values(disable_controller_applet))
         log("INFO", "Controller applet", ("disabled" if disable_controller_applet else "enabled")
             + f" ({applet_scheme})")
+    keep_original(config_file)
     try:
         os.makedirs(os.path.dirname(config_file), exist_ok=True)
         ini.save(config_file)

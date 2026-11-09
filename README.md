@@ -66,6 +66,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 - **Per-game input profiles** set in Eden (custom game config) override the launcher. Keep game controls on the global config.
 - **A button stuck in game?** Open the close menu (**Back + LB + RB**) and let go of the controllers: it lists what each player's controller is holding right now. If something shows up there, the stuck input comes from the streaming client/host, not from Eden or the game.
 - **Logs**: `%APPDATA%\eden\log\EdenLauncher_*.log`, or `<Eden>\user\log` for portable Eden.
+- **Your original Eden settings**: the first time the launcher changes `qt-config.ini` it keeps a copy next to it, `qt-config.ini.before-EdenLauncher`. Rename it back to `qt-config.ini` to undo everything the launcher did.
 
 ## Settings
 

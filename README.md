@@ -15,7 +15,7 @@ Eden stores each player's controller as a GUID plus a *connection order*. When y
 ## How it works
 
 1. Start `EdenLauncher.exe` instead of Eden. A fullscreen, controller-only screen opens.
-2. Everyone presses **A** on their controller: first press = Player 1, second = Player 2, and so on (up to 8). Your pad rumbles once for P1, twice for P2…
+2. Everyone presses **A** on their controller: first press = Player 1, second = Player 2, and so on (up to 8). Your pad rumbles once for P1, twice for P2… Each card shows where that player's view will be in split screen (2 players: top / bottom; 3–4: the quadrants, starting top left), and pressing any button lights up your own card, so you can tell which one is yours.
 3. Press **Start**: pick a game from the grid (or it launches the game passed by your streaming app).
 4. The launcher rewrites only the controller part of Eden's config, turns on docked (TV) mode for 2+ players, and starts Eden.
 

@@ -955,6 +955,28 @@ class GlyphTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             Glyphs.button("nope", 24)
 
+    def test_split_screen_picture(self):
+        from Core import Glyphs
+        regions = ((0, 0, 1, 0.5), (0, 0.5, 1, 1))
+        image = Glyphs.split_screen(56, 32, regions, 1, "#FF8A65")
+        self.assertEqual(image.size, (56, 32))
+        # The highlighted half is drawn in the player's colour, the other one is not
+        self.assertEqual(image.getpixel((28, 24))[:3], (0xFF, 0x8A, 0x65))
+        self.assertNotEqual(image.getpixel((28, 8))[:3], (0xFF, 0x8A, 0x65))
+
+
+@unittest.skipUnless(HAS_TK, "Tk not available")
+class SplitLayoutTests(unittest.TestCase):
+    def test_positions_follow_join_order(self):
+        from Core.Ui import split_layout
+        self.assertEqual([name for _, name in split_layout(1)], ["split_full"])
+        self.assertEqual([name for _, name in split_layout(2)], ["split_top", "split_bottom"])
+        self.assertEqual([name for _, name in split_layout(3)], ["split_tl", "split_tr", "split_bl"])
+        self.assertEqual([name for _, name in split_layout(4)],
+                         ["split_tl", "split_tr", "split_bl", "split_br"])
+        self.assertIsNone(split_layout(5))              # shared screen
+        self.assertEqual(split_layout(0), split_layout(1))
+
 
 class BackupTests(unittest.TestCase):
     def _saves(self, tmp):

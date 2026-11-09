@@ -266,6 +266,35 @@ def trophy(height, color):
     return _finish(img, (h, h))
 
 
+@lru_cache(maxsize=64)
+def split_screen(width, height, regions, highlight, color):
+    """
+    A small TV showing how the screen is split: `regions` are (x0, y0, x1, y1)
+    fractions, the one at index `highlight` filled with `color`, the others
+    faint. One region covering everything = full screen.
+    """
+    w, h = max(8, int(width)), max(6, int(height))
+    s = SUPERSAMPLE
+    W, H = w * s, h * s
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    border = max(1, int(s * 1.5))
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=H * 0.12, fill=(18, 20, 27, 255),
+                        outline=(120, 126, 140, 255), width=border)
+    inset = border + s
+    inner = (W - 2 * inset, H - 2 * inset)
+    rgb = _rgb(color)
+    for i, (x0, y0, x1, y1) in enumerate(regions):
+        gap = s
+        box = (inset + x0 * inner[0] + gap, inset + y0 * inner[1] + gap,
+               inset + x1 * inner[0] - gap, inset + y1 * inner[1] - gap)
+        if i == highlight:
+            d.rounded_rectangle(box, radius=s * 2, fill=rgb + (255,))
+        else:
+            d.rounded_rectangle(box, radius=s * 2, fill=(255, 255, 255, 38))
+    return _finish(img, (w, h))
+
+
 @lru_cache(maxsize=16)
 def clock(height, color):
     """Clock face (play time)."""

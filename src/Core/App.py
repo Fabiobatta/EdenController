@@ -688,6 +688,8 @@ class LauncherApp:
         sdl = self.sdl
         slot_idx = self.find_slot_by_instance(which)
         editing = slot_idx != -1 and self.assignments[slot_idx]["is_editing"]
+        if slot_idx != -1 and button not in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
+            self.ui.flash_slot(slot_idx, 350)          # "which card is mine?"
         if button == sdl.SDL_CONTROLLER_BUTTON_A:
             if editing:
                 self.toggle_profile_edit(which)     # Confirm profile
@@ -724,8 +726,12 @@ class LauncherApp:
         pad = self.pads.get(instance_id)
         if not pad or len(self.assignments) >= MAX_PLAYERS:
             return
-        if any(a["path"] == pad["path"] for a in self.assignments):
-            return  # Same controller can't be two players
+        for i, assignment in enumerate(self.assignments):
+            if assignment["path"] == pad["path"]:
+                # Already playing: show which card and number it is instead
+                self.ui.flash_slot(i)
+                self.confirm_player_number(instance_id, i + 1)
+                return
 
         # Restore previously selected profile for this controller, default to the first one
         profile_key = self.hid_profiles.get(pad["path"], self.default_profile)

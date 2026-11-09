@@ -84,6 +84,31 @@ COLOR_POOL = [
 _TOKEN = re.compile(r"\[(\w+)\]")
 
 
+# Where each player's view goes in a local co-op split screen, by the number
+# of players: (region as x0, y0, x1, y1 fractions, I18n label key). Most
+# Switch games split two players top/bottom and four into quadrants (three
+# use three quadrants); with five or more the screen is usually shared.
+SPLIT = {
+    "full": ((0, 0, 1, 1), "split_full"),
+    "top": ((0, 0, 1, 0.5), "split_top"),
+    "bottom": ((0, 0.5, 1, 1), "split_bottom"),
+    "tl": ((0, 0, 0.5, 0.5), "split_tl"),
+    "tr": ((0.5, 0, 1, 0.5), "split_tr"),
+    "bl": ((0, 0.5, 0.5, 1), "split_bl"),
+    "br": ((0.5, 0.5, 1, 1), "split_br"),
+}
+SPLIT_LAYOUTS = {1: ("full",), 2: ("top", "bottom"), 3: ("tl", "tr", "bl"), 4: ("tl", "tr", "bl", "br")}
+
+
+def split_layout(players):
+    """
+    [(region, label key)] per player for `players` players; None past four,
+    where games share one screen.
+    """
+    names = SPLIT_LAYOUTS.get(max(1, players))
+    return [SPLIT[name] for name in names] if names else None
+
+
 def art_of(game):
     """The picture a game's backdrop starts from, or None."""
     if not game:
@@ -159,6 +184,7 @@ class LauncherUi:
         self.view = "players"
         self.slots = []
         self.flashing = set()
+        self._flash_until = {}
         self.hints = []
         self.tip = ""
         self.pads = 0
@@ -514,13 +540,15 @@ class LauncherUi:
             self._draw_players()
 
     def flash_slot(self, index, duration_ms=700):
-        """Glow a card briefly (a controller just joined)."""
+        """Glow a card briefly (a controller just joined, or its owner pressed a button)."""
         self.flashing.add(index)
+        self._flash_until[index] = time.monotonic() + duration_ms / 1000
         self.refresh(self.slots)
 
         def stop():
-            self.flashing.discard(index)
-            self.refresh(self.slots)
+            if time.monotonic() + 0.02 >= self._flash_until.get(index, 0):  # no newer flash running
+                self.flashing.discard(index)
+                self.refresh(self.slots)
         self.root.after(duration_ms, stop)
 
     def _draw_players(self):
@@ -532,6 +560,7 @@ class LauncherUi:
         left = (self.width - (4 * cw + 3 * gap)) // 2
         top = self.px(132)
         radius = self.px(16)
+        layout = split_layout(len(self.slots))
         for i in range(8):
             x = left + (i % 4) * (cw + gap)
             y = top + (i // 4) * (ch + gap)
@@ -566,12 +595,29 @@ class LauncherUi:
             size = self.px(52)
             disc = self.photo(("disc", i, size, color), lambda: Glyphs.disc(f"P{i + 1}", size, color))
             c.create_image(x + self.px(18), y + self.px(18), image=disc, anchor="nw", tags="players")
+
+            # Next to the number: the button layout and the controller
             text_x = x + self.px(84)
-            name_font = self.font(15)
-            c.create_text(text_x, y + self.px(34), anchor="w", fill=COLOR["TEXT"], font=name_font,
-                          text=self.truncate(slot["name"], name_font, cw - self.px(98)), tags="players")
-            c.create_text(text_x, y + self.px(58), anchor="w", fill=color, font=self.font(13, False),
-                          text=t("slot_profile", name=slot["profile"]), tags="players")
+            text_w = cw - self.px(84) - self.px(18)
+            small = self.font(12, False)
+            c.create_text(text_x, y + self.px(33), anchor="w", fill=COLOR["TEXT"], font=small,
+                          text=self.truncate(t("slot_profile", name=slot["profile"]), small, text_w),
+                          tags="players")
+            c.create_text(text_x, y + self.px(54), anchor="w", fill=COLOR["TEXT_FAINT"], font=small,
+                          text=self.truncate(slot["name"], small, text_w), tags="players")
+
+            # Where this player plays: a small split-screen picture and its name
+            sw, sh = self.px(56), self.px(32)
+            regions = tuple(region for region, _ in layout) if layout else ((0, 0, 1, 1),)
+            screen = self.photo(("split", sw, sh, regions, i if layout else 0, color),
+                                lambda: Glyphs.split_screen(sw, sh, regions, i if layout else 0, color))
+            row_y = y + self.px(91)
+            c.create_image(x + self.px(18), row_y, image=screen, anchor="w", tags="players")
+            where = t(layout[i][1]) if layout else t("split_shared")
+            where_font = self.font(14)
+            where_x = x + self.px(18) + sw + self.px(10)
+            c.create_text(where_x, row_y, anchor="w", fill=color, font=where_font,
+                          text=self.truncate(where, where_font, x + cw - self.px(14) - where_x), tags="players")
             self.rich(x + self.px(18), y + ch - self.px(26), t("slot_hints"), 11, COLOR["TEXT_DIM"],
                       tags="players")
 

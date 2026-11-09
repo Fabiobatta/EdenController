@@ -75,6 +75,31 @@ jobs:
         cmake --build build --parallel
         sudo cmake --install build
 
+    # The runner usually has no sound card: this proves the winmm calls are
+    # well formed (a bad ctypes argument raises TypeError/ArgumentError, a
+    # missing device only an OSError the launcher falls back from)
+    - name: Smoke-test the sound mixer output (Windows)
+      if: runner.os == 'Windows'
+      shell: python
+      run: |
+        import sys, time
+        from array import array
+        sys.path.insert(0, "src")
+        from Core.Sound import Mixer, _WaveOut
+        mixer = Mixer()
+        try:
+            output = _WaveOut(mixer)
+        except OSError as e:
+            print("No audio device on the runner:", e)
+        else:
+            mixer.add(array("h", [1000] * 4000))
+            output.wake()
+            time.sleep(0.5)
+            output.keep_open = False
+            time.sleep(1.5)
+            print("waveOut played and closed, handle:", output.handle)
+            assert output.handle is None
+
     - name: Build with build.bat (Windows)
       if: runner.os == 'Windows'
       shell: cmd

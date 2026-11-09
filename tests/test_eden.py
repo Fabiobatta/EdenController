@@ -1182,6 +1182,64 @@ class SoundTests(unittest.TestCase):
                 self.assertGreater(w.getnframes(), RATE // 100)
 
 
+class MixerTests(unittest.TestCase):
+    def test_sounds_overlap_instead_of_cutting(self):
+        from array import array
+        from Core.Sound import Mixer
+        mixer = Mixer()
+        self.assertEqual(mixer.render(4), bytes(8))               # silence when idle
+        mixer.add(array("h", [100] * 6))
+        mixer.add(array("h", [30000] * 3))
+        out = array("h")
+        out.frombytes(mixer.render(4))
+        self.assertEqual(list(out), [30100, 30100, 30100, 100])
+        out = array("h")
+        out.frombytes(mixer.render(4))
+        self.assertEqual(list(out), [100, 100, 0, 0])             # the first one plays to its end
+        self.assertFalse(mixer.busy)
+
+    def test_mix_is_clipped_not_wrapped(self):
+        from array import array
+        from Core.Sound import Mixer
+        mixer = Mixer()
+        mixer.add(array("h", [30000, -30000]))
+        mixer.add(array("h", [30000, -30000]))
+        out = array("h")
+        out.frombytes(mixer.render(2))
+        self.assertEqual(list(out), [32767, -32768])
+
+    def test_oldest_voice_makes_room(self):
+        from array import array
+        from Core.Sound import Mixer
+        mixer = Mixer(max_voices=2)
+        for value in (1, 10, 100):
+            mixer.add(array("h", [value]))
+        out = array("h")
+        out.frombytes(mixer.render(1))
+        self.assertEqual(out[0], 110)
+
+    def test_wav_files_load_at_the_mixer_rate(self):
+        import wave
+        from Core.Sound import RATE, SOUNDS, load_pcm, synthesize, wav
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "join1.wav")
+            with open(path, "wb") as f:
+                f.write(wav(synthesize(SOUNDS["join1"], 0.5)))
+            pcm = load_pcm(path)
+            with wave.open(path) as w:
+                self.assertEqual(len(pcm), w.getnframes())
+            stereo = os.path.join(tmp, "custom.wav")              # 44.1 kHz stereo override
+            with wave.open(stereo, "wb") as w:
+                w.setnchannels(2)
+                w.setsampwidth(2)
+                w.setframerate(2 * RATE)
+                w.writeframes(b"\x10\x00\x30\x00" * 400)
+            pcm = load_pcm(stereo)
+            self.assertEqual(len(pcm), 200)
+            self.assertEqual(pcm[0], 0x20)                        # channels averaged
+            self.assertIsNone(load_pcm(os.path.join(tmp, "missing.wav")))
+
+
 class TimeLabelTests(unittest.TestCase):
     def test_labels(self):
         import time

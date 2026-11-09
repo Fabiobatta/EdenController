@@ -297,6 +297,7 @@ class LauncherApp:
             log("INFO", f"{self.emu.name} killed - returning to launcher")
         self.process = None
         self.end_session()
+        self.sounds.resume()
 
         # Reset launcher state for fresh assignment
         self.assignments = []
@@ -310,6 +311,7 @@ class LauncherApp:
             return False
         self.process = None
         self.end_session()
+        self.sounds.resume()
         self.root.deiconify()
         if self.returning_to_launcher:
             # User chose "Launcher" from the kill menu - fresh assignment
@@ -1342,6 +1344,7 @@ class LauncherApp:
         if os.path.exists(self.emu.exe):
             try:
                 self.process = launch(cmd_args, self.emu.env)
+                self.sounds.suspend()
             except Exception as e:
                 log("EXCEPTION", "Launch failed", e)
                 messagebox.showerror(

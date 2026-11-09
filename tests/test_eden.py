@@ -356,6 +356,40 @@ class AdapterTests(unittest.TestCase):
         emu.locate(self.eden_dir)
         self.assertEqual((emu.display_name, os.path.basename(emu.exe)), ("Eden", "eden"))
 
+    def test_lichii_and_other_forks(self):
+        from Core.Settings import Settings
+        from Eden import Eden
+        from Eden.Eden import _find_fork, fork_name
+        os.remove(os.path.join(self.eden_dir, "eden"))
+        open(os.path.join(self.eden_dir, "lichii"), "w").close()
+        emu = Eden()
+        emu.locate(self.eden_dir)
+        self.assertEqual((emu.display_name, emu.exe), ("Lichii", os.path.join(self.eden_dir, "lichii")))
+        self.assertEqual(emu.config_path, os.path.join(self.tmp.name, "cfg", "eden", "qt-config.ini"))
+
+        # Named in the settings, with its own data folder once it has a config
+        own = os.path.join(self.tmp.name, "cfg", "citron")
+        os.makedirs(own)
+        open(os.path.join(own, "qt-config.ini"), "w").close()
+        open(os.path.join(self.eden_dir, "citron"), "w").close()
+        emu = Eden()
+        emu.settings = Settings({"eden": {"emulator_exe": "citron"}})
+        emu.locate(self.eden_dir)
+        self.assertEqual((emu.display_name, os.path.basename(emu.exe)), ("Citron", "citron"))
+        self.assertEqual(emu.config_path, os.path.join(own, "qt-config.ini"))
+
+        # Unknown name in the folder: the binary with the Qt config file name in it
+        folder = os.path.join(self.tmp.name, "forks")
+        os.makedirs(folder)
+        for name, data in (("aaa-cli.exe", b"qt-config.ini"), ("EdenLauncher.exe", b"qt-config.ini"),
+                           ("helper.exe", b"nothing"), ("Mystery.exe", b"..qt-config.ini..")):
+            with open(os.path.join(folder, name), "wb") as f:
+                f.write(data)
+        found = _find_fork(folder)
+        self.assertEqual(os.path.basename(found), "Mystery.exe")
+        self.assertEqual(fork_name(found), "Mystery")
+        self.assertEqual(fork_name("x/LICHII.EXE"), "Lichii")
+
     def test_missing_binary_names_both(self):
         import importlib
         adapter = importlib.import_module("Eden.Eden")

@@ -31,8 +31,13 @@ ENV_USER_DIR = "EDEN_LAUNCHER_USER_DIR"     # Eden's user folder (holds config/)
 
 SETTINGS_SECTION = "Eden"
 
-# The Eden family: (display name, binary name), preferred first
-BINARIES = (("Eden", "eden"), ("Eglantine", "eglantine"))
+# The Eden family: (display name, binary name), preferred first. Any other
+# fork works too: named in the settings (emulator_exe), or found in the
+# folder by the Qt config file name compiled into it (_find_fork)
+BINARIES = (("Eden", "eden"), ("Eglantine", "eglantine"), ("Lichii", "lichii"))
+FORK_MARKER = b"qt-config.ini"
+# Executables next to a fork that are never the emulator itself
+NOT_EMULATORS = ("edenlauncher", "unins", "maintenancetool", "crashpad", "vc_redist", "updater")
 
 # Strings compiled into the emulator binary that show how it turns off the
 # controller applet: a build that still has the [UI] option contains its key
@@ -60,6 +65,47 @@ def probe_binary(path, needles):
 def _pick_binary(candidates):
     """(display name, path) of the first candidate that exists, else the first one."""
     return next(((name, path) for name, path in candidates if os.path.isfile(path)), candidates[0])
+
+
+def fork_name(path):
+    """What the user sees for a fork's binary: "lichii.exe" -> "Lichii"."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    known = {binary: name for name, binary in BINARIES}
+    return known.get(stem.lower()) or (stem[:1].upper() + stem[1:])
+
+
+def _find_fork(directory, extension=".exe"):
+    """
+    An Eden-family emulator with an unknown name in `directory`: an
+    executable whose binary carries the Qt frontend's config file name
+    (the command-line eden-cli has none). None if there is no such file.
+    """
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return None
+    for name in names:
+        stem, ext = os.path.splitext(name)
+        lowered = stem.lower()
+        if ext.lower() != extension or lowered.endswith("-cli") or lowered.startswith(NOT_EMULATORS):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            if os.path.isfile(path) and probe_binary(path, [FORK_MARKER]):
+                return path
+        except OSError:
+            continue
+    return None
+
+
+def data_folder_name(exe):
+    """
+    Name of the per-user data folder a fork may use instead of Eden's
+    ("citron.exe" -> "citron"); the caller keeps it only when that folder
+    really holds a config, else falls back to "eden" (Eglantine and most
+    forks keep Eden's).
+    """
+    return os.path.splitext(os.path.basename(exe))[0].lower()
 
 _SETTINGS_EN = f"""\
 [{SETTINGS_SECTION}]
@@ -90,6 +136,10 @@ game_picker = true
 game_dirs =
 ; Start games from the grid in fullscreen: true / false
 fullscreen = true
+; The emulator to start, for an Eden fork with another name (e.g. lichii.exe).
+; Empty = find eden.exe, eglantine.exe, lichii.exe or any other Eden fork
+; in the launcher's folder.
+emulator_exe =
 """
 
 _SETTINGS_IT = f"""\
@@ -121,6 +171,10 @@ game_picker = true
 game_dirs =
 ; Avvia i giochi della lista a schermo intero: true / false
 fullscreen = true
+; L'emulatore da avviare, per un fork di Eden con un altro nome (es. lichii.exe).
+; Vuoto = cerca eden.exe, eglantine.exe, lichii.exe o un altro fork di Eden
+; nella cartella del launcher.
+emulator_exe =
 """
 
 DEFAULT_SETTINGS = {"en": _SETTINGS_EN, "it": _SETTINGS_IT}
@@ -129,8 +183,9 @@ register({
     "en": {
         "eden_missing_title": "Eden Missing",
         "eden_missing_text": "Could not find {exe} in:\n{dir}\n\n"
-                             "Place the launcher next to Eden (or Eglantine), or write\n"
-                             "its folder into EdenPath.config next to the launcher.",
+                             "Place the launcher next to Eden (or a fork: Eglantine, Lichii...),\n"
+                             "or write its folder into EdenPath.config next to the launcher.\n"
+                             "A fork with another name: set emulator_exe in EdenLauncher.ini.",
         "eden_config_title": "Configuration Error",
         "eden_config_text": "Could not read Eden's qt-config.ini.\n\n"
                             "Open Eden manually once so it writes a valid configuration,\n"
@@ -139,8 +194,9 @@ register({
     "it": {
         "eden_missing_title": "Eden non trovato",
         "eden_missing_text": "Impossibile trovare {exe} in:\n{dir}\n\n"
-                             "Metti il launcher nella cartella di Eden (o di Eglantine),\n"
-                             "oppure scrivi quella cartella in EdenPath.config accanto al launcher.",
+                             "Metti il launcher nella cartella di Eden (o di un fork: Eglantine, Lichii...),\n"
+                             "oppure scrivi quella cartella in EdenPath.config accanto al launcher.\n"
+                             "Un fork con un altro nome: imposta emulator_exe in EdenLauncher.ini.",
         "eden_config_title": "Errore di configurazione",
         "eden_config_text": "Impossibile leggere qt-config.ini di Eden.\n\n"
                             "Apri Eden una volta a mano per creare una configurazione valida,\n"
@@ -203,12 +259,25 @@ class Eden(Emulator):
         """
         self.dir = read_path_override(base, self.name) or base
         platform = _platform()
+        chosen = self._chosen_exe()
 
         if platform == "win32":
-            self.display_name, self.exe = _pick_binary(
-                [(name, os.path.join(self.dir, stem + ".exe")) for name, stem in BINARIES])
+            if chosen:
+                self.dir = os.path.dirname(chosen)
+                self.display_name, self.exe = fork_name(chosen), chosen
+            else:
+                self.display_name, self.exe = _pick_binary(
+                    [(name, os.path.join(self.dir, stem + ".exe")) for name, stem in BINARIES])
+                if not os.path.isfile(self.exe):
+                    fork = _find_fork(self.dir)
+                    if fork:
+                        self.display_name, self.exe = fork_name(fork), fork
+            log("INFO", "Emulator binary", self.exe)
             portable = os.path.join(self.dir, "user")
-            global_dir = os.path.join(os.getenv("APPDATA") or "", "eden")
+            appdata = os.getenv("APPDATA") or ""
+            own = os.path.join(appdata, data_folder_name(self.exe))
+            global_dir = own if os.path.isfile(os.path.join(own, "config", "qt-config.ini")) \
+                else os.path.join(appdata, "eden")
             self.user_dir = portable if os.path.isdir(portable) else global_dir
             config_dir = os.path.join(self.user_dir, "config")
             self.cache_dir = os.path.join(self.user_dir, "cache")
@@ -233,6 +302,9 @@ class Eden(Emulator):
                     self.dir = os.path.join(mount_point, "usr", "bin")
                 self.display_name, self.exe = _pick_binary(
                     [(name, os.path.join(self.dir, stem)) for name, stem in family])
+            if chosen and not self.is_appimage_build():
+                self.dir = os.path.dirname(chosen)
+                self.display_name, self.exe = fork_name(chosen), chosen
 
             # Eden checks "user" in its working directory, which it inherits
             # from the launcher
@@ -245,9 +317,12 @@ class Eden(Emulator):
                 xdg_data = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
                 xdg_config = os.getenv("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
                 xdg_cache = os.getenv("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
-                self.user_dir = os.path.join(xdg_data, "eden")
-                config_dir = os.path.join(xdg_config, "eden")
-                self.cache_dir = os.path.join(xdg_cache, "eden")
+                folder = data_folder_name(self.exe)
+                if not os.path.isfile(os.path.join(xdg_config, folder, "qt-config.ini")):
+                    folder = "eden"
+                self.user_dir = os.path.join(xdg_data, folder)
+                config_dir = os.path.join(xdg_config, folder)
+                self.cache_dir = os.path.join(xdg_cache, folder)
 
         # Explicit override for unusual setups (custom data directory, ...)
         override = os.getenv(ENV_USER_DIR)
@@ -493,6 +568,19 @@ class Eden(Emulator):
         except OSError:
             pass            # no saves yet
         return root, folders
+
+    def _chosen_exe(self):
+        """The emulator named by the emulator_exe setting (absolute, or in the emulator folder)."""
+        value = self._setting("emulator_exe", "").strip().strip('"')
+        if not value:
+            return None
+        path = value if os.path.isabs(value) else os.path.join(self.dir, value)
+        if _platform() == "win32" and not os.path.splitext(path)[1]:
+            path += ".exe"
+        return path
+
+    def is_appimage_build(self):
+        return bool(self.appimage_path)
 
     def _setting(self, key, default):
         if self.settings is None:

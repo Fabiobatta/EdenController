@@ -2,7 +2,7 @@
 
 **Pick which controller is Player 1, 2, 3… for the [Eden](https://eden-emu.dev) Switch emulator, using only your controllers, right before the game starts.**
 
-Made for game streaming (**Sunshine / Vibeshine / Apollo** host + **Moonlight** client), and just as useful on a couch PC. Also works with **[Eglantine](https://github.com/Djihads80/Eglantine)**, Eden's experimental Switch 2 fork.
+Made for game streaming (**Sunshine / Vibeshine / Apollo** host + **Moonlight** client), and just as useful on a couch PC. Also works with **[Eglantine](https://github.com/Djihads80/Eglantine)** (Eden's experimental Switch 2 fork), **Lichii** and other Eden forks.
 
 **[⬇ Download EdenLauncher.exe](https://github.com/Fabiobatta/EdenController/releases/latest)** (Windows)
 
@@ -51,7 +51,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 
 ## Setup
 
-1. Put `EdenLauncher.exe` **in the same folder as `eden.exe`** (or `eglantine.exe`). Or anywhere else, with an `EdenPath.config` file next to it containing that folder's path.
+1. Put `EdenLauncher.exe` **in the same folder as `eden.exe`** (or `eglantine.exe`, `lichii.exe`, or another Eden fork's exe: it is found by itself, or set `emulator_exe` in `EdenLauncher.ini`). Or anywhere else, with an `EdenPath.config` file next to it containing that folder's path.
 2. In Eden, set up **Player 1** once with an Xbox controller (Configure → Controls → Auto-map) and save. The launcher copies that mapping to every player.
 3. In Sunshine / Vibeshine, add an application:
    - **Command**: `"C:\Emulators\Eden\EdenLauncher.exe"`. Game grid included.
@@ -79,6 +79,7 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 | `docked` | `auto` | Docked mode: `auto` (2+ players), `always` or `never` |
 | `controller_applet` | `off` | Skip the mouse-only "connect controllers" window some games open |
 | `game_dirs` | *(empty)* | Game folders separated by `;`. Empty means Eden's own folders |
+| `emulator_exe` | *(empty)* | The emulator to start, e.g. `lichii.exe`. Empty finds Eden or a fork by itself |
 | `kill_combo` | `back+lb+rb` | Buttons that open the close menu in game |
 | `backup_saves` / `backup_dir` / `backup_keep` | `true` / `saves_backup` / `10` | Save backups |
 | `sounds` / `rumble` | `true` | Interface sounds and rumble |

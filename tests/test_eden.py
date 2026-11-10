@@ -4,6 +4,7 @@ Unit tests for the Eden adapter. Run from the repository root:
     python -m unittest discover -s tests
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -1768,6 +1769,85 @@ class GridShapeTests(unittest.TestCase):
         self.assertEqual(first_visible_row(39, columns, rows, 0, count), 3)          # last row at the bottom
         self.assertEqual(first_visible_row(0, columns, rows, 3, count), 0)
         self.assertEqual(first_visible_row(5, columns, rows, 4, 10), 0)              # no empty rows shown
+
+
+class LibraryTests(unittest.TestCase):
+    NOW = 2_000_000_000
+
+    def _games(self):
+        day = 86400
+        games = [{"title": f"Game {i:02d}", "path": f"/g/{i:02d}.nsp", "players": (i % 4) + 1} for i in range(12)]
+        games[3].update(last_played=self.NOW - 2 * day, favorite=True)
+        games[7].update(last_played=self.NOW - 1 * day)
+        games[9].update(last_played=self.NOW - 90 * day)        # too long ago for "continue"
+        games[5].update(hidden=True, last_played=self.NOW)
+        games[11].update(nx2=True)
+        return games
+
+    def test_tabs_offered(self):
+        from Core.Library import available_tabs
+        games = self._games()
+        self.assertEqual(available_tabs(games, 1), ["all", "favorites", "recent", "nx2"])
+        self.assertEqual(available_tabs(games, 3), ["all", "favorites", "recent", "players", "nx2"])
+        self.assertEqual(available_tabs([{"title": "x", "path": "x"}], 1), ["all"])
+
+    def test_continue_row_on_all(self):
+        from Core.Library import tab_games
+        games = self._games()
+        shown, pinned = tab_games(games, "all", 1, now=self.NOW)
+        self.assertEqual(pinned, 2)                              # hidden and old ones are not there
+        self.assertEqual([g["title"] for g in shown[:2]], ["Game 07", "Game 03"])
+        self.assertEqual(len(shown), 2 + 11)                     # then every visible game
+        shown, pinned = tab_games(games, "all", 1, now=self.NOW, continue_row=False)
+        self.assertEqual((pinned, len(shown)), (0, 11))
+        shown, pinned = tab_games(games[:6], "all", 1, now=self.NOW)
+        self.assertEqual(pinned, 0)                              # a short list needs no extra row
+
+    def test_other_tabs(self):
+        from Core.Library import tab_games
+        games = self._games()
+        titles = lambda tab, joined=1: [g["title"] for g in tab_games(games, tab, joined, now=self.NOW)[0]]  # noqa
+        self.assertEqual(titles("favorites"), ["Game 03"])
+        self.assertEqual(titles("recent"), ["Game 07", "Game 03", "Game 09"])
+        self.assertEqual(titles("nx2"), ["Game 11"])
+        self.assertTrue(all(g["players"] >= 3 for g in tab_games(games, "players", 3)[0]))
+        self.assertIn("Game 05", [g["title"] for g in tab_games(games, "recent", 1, show_hidden=True)[0]])
+
+    def test_snapshot_round_trip(self):
+        from Core.Library import from_snapshot, snapshot
+        games = self._games()
+        games[0]["cover"] = "/covers/x.png"                      # worked out on load, not kept
+        data = json.loads(json.dumps(snapshot(games)))
+        back = from_snapshot(data, exists=lambda path: path != "/g/04.nsp")
+        self.assertEqual(len(back), 11)                          # the missing file is left out
+        self.assertNotIn("cover", back[0])
+        self.assertEqual(back[11 - 1]["nx2"], True)
+        self.assertEqual(from_snapshot({"version": 0, "games": []}), [])
+        self.assertEqual(from_snapshot(None), [])
+
+
+class LayoutTests(unittest.TestCase):
+    def test_plain_grid(self):
+        from Core.GameGrid import Layout
+        layout = Layout(10, 4)
+        self.assertEqual(layout.rows, 3)
+        self.assertEqual(layout.cell(5), (1, 1))
+        self.assertEqual(layout.step(5, "up"), 1)
+        self.assertEqual(layout.step(6, "down"), 9)              # shorter last row: its last game
+        self.assertEqual(layout.step(9, "down"), 9)
+        self.assertEqual(layout.step(0, "left"), 9)              # wraps
+        self.assertEqual(layout.step(9, "right"), 0)
+
+    def test_continue_row_first(self):
+        from Core.GameGrid import Layout
+        layout = Layout(2 + 9, 4, pinned=2)                      # 2 recent, then 9 games
+        self.assertEqual(layout.rows, 1 + 3)
+        self.assertEqual([layout.cell(i) for i in (0, 1, 2, 5, 6, 10)],
+                         [(0, 0), (0, 1), (1, 0), (1, 3), (2, 0), (3, 0)])
+        self.assertEqual(layout.step(5, "up"), 1)                # column 3 -> the row's last game
+        self.assertEqual(layout.step(1, "down"), 3)
+        self.assertEqual(layout.step(0, "up"), 0)
+        self.assertEqual(Layout(3, 4, pinned=3).pinned, 0)       # nothing after it: no separate row
 
 
 class EmulatorListTests(VariantTests):

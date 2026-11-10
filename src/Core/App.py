@@ -41,7 +41,7 @@ import threading
 import time
 from tkinter import messagebox
 
-from . import Stats
+from . import Library, Stats
 from .Achievements import ACHIEVEMENTS, Achievements
 from .Art import ArtLibrary
 from .Backup import backup_saves, list_backups, restore
@@ -163,6 +163,7 @@ class LauncherApp:
         self.games = []                     # every game, once scanned
         self.shown_games = []               # games on screen (after the players filter)
         self.games_loaded = not self.picker
+        self.from_snapshot = False          # self.games come from the last scan, a new one is running
         self._scan_result = None            # handed over by the scan thread
         self.waiting_for_games = False      # START pressed while still scanning
 
@@ -243,7 +244,8 @@ class LauncherApp:
 
         # Game grid state
         self.mode = "PLAYERS"
-        self.filter_on = False
+        self.tab = state.get("tab") if state.get("tab") in Library.TABS else "all"
+        self.pinned = 0                     # games of the "Continue playing" row at the start of shown_games
         self.game_index = 0
         self.nav_direction = None           # Held navigation action ("up", "left", ...)
         self.nav_next_repeat = 0.0
@@ -258,6 +260,7 @@ class LauncherApp:
         self.update_hints()
 
         if self.picker:
+            self._load_snapshot()
             threading.Thread(target=self._scan_games, daemon=True).start()
 
         self.update_loop()
@@ -881,7 +884,11 @@ class LauncherApp:
             self.open_game_menu()
         elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
             self.toggle_favorite()
-        # D-pad, stick, LB/RB and the triggers are polled in poll_navigation()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER:
+            self.switch_tab(-1)
+        elif button == sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER:
+            self.switch_tab(1)
+        # D-pad, stick and the triggers are polled in poll_navigation()
 
     def on_roulette_button(self, button):
         sdl = self.sdl
@@ -1066,12 +1073,8 @@ class LauncherApp:
             self.ui.set_hints([])               # they draw their own, over the screen below
             return
         elif self.mode == "GAMES":
-            hints = [("a", t("hint_play")), ("x", t("hint_surprise"))]
-            joined = len(self.assignments)
-            if joined >= 2:
-                hints.append(("y", t("hint_filter_off") if self.filter_on else t("hint_filter_on", n=joined)))
-            hints += [("start", t("hint_menu")), ("back", t("hint_favorite")),
-                      (("lt", "rt"), t("hint_letter")), ("b", t("hint_back"))]
+            hints = [("a", t("hint_play")), ("x", t("hint_surprise")), ("start", t("hint_menu")),
+                     ("back", t("hint_favorite")), (("lt", "rt"), t("hint_letter")), ("b", t("hint_back"))]
         else:
             if self.has_game_args:
                 start = t("hint_launch_game")
@@ -1117,13 +1120,46 @@ class LauncherApp:
         self.shown_games = []
         threading.Thread(target=self._scan_games, daemon=True).start()
 
-    def on_games_scanned(self, games):
+    def _load_snapshot(self):
+        """
+        The games of the last scan, shown at once while the folders are
+        scanned again (on_games_scanned then brings in what changed).
+        """
+        try:
+            games = Library.from_snapshot(self.emu.settings.load_cache("gamelist"))
+            overrides = self.emu.settings.sections.get("players", {})
+            for game in games:
+                self.art.resolve(game)
+                value = overrides.get((game.get("title_id") or "").lower()) or overrides.get(game["title"].lower())
+                if value and value.strip().isdigit():
+                    game["players"] = int(value)
+        except Exception as e:
+            log("EXCEPTION", "Could not read the saved game list", e)
+            games = []
+        if not games:
+            return
+        log("INFO", "Game list from the last scan", f"{len(games)} game(s)")
         self.games = games
         self.games_loaded = True
+        self.from_snapshot = True
+        self.order_games()
+        last = self._last_game()
+        if last:
+            self.game_index = self.games.index(last)
+            self.ui.set_backdrop(last)
+
+    def on_games_scanned(self, games):
         log("INFO", "Game picker", f"{len(games)} game(s)")
+        if self.from_snapshot:
+            self.from_snapshot = False
+            if self._merge_scan(games):
+                return
+        self.games = games
+        self.games_loaded = True
         if not games:
             self.picker = False                 # nothing to pick: START starts the emulator
         else:
+            self.emu.settings.save_cache("gamelist", Library.snapshot(games))
             self.order_games()
             self.art.start(self.games)          # fetch missing pictures in the background
             last = self._last_game()
@@ -1138,6 +1174,43 @@ class LauncherApp:
                 self.show_games()
             else:
                 self.force_launch()
+
+    def _merge_scan(self, games):
+        """
+        The scan finished while the grid shows the games of the last one.
+        The same games (the usual case): their details are updated in place,
+        the grid keeps its selection and does not move. Otherwise the new
+        list replaces the old one, keeping the selected game if it is there.
+
+        Returns:
+            bool: True when everything was handled here.
+        """
+        if not games:
+            return False
+        self.emu.settings.save_cache("gamelist", Library.snapshot(games))
+        old = {game["path"]: game for game in self.games}
+        if set(old) == {game["path"] for game in games}:
+            for game in games:
+                current = old[game["path"]]
+                fresh = {key: game.get(key) for key in Library.SNAPSHOT_KEYS + ("cover", "background")}
+                if any(current.get(key) != value for key, value in fresh.items()):
+                    current.update(fresh)
+                    self.ui.grid.forget(current)
+            changed = True
+        else:
+            selected = self.shown_games[self.game_index]["path"] if self.shown_games else None
+            self.games = games
+            self.order_games()
+            self.shown_games = []
+            changed = True
+            if selected:
+                self.game_index = next((i for i, g in enumerate(self.games) if g["path"] == selected), 0)
+        self.art.start(self.games)
+        self.update_hints()
+        if changed and self.mode == "GAMES" and not self.menu.active:
+            self._apply_filter()
+            self._show_grid()
+        return True
 
     def _last_game(self):
         last = (self.emu.settings.state or {}).get("last_game")
@@ -1233,12 +1306,18 @@ class LauncherApp:
 
     def _reorder_keeping(self, game):
         """Re-sort the grid, keeping `game` selected."""
-        self.order_games()
-        self.shown_games = []
-        self._apply_filter()
-        if game in self.shown_games:
-            self.game_index = self.shown_games.index(game)
+        self._regroup(game)
         self.show_games()
+
+    def _select(self, game, in_rest=True):
+        """Select `game` - in the part after the "Continue playing" row when it is there too."""
+        if game not in self.shown_games:
+            return
+        rest = self.shown_games[self.pinned:]
+        if in_rest and game in rest:
+            self.game_index = self.pinned + rest.index(game)
+        else:
+            self.game_index = self.shown_games.index(game)
 
     # ========================================================================
     # ACHIEVEMENTS
@@ -1343,11 +1422,11 @@ class LauncherApp:
         self.sounds.play("back")
         self.mode = "GAMES"
         if chosen is not None:
-            if chosen not in self.shown_games:
-                self.filter_on = False
+            if chosen not in self.shown_games[self.pinned:]:
+                self.tab = "all"
                 self._apply_filter()
-            if chosen in self.shown_games:
-                self.game_index = self.shown_games.index(chosen)
+            if chosen in self.shown_games[self.pinned:]:
+                self.game_index = self.shown_games.index(chosen, self.pinned)
         self.show_games()
 
     # ========================================================================
@@ -1355,23 +1434,55 @@ class LauncherApp:
     # ========================================================================
     def _apply_filter(self):
         """
-        Games on screen: every game that is not hidden, or only those that
-        take every joined player. The list object is kept when its content
-        did not change, so the grid does not scroll back to the top.
+        Games on screen for the current tab (Core/Library.tab_games), the
+        "Continue playing" row first on the "All" tab. The selected game
+        stays selected - in the same part of the list when it is in both.
+        The list object is kept when its content did not change, so the
+        grid does not scroll back to the top.
         """
         joined = len(self.assignments)
-        if joined < 2:
-            self.filter_on = False
-        selected = self.shown_games[self.game_index] if 0 <= self.game_index < len(self.shown_games) else None
-        games = [g for g in self.games if self.show_hidden or not g.get("hidden")]
-        if self.filter_on:
-            games = [g for g in games if (g.get("players") or 0) >= joined]
-        if games != self.shown_games or not self.shown_games:
-            self.shown_games = games
+        tabs = Library.available_tabs(self.games, joined, self.show_hidden)
+        if self.tab not in tabs:
+            self.tab = "all"
+        old_index, old_pinned = self.game_index, self.pinned
+        selected = self.shown_games[old_index] if 0 <= old_index < len(self.shown_games) else None
+        games, pinned = Library.tab_games(self.games, self.tab, joined, self.show_hidden,
+                                          continue_row=self.sort_mode != "recent")
+        if games != self.shown_games or pinned != self.pinned or not self.shown_games:
+            self.shown_games, self.pinned = games, pinned
         if selected in self.shown_games:
-            self.game_index = self.shown_games.index(selected)
+            in_rest = old_index >= old_pinned and selected in self.shown_games[self.pinned:]
+            self.game_index = self.shown_games.index(selected, self.pinned if in_rest else 0)
         else:
             self.game_index = min(self.game_index, max(0, len(self.shown_games) - 1))
+
+    def _tab_entries(self):
+        """[(key, label, count)] for the tabs over the grid."""
+        joined = len(self.assignments)
+        entries = []
+        for key in Library.available_tabs(self.games, joined, self.show_hidden):
+            games, pinned = Library.tab_games(self.games, key, joined, self.show_hidden, continue_row=False)
+            entries.append((key, t(f"tab_{key}", n=joined), len(games)))
+        return entries
+
+    def switch_tab(self, delta=None, to=None):
+        """LB / RB in the grid: the previous / next tab (or straight to one)."""
+        tabs = Library.available_tabs(self.games, len(self.assignments), self.show_hidden)
+        if to is None:
+            current = tabs.index(self.tab) if self.tab in tabs else 0
+            to = tabs[(current + delta) % len(tabs)]
+        if to not in tabs or to == self.tab:
+            return
+        selected = self.shown_games[self.game_index] if self.shown_games else None
+        self.tab = to
+        self.emu.settings.save_state(tab=to)
+        self.sounds.play("toggle")
+        self.shown_games = []
+        self._apply_filter()
+        rest = self.shown_games[self.pinned:]
+        self.game_index = self.pinned + rest.index(selected) if selected in rest else 0
+        self._show_grid()
+        self.update_hints()
 
     def show_games(self):
         self.mode = "GAMES"
@@ -1388,8 +1499,9 @@ class LauncherApp:
         """Hand the games on screen, the selection and what the header says to the UI."""
         joined = len(self.assignments)
         self.ui.show_games(self.shown_games, self.game_index, players=joined,
-                           filter_players=joined if self.filter_on else 0,
-                           sort_label=t("sort_" + self.sort_mode))
+                           filter_players=joined if self.tab == "players" else 0,
+                           sort_label=t("sort_" + self.sort_mode) if self.tab != "recent" else "",
+                           pinned=self.pinned, tabs=self._tab_entries(), tab=self.tab)
 
     def show_players(self):
         self.mode = "PLAYERS"
@@ -1403,11 +1515,10 @@ class LauncherApp:
         self.update_hints()
 
     def toggle_filter(self):
+        """Y in the grid: the "for N players" tab, and back to all games."""
         if len(self.assignments) < 2 or not self.games_loaded:
             return
-        self.filter_on = not self.filter_on
-        self.sounds.play("toggle")
-        self.show_games()
+        self.switch_tab(to="all" if self.tab == "players" else "players")
 
     def move_game_selection(self, action):
         """
@@ -1415,28 +1526,15 @@ class LauncherApp:
 
         Args:
             action (str): "left"/"right" (one game, wrapping), "up"/"down"
-                          (one row), "page_up"/"page_down" (one screen).
+                          (one row), "page_up"/"page_down" (the previous /
+                          next tab).
         """
         if self.mode != "GAMES" or not self.shown_games or self.ui.alert_mode or self.process:
             return
-        count = len(self.shown_games)
-        columns = self.ui.games_columns()
-        index = self.game_index
-        if action == "left":
-            index = (index - 1) % count
-        elif action == "right":
-            index = (index + 1) % count
-        elif action == "up":
-            index = index - columns if index - columns >= 0 else index
-        elif action == "down":
-            if index + columns < count:
-                index += columns
-            elif index // columns < (count - 1) // columns:
-                index = count - 1          # partial last row: go to its last game
-        elif action == "page_up":
-            index = max(0, index - self.ui.games_page())
-        elif action == "page_down":
-            index = min(count - 1, index + self.ui.games_page())
+        if action in ("page_up", "page_down"):
+            self.switch_tab(-1 if action == "page_up" else 1)
+            return
+        index = self.ui.grid.step(self.game_index, action)
         if index != self.game_index:
             self.game_index = index
             self.sounds.play("move")
@@ -1477,9 +1575,9 @@ class LauncherApp:
                 action = "left"
             elif pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT) or stick_x > STICK_THRESHOLD:
                 action = "right"
-            elif pressed(sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER):
+            elif self.mode == "MENU" and pressed(sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER):
                 action = "page_up"
-            elif pressed(sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
+            elif self.mode == "MENU" and pressed(sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
                 action = "page_down"
             if action:
                 self._set_browsing(pad)
@@ -1537,7 +1635,12 @@ class LauncherApp:
             self.emu.settings.save_state(sort=self.sort_mode)
             self._reorder_keeping(self.shown_games[self.game_index])
             self.ui.show_toast(t("hint_sort", mode=t("sort_az")), COLOR["ACCENT"])
-        games, count = self.shown_games, len(self.shown_games)
+            if self.tab == "recent":            # recent is its own order: letters need the full list
+                self.switch_tab(to="all")
+        pinned = self.pinned
+        games, count = self.shown_games[pinned:], len(self.shown_games) - pinned
+        if count <= 0:
+            return
         letter = self._letter
 
         def group_start(i):
@@ -1546,7 +1649,7 @@ class LauncherApp:
                 i -= 1
             return i
 
-        index = self.game_index
+        index = max(0, self.game_index - pinned)
         if direction > 0:
             start = group_start(index)
             index = start
@@ -1556,7 +1659,7 @@ class LauncherApp:
         else:
             start = group_start(index)
             index = group_start(start - 1) if start > 0 else group_start(count - 1)
-        self.game_index = index
+        self.game_index = index + pinned
         self.sounds.play("move")
         self._show_grid()
         self.ui.grid.flash_letter(letter(games[index]))
@@ -2139,11 +2242,11 @@ class LauncherApp:
 
     def _regroup(self, game):
         """Sort and filter the games again, keeping `game` selected if it is still shown."""
+        in_rest = self.game_index >= self.pinned
         self.order_games()
         self.shown_games = []
         self._apply_filter()
-        if game in self.shown_games:
-            self.game_index = self.shown_games.index(game)
+        self._select(game, in_rest)
 
     def _game_menu_closed(self, game):
         """Favourite, hidden, sort order may have changed: rebuild the grid around the game."""

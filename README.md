@@ -24,7 +24,9 @@ Besides the players, the launcher sets three Eden options, each of which can be 
 ## Features
 
 - **Xbox button layout**: the A button (bottom) is Switch A, so you accelerate in Mario Kart with the button labelled A. A Nintendo (positional) layout and your own Eden profiles are available per player.
-- **Game grid**: every game in rows and columns, each with a big local co-op badge, the selected one framed with a glow in the colour of its art; title and facts on top, the game's blurred art behind. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** move a page, **LT / RT** jump to the next letter.
+- **Game grid**: every game in rows and columns, each with a big local co-op badge, the selected one framed with a glow in the colour of its art; title and facts on top, the game's blurred art behind. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** switch between tabs (All · Favourites · Recent · For N players · Switch 2), **LT / RT** jump to the next letter.
+- **Continue playing**: the games of the last 30 days sit in their own row at the top of the grid.
+- **Instant start**: the list of the last scan shows up at once, while the folders are checked again in the background.
 - **Player count on every cover**: green if the game supports everyone who joined, red if not. **Y** shows only games that fit your group.
 - **Roulette** (**X**): a spinning strip that picks a random game, only among games that support all joined players.
 - **A menu for every game** (**Start**): favourite, hide, sort order, split-screen layout, which emulator starts it, and **restore a save backup** without leaving the couch.
@@ -51,9 +53,9 @@ Besides the players, the launcher sets three Eden options, each of which can be 
 | Players | **Start** | Choose a game |
 | Games | **A** / **B** | Play / back |
 | Games | **X** | Roulette |
-| Games | **Y** | Only games for all players |
+| Games | **Y** | Only games for all players (the "For N players" tab) |
 | Games | **Start** / **Back** | The game's menu / favourite |
-| Games | **LB RB** / **LT RT** | Page / next letter |
+| Games | **LB RB** / **LT RT** | Tabs / next letter |
 | In game | **Back + LB + RB** | Close menu (change players, another game, desktop, or resume) |
 
 ## Setup

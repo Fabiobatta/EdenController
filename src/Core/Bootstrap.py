@@ -113,7 +113,7 @@ def selftest(emulator):
     """
     try:
         import tkinter as tk
-        from . import App, Menu, Stats, Theme, Update  # noqa: F401
+        from . import App, Library, Menu, Stats, Theme, Update  # noqa: F401
         from .Paths import resource_path
         root = tk.Tk()
         root.withdraw()

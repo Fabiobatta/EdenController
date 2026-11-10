@@ -34,10 +34,11 @@ from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
 from .Theme import COLOR
 
-TILE = 136                      # 720p baseline, square
+TILE = 128                      # 720p baseline, square
 GROW = 1.12                     # the focused tile
-GAP = 20
-TOP = 150                       # first row
+GAP = 18
+TOP = 182                       # first row
+SECTION = 26                    # extra space under the "Continue playing" row, for its caption
 BOTTOM = 86                     # space kept for the hint dock
 SIDE = 64
 RADIUS = 14
@@ -97,19 +98,74 @@ def grid_shape(width, height, tile, gap, top, bottom, side):
     return columns, rows
 
 
-def first_visible_row(index, columns, rows, first_row, count):
+def scroll_rows(row, rows, first_row, total_rows):
     """
-    The top row on screen after moving to `index`: it changes only when the
-    selection leaves the visible rows, and never shows empty rows past the
-    end.
+    The top row on screen once `row` must be visible: it changes only when
+    the row is off screen, and never shows empty rows past the end.
     """
-    row = index // columns
     if row < first_row:
         first_row = row
     elif row >= first_row + rows:
         first_row = row - rows + 1
-    last_row = (count - 1) // columns
-    return max(0, min(first_row, max(0, last_row - rows + 1)))
+    return max(0, min(first_row, max(0, total_rows - rows)))
+
+
+def first_visible_row(index, columns, rows, first_row, count):
+    """scroll_rows() for a plain grid of `count` games, `columns` per row."""
+    return scroll_rows(index // columns, rows, first_row, (count - 1) // columns + 1)
+
+
+class Layout:
+    """
+    Where each game sits: an optional first row of `pinned` games ("Continue
+    playing"), then every other game, `columns` per row.
+    """
+
+    def __init__(self, count, columns, pinned=0):
+        self.count, self.columns = count, max(1, columns)
+        self.pinned = pinned if 0 < pinned < count else 0
+
+    def cell(self, index):
+        """(row, column) of a game."""
+        if index < self.pinned:
+            return 0, index
+        rest = index - self.pinned
+        return (1 if self.pinned else 0) + rest // self.columns, rest % self.columns
+
+    @property
+    def rows(self):
+        rest = self.count - self.pinned
+        return (1 if self.pinned else 0) + (rest - 1) // self.columns + 1 if rest > 0 else 1
+
+    def row_length(self, row):
+        if self.pinned and row == 0:
+            return self.pinned
+        first = self.pinned + (row - (1 if self.pinned else 0)) * self.columns
+        return max(0, min(self.columns, self.count - first))
+
+    def index(self, row, column):
+        """The game at (row, column), the column clamped to that row's length."""
+        column = max(0, min(column, self.row_length(row) - 1))
+        if self.pinned and row == 0:
+            return column
+        return self.pinned + (row - (1 if self.pinned else 0)) * self.columns + column
+
+    def step(self, index, action):
+        """
+        The game reached from `index` with "left" / "right" (the next game,
+        wrapping around the list) or "up" / "down" (the row above / below,
+        same column, or the last game of a shorter row).
+        """
+        if action == "left":
+            return (index - 1) % self.count
+        if action == "right":
+            return (index + 1) % self.count
+        row, column = self.cell(index)
+        if action == "up" and row > 0:
+            return self.index(row - 1, column)
+        if action == "down" and row < self.rows - 1:
+            return self.index(row + 1, column)
+        return index
 
 
 class GameGrid:
@@ -123,6 +179,10 @@ class GameGrid:
         self.columns = 1
         self.rows = 1
         self.first_row = 0
+        self.pinned = 0                 # games in the "Continue playing" row
+        self.layout = Layout(0, 1)
+        self.tabs = []                  # [(key, label, count)] over the grid
+        self.tab = "all"
         self.sort_label = ""
         self.nav = None                 # (label, colour) of the player browsing
         self._masters = OrderedDict()   # tile key -> PIL image at the focused size
@@ -141,12 +201,20 @@ class GameGrid:
     # ------------------------------------------------------------------
     # State
     # ------------------------------------------------------------------
-    def set(self, games, index, players, filter_players):
+    def set(self, games, index, players, filter_players, pinned=0, tabs=None, tab=None):
         if games is not self.games:
             self.first_row = 0
         self.games, self.index = games, index
         self.players, self.filter_players = players, filter_players
+        self.pinned = pinned
+        if tabs is not None:
+            self.tabs, self.tab = tabs, tab
+        self.layout = Layout(len(games), self.columns, pinned)
         self.loading = False
+
+    def step(self, index, action):
+        """The game reached from `index` by a direction (see Layout.step)."""
+        return self.layout.step(index, action) if self.games else index
 
     def set_loading(self):
         self.loading = True
@@ -363,22 +431,31 @@ class GameGrid:
     def _metrics(self):
         ui = self.ui
         tile, gap = ui.px(TILE), ui.px(GAP)
-        self.columns, self.rows = grid_shape(ui.width, ui.height, tile, gap, ui.px(TOP), ui.px(BOTTOM),
-                                             ui.px(SIDE))
+        section = ui.px(SECTION) if self.pinned else 0
+        self.columns, self.rows = grid_shape(ui.width, ui.height - section, tile, gap, ui.px(TOP),
+                                             ui.px(BOTTOM), ui.px(SIDE))
+        self.layout = Layout(len(self.games), self.columns, self.pinned)
         grid_w = self.columns * tile + (self.columns - 1) * gap
         return tile, gap, (ui.width - grid_w) // 2, ui.px(TOP)
 
+    def _row_y(self, row, metrics, first_row=None):
+        """Top of `row` on screen with `first_row` at the top (default: the current one)."""
+        tile, gap, _, top = metrics
+        first_row = self.first_row if first_row is None else first_row
+        y = top + (row - first_row) * (tile + gap)
+        if self.layout.pinned and first_row == 0 and row >= 1:
+            y += self.ui.px(SECTION)            # room for the "All games" caption
+        return y
+
     def _center(self, index, metrics, first_row=None):
         """Centre of the tile at `index` with `first_row` (default: the current one) at the top."""
-        tile, gap, left, top = metrics
-        first_row = self.first_row if first_row is None else first_row
-        row, column = divmod(index, self.columns)
-        return (left + column * (tile + gap) + tile / 2,
-                top + (row - first_row) * (tile + gap) + tile / 2)
+        tile, gap, left, _ = metrics
+        row, column = self.layout.cell(index)
+        return left + column * (tile + gap) + tile / 2, self._row_y(row, metrics, first_row) + tile / 2
 
     def _visible(self, first_row):
-        start = max(0, first_row * self.columns)
-        return range(start, min(len(self.games), (first_row + self.rows) * self.columns))
+        rows = range(first_row, first_row + self.rows)
+        return [i for i in range(len(self.games)) if self.layout.cell(i)[0] in rows]
 
     # ------------------------------------------------------------------
     # Drawing
@@ -401,17 +478,19 @@ class GameGrid:
         self.index = max(0, min(self.index, count - 1))
         selected = self.games[self.index]
         previous_first = self.first_row
-        self.first_row = first_visible_row(self.index, self.columns, self.rows, self.first_row, count)
+        self.first_row = scroll_rows(self.layout.cell(self.index)[0], self.rows, self.first_row, self.layout.rows)
 
-        layout = (id(self.games), count, ui.width, ui.height, self.players, self.columns, self.rows)
+        layout = (id(self.games), count, ui.width, ui.height, self.players, self.columns, self.rows, self.pinned)
         shown = self._shown
         ui.animator.finish("grid")
         same = shown is not None and shown[0] == layout and self._items and not full
         if same and self.first_row == previous_first:
             self._move(metrics, shown[1])
         elif same and abs(self.first_row - previous_first) == 1 and ui.animations:
+            row = self.layout.cell(self.index)[0]
+            distance = self._row_y(row, metrics, previous_first) - self._row_y(row, metrics)
             self._build(metrics)
-            self._slide(metrics, (self.first_row - previous_first) * (metrics[0] + metrics[1]))
+            self._slide(metrics, distance)
         else:
             self._build(metrics)
             if full or shown is None or shown[0] != layout:
@@ -434,6 +513,29 @@ class GameGrid:
             size = sizes[-1] if i == self.index else sizes[0]
             self._items[i] = c.create_image(x, y, image=self._square(self.games[i], size),
                                             tags=("games", "tiles", f"tile{i}"))
+        if self.layout.pinned and self.first_row == 0:
+            # The two sections of the "All" tab, captioned
+            ui, left = self.ui, metrics[2]
+            tile, gap, _, top = metrics
+            font = ui.font(11)
+            if self.columns - self.layout.pinned >= 2:
+                # beside the row, in the room its few games leave free
+                x = left + self.layout.pinned * (tile + gap) + gap
+                y = top + tile // 2
+                c.create_rectangle(x, y - ui.px(22), x + ui.px(4), y + ui.px(22), fill=COLOR["ACCENT"], width=0,
+                                   tags=("games", "tiles"))
+                c.create_text(x + ui.px(18), y - ui.px(10), text=t("games_continue"), anchor="w",
+                              fill=COLOR["TEXT"], font=ui.font(17, "bold"), tags=("games", "tiles"))
+                c.create_text(x + ui.px(18), y + ui.px(14), text=t("games_continue_hint"), anchor="w",
+                              fill=COLOR["TEXT_DIM"], font=ui.font(12, False), tags=("games", "tiles"))
+            else:
+                c.create_text(left + ui.px(2), top - ui.px(14), text=t("games_continue").upper(), anchor="w",
+                              fill=COLOR["TEXT_FAINT"], font=font, tags=("games", "tiles"))
+            y = self._row_y(1, metrics) - ui.px(GAP) // 2 - ui.px(SECTION) // 2
+            c.create_text(left + ui.px(2), y, text=t("games_all").upper(), anchor="w",
+                          fill=COLOR["TEXT_FAINT"], font=font, tags=("games", "tiles"))
+            c.tag_lower("tiles")
+            c.tag_lower("bg")
         self._place_ring(metrics)
 
     def _move(self, metrics, old):
@@ -505,9 +607,9 @@ class GameGrid:
         if ui.animator.active("grid") or ui.animator.active("grid-size") or ui.animator.active("ring"):
             self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
             return
-        count, sizes = len(self.games), self._sizes()
-        near = range(max(0, (self.first_row - 1) * self.columns),
-                     min(count, (self.first_row + self.rows + 1) * self.columns))
+        sizes = self._sizes()
+        rows = range(self.first_row - 1, self.first_row + self.rows + 1)
+        near = [i for i in range(len(self.games)) if self.layout.cell(i)[0] in rows]
         order = sorted(near, key=lambda i: abs(i - self.index))
         made = 0
         for i in order:
@@ -590,8 +692,9 @@ class GameGrid:
         c.delete("games-header")
         tags = ("games", "games-header")
         left = ui.px(SIDE)
+        self._draw_tabs(left, ui.px(52), tags)
 
-        x, y = left, ui.px(56)
+        x, y = left, ui.px(102)
         if selected.get("favorite"):
             star_h = ui.px(28)
             star = ui.photo(("star", star_h, COLOR["GOLD"]), lambda: Glyphs.star(star_h, COLOR["GOLD"]))
@@ -603,7 +706,7 @@ class GameGrid:
         c.create_text(x, y, anchor="w", fill=COLOR["TEXT"], font=font, tags=tags,
                       text=ui.truncate(selected["title"], font, room))
 
-        x, y = left, ui.px(102)
+        x, y = left, ui.px(144)
         players = selected.get("players")
         if players:
             state = badge_state(players, self.players)
@@ -631,7 +734,8 @@ class GameGrid:
         if selected.get("hidden"):
             x += self._chip(x, y, t("games_hidden"), COLOR["TEXT_DIM"], tags) + ui.px(10)
 
-        caption = f"{self.index + 1} / {count}"
+        pinned = self.layout.pinned
+        caption = t("games_continue") if self.index < pinned else f"{self.index - pinned + 1} / {count - pinned}"
         if self.sort_label:
             caption += f"   ·   {self.sort_label.upper()}"
         if self.filter_players:
@@ -639,11 +743,37 @@ class GameGrid:
         c.create_text(ui.width - ui.px(SIDE), y, text=caption, anchor="e", fill=COLOR["TEXT_FAINT"],
                       font=ui.font(12), tags=tags)
 
+    def _draw_tabs(self, x, y, tags):
+        """The tabs over the grid: [LB] All 42 · Favourites 5 · ... [RB], the current one lit."""
+        ui, c = self.ui, self.ui.canvas
+        if len(self.tabs) < 2:
+            return
+        h = ui.px(34)
+        glyph = ui.photo(("glyph", "lb", int(ui.px(14) * 1.5)), lambda: Glyphs.button("lb", int(ui.px(14) * 1.5)))
+        c.create_image(x, y, image=glyph, anchor="w", tags=tags)
+        x += glyph.width() + ui.px(10)
+        font, count_font = ui.font(14), ui.font(12, False)
+        for key, label, count in self.tabs:
+            current = key == self.tab
+            number = str(count)
+            w = font.measure(label) + ui.px(8) + count_font.measure(number) + ui.px(32)
+            pill = ui.photo(("tab", w, h, current, COLOR["ACCENT"]), lambda: Glyphs.panel(
+                w, h, h // 2, COLOR["ROW_SELECTED"] if current else COLOR["CHIP"],
+                outline=(COLOR["ACCENT"] if current else COLOR["EDGE"], max(1, ui.px(1.5 if current else 1)))))
+            c.create_image(x, y, image=pill, anchor="w", tags=tags)
+            c.create_text(x + ui.px(16), y, text=label, anchor="w", font=font, tags=tags,
+                          fill=COLOR["TEXT"] if current else COLOR["TEXT_DIM"])
+            c.create_text(x + w - ui.px(16), y, text=number, anchor="e", font=count_font, tags=tags,
+                          fill=COLOR["TEXT_DIM"] if current else COLOR["TEXT_FAINT"])
+            x += w + ui.px(8)
+        glyph = ui.photo(("glyph", "rb", int(ui.px(14) * 1.5)), lambda: Glyphs.button("rb", int(ui.px(14) * 1.5)))
+        c.create_image(x + ui.px(2), y, image=glyph, anchor="w", tags=tags)
+
     def _draw_scrollbar(self, metrics, count):
         """A thin bar on the right edge: where the visible rows are in the whole list."""
         ui, c = self.ui, self.ui.canvas
         c.delete("games-scroll")
-        rows_total = (count - 1) // self.columns + 1
+        rows_total = self.layout.rows
         if rows_total <= self.rows:
             return
         tile, gap, _, top = metrics

@@ -1085,13 +1085,20 @@ class LauncherUi:
     # ========================================================================
     # GAME GRID
     # ========================================================================
-    def show_games(self, games, index, players=0, filter_players=0, sort_label=None):
-        """Show (or update) the game browser; see Core/GameGrid.py."""
+    def show_games(self, games, index, players=0, filter_players=0, sort_label=None, pinned=0, tabs=None,
+                   tab=None):
+        """
+        Show (or update) the game grid; see Core/GameGrid.py.
+
+        Args:
+            pinned (int): how many games at the start form the "Continue playing" row.
+            tabs (list): [(key, label, count)] over the grid, tab the current key.
+        """
         entering = self.view != "games"
         self.view = "games"
         if sort_label is not None:
             self.grid.sort_label = sort_label
-        self.grid.set(games, index, players, filter_players)
+        self.grid.set(games, index, players, filter_players, pinned, tabs, tab)
         if entering:
             self.fade(self.redraw)
         elif not self._hold_draw:

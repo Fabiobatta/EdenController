@@ -24,7 +24,7 @@ from Core.Process import mount_appimage, unmount_appimage
 
 from . import Config, Games, Switch
 from .TitleDb import TitleDb
-from .Ini import IniFile, read_bool
+from .Ini import IniFile, read_bool, unquote
 
 # Environment overrides
 ENV_SDL_BACKEND = "EDEN_LAUNCHER_SDL"       # "SDL2" or "SDL3"
@@ -50,6 +50,11 @@ NX2_PROBE = b"NUP directory tree"
 PROBE_CHUNK = 8 * 1024 * 1024
 EMULATORS_SECTION = "emulators"
 LOG_FILE = "eden_log.txt"
+# Games Eden will not boot without the console firmware: before starting one
+# it opens a "Game Requires Firmware" dialog (frontend_common/firmware_manager.h,
+# FIRMWARE_REQUIRED_GAMES - Mario Kart 8 Deluxe, for its Miis)
+FIRMWARE_GAMES = {"0100152000022000"}
+DATA_STORAGE_SECTION = "Data%20Storage"     # Settings::Category::DataStorage, spaces as %20
 LOG_TAIL_BYTES = 256 * 1024
 
 
@@ -848,7 +853,7 @@ class Eden(Emulator):
         Eden user profile (plus the all-zero "device" profile).
         """
         title_id = (game.get("title_id") or "").upper()
-        root = os.path.join(self.user_dir, "nand", "user", "save")
+        root = os.path.join(self.save_dir(), "user", "save")
         if not title_id:
             return None, []
         folders = []
@@ -862,6 +867,54 @@ class Eden(Emulator):
         except OSError:
             pass            # no saves yet
         return root, folders
+
+    # ------------------------------------------------------------------
+    # 4c. Data folders and the firmware
+    # ------------------------------------------------------------------
+    def _data_storage(self, key):
+        """A folder set in Eden's Data Storage settings, None when not set (or not a folder, which Eden ignores)."""
+        config = getattr(self, "config_path", None)
+        try:
+            items = IniFile.load(config).items(DATA_STORAGE_SECTION) if config and os.path.isfile(config) else {}
+        except Exception:
+            return None
+        path = unquote(items.get(key, "")).strip()
+        return os.path.normpath(path) if path and os.path.isdir(path) else None
+
+    def nand_dir(self):
+        """Eden's NAND: Data Storage > nand_directory, else <user>/nand (Common::FS::EdenPath::NANDDir)."""
+        return self._data_storage("nand_directory") or os.path.join(self.user_dir, "nand")
+
+    def save_dir(self):
+        """Where Eden keeps saves (under user/save): save_directory, else the NAND."""
+        return self._data_storage("save_directory") or self.nand_dir()
+
+    def firmware_installed(self):
+        """
+        True if the NAND holds an installed firmware (system contents), False
+        if it holds none, None if it cannot be told. Which version it is - and
+        whether the keys can decrypt it - is not checked.
+        """
+        folder = os.path.join(self.nand_dir(), "system", "Contents", "registered")
+        try:
+            names = os.listdir(folder)
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return None
+        return any(name.lower().endswith(".nca") for name in names)
+
+    def needs_firmware(self, game):
+        if (game.get("title_id") or "").upper() not in FIRMWARE_GAMES:
+            return False
+        installed = self.firmware_installed()
+        log("INFO", "Firmware", {True: "installed", False: "missing", None: "unknown"}[installed]
+            + f" ({self.nand_dir()})")
+        return installed is False
+
+    def window_names(self):
+        stem = os.path.splitext(os.path.basename(self.exe or ""))[0]
+        return sorted({name.lower() for name in (self.display_name, stem, "eden") if name})
 
     def _chosen_exe(self):
         """The emulator named by the emulator_exe setting (absolute, or in the emulator folder)."""

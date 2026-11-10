@@ -2042,5 +2042,75 @@ class MotionTests(unittest.TestCase):
         self.assertEqual(len(rounded_points(0, 0, 0, 0, 5)), 24)  # a collapsed box still has its points
 
 
+class FirmwareTests(unittest.TestCase):
+    """Mario Kart 8 Deluxe and the firmware Eden 0.2 checks for (Eden/Eden.py)."""
+
+    def _eden(self, tmp, nand=None):
+        from Eden import Eden
+        eden = Eden()
+        eden.user_dir = tmp
+        eden.config_path = os.path.join(tmp, "config", "qt-config.ini")
+        os.makedirs(os.path.dirname(eden.config_path), exist_ok=True)
+        lines = ["[Controls]", "player_0_connected=true", ""]
+        if nand:
+            lines += ["[Data%20Storage]", "nand_directory\\default=false", f"nand_directory={nand}", ""]
+        with open(eden.config_path, "w") as f:
+            f.write("\n".join(lines))
+        return eden
+
+    def _install(self, nand, count=3):
+        folder = os.path.join(nand, "system", "Contents", "registered")
+        os.makedirs(folder, exist_ok=True)
+        for n in range(count):
+            os.makedirs(os.path.join(folder, f"{n:032x}.nca"))
+
+    def test_mario_kart_without_firmware(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eden = self._eden(tmp)
+            mk8 = {"title": "Mario Kart 8 Deluxe", "title_id": "0100152000022000"}
+            self.assertFalse(eden.firmware_installed())
+            self.assertTrue(eden.needs_firmware(mk8))
+            self.assertFalse(eden.needs_firmware({"title": "Other", "title_id": "0100000000010000"}))
+            self._install(os.path.join(tmp, "nand"))
+            self.assertTrue(eden.firmware_installed())
+            self.assertFalse(eden.needs_firmware(mk8))
+
+    def test_nand_folder_from_the_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            nand = os.path.join(tmp, "elsewhere", "nand")
+            os.makedirs(nand)
+            eden = self._eden(tmp, nand=nand.replace(os.sep, "/") + "/")
+            self.assertEqual(os.path.normcase(eden.nand_dir()), os.path.normcase(os.path.normpath(nand)))
+            self._install(nand)
+            self.assertTrue(eden.firmware_installed())
+            self.assertEqual(os.path.normcase(eden.save_folders({"title_id": "0100152000022000"})[0] or
+                                              os.path.join(nand, "user", "save")),
+                             os.path.normcase(os.path.join(nand, "user", "save")))
+
+    def test_missing_nand_folder_falls_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            eden = self._eden(tmp, nand=os.path.join(tmp, "gone"))
+            self.assertEqual(eden.nand_dir(), os.path.join(tmp, "nand"))
+
+
+class DialogTests(unittest.TestCase):
+    """Telling the emulator's dialogs from its main windows (Core/Process.py)."""
+
+    def test_pick_dialogs(self):
+        from Core.Process import pick_dialogs
+        windows = [(1, "Eden | v0.2.1 | Mario Kart 8 Deluxe", False),
+                   (2, "Game Requires Firmware", False),
+                   (3, "", False),
+                   (4, "Eden", True),
+                   (5, "Il gioco richiede il firmware", False)]
+        self.assertEqual(pick_dialogs(windows, ["eden"]),
+                         [(2, "Game Requires Firmware"), (4, "Eden"), (5, "Il gioco richiede il firmware")])
+
+    def test_no_dialogs_outside_windows(self):
+        from Core.Process import find_dialogs
+        if sys.platform != "win32":
+            self.assertEqual(find_dialogs(types.SimpleNamespace(poll=lambda: None, pid=1), ["eden"]), [])
+
+
 if __name__ == "__main__":
     unittest.main()

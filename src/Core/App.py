@@ -50,7 +50,7 @@ from .I18n import STRINGS, last_played_label, players_label, playtime_label, set
 from .Log import log
 from .Menu import Menu
 from .Paths import base_dir
-from .Process import launch, request_close
+from .Process import answer_dialog, dialog_open, find_dialogs, launch, request_close
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
@@ -98,6 +98,7 @@ DPAD_BUTTONS = ("SDL_CONTROLLER_BUTTON_DPAD_UP", "SDL_CONTROLLER_BUTTON_DPAD_DOW
                 "SDL_CONTROLLER_BUTTON_DPAD_LEFT", "SDL_CONTROLLER_BUTTON_DPAD_RIGHT")
 TRIGGER_PRESSED = 0.5
 HELD_POLL_S = 0.1
+DIALOG_POLL_S = 0.5                # how often the emulator's windows are checked for a dialog
 BATTERY_POLL_S = 20.0              # controller batteries are read this often
 
 # kill_combo button names -> button picture
@@ -210,6 +211,9 @@ class LauncherApp:
         self.launched_at = 0.0
         self._splash_job = None
         self._exit_job = None
+        self._dialog = None                 # (hwnd, title) of the emulator's dialog being asked about
+        self._dialogs_seen = set()          # dialogs already asked about in this game
+        self._dialog_next = 0.0
         self._mode_before_splash = "GAMES"
         self._loop_errors = 0
         self._trigger_held = {}             # {instance id: (LT, RT)} for the letter jump
@@ -311,6 +315,8 @@ class LauncherApp:
             self.kill_and_quit()
         elif self.ui.alert_mode == "CONFIRM":
             self._answer_confirm(True)
+        elif self.ui.alert_mode == "EMU_DIALOG":
+            self._answer_dialog(True)
         elif self.ui.alert_mode == "GAME_FAILED":
             self._close_failed_alert()
         elif self.closing or self.mode == "SPLASH":
@@ -333,6 +339,8 @@ class LauncherApp:
             return
         if self.ui.alert_mode == "GAME_FAILED":
             self._close_failed_alert()
+        elif self.ui.alert_mode == "EMU_DIALOG":
+            self._answer_dialog(False)
         elif self.ui.alert_mode:
             self.ui.close_alert()
         elif self.mode == "SPLASH":
@@ -710,7 +718,10 @@ class LauncherApp:
             self._poll_closing()
         elif self.process and not self.ui.alert_mode:
             self._check_process()
-            if self.process and self.kill_combo_pressed():
+            if self.process and now >= self._dialog_next:
+                self._dialog_next = now + DIALOG_POLL_S
+                self._watch_dialogs()
+            if self.process and not self.ui.alert_mode and self.kill_combo_pressed():
                 self.root.deiconify()  # Bring launcher to foreground
                 log("INFO", "Kill combo detected - showing menu")
                 self._held, self._held_next = None, 0.0
@@ -728,6 +739,11 @@ class LauncherApp:
             self.on_pads_changed()
         if self.ui.alert_mode == "KILL_CONFIRM":
             self.report_held_buttons()
+        if self.ui.alert_mode == "EMU_DIALOG" and self._dialog and not dialog_open(self._dialog[0]):
+            log("INFO", "The emulator's dialog was closed outside the launcher", self._dialog[1])
+            self._dialog = None
+            self.ui.close_alert()
+            self.root.withdraw()
         if now >= self._battery_next and not self.process:
             self._battery_next = now + BATTERY_POLL_S
             self.poll_batteries()
@@ -828,6 +844,9 @@ class LauncherApp:
             elif button == sdl.SDL_CONTROLLER_BUTTON_B:
                 self.ui.close_alert()
                 self.root.withdraw()                # Cancel, resume game
+        elif mode == "EMU_DIALOG":
+            if button in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
+                self._answer_dialog(button == sdl.SDL_CONTROLLER_BUTTON_A)
         elif mode == "GAME_FAILED":
             if button in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
                 self.sounds.play("back")
@@ -847,10 +866,39 @@ class LauncherApp:
             self.ui.close_alert()
             self.sounds.play("back")
 
-    def confirm(self, title, text, then):
-        """Ask a yes / no question; then() runs on yes."""
+    def confirm(self, title, text, then, buttons=None):
+        """Ask a yes / no question; then() runs on yes (A). buttons: other labels for A and B."""
         self._confirm = then
-        self.ui.show_alert("CONFIRM", title=title, text=text)
+        self.ui.show_alert("CONFIRM", title=title, text=text, buttons=buttons)
+
+    # ========================================================================
+    # THE EMULATOR'S DIALOGS
+    # ========================================================================
+    def _watch_dialogs(self):
+        """
+        A dialog of the emulator (Eden's "Game Requires Firmware", an error)
+        waits for a mouse click: show it over the launcher and let the
+        players answer it with A (OK) or B (Cancel).
+        """
+        emulator = self.running_emu or self.emu
+        dialogs = [d for d in find_dialogs(self.process, emulator.window_names()) if d[0] not in self._dialogs_seen]
+        if not dialogs:
+            return
+        hwnd, title = dialogs[0]
+        self._dialogs_seen.add(hwnd)
+        self._dialog = (hwnd, title)
+        log("INFO", f"{emulator.display_name} opened a dialog", title)
+        self.root.deiconify()
+        self.ui.show_alert("EMU_DIALOG", name=emulator.display_name, lines=[f"«{title}»"])
+
+    def _answer_dialog(self, accept):
+        dialog, self._dialog = self._dialog, None
+        self.ui.close_alert()
+        if self.process:
+            self.root.withdraw()
+        if dialog:
+            answer_dialog(dialog[0], accept)
+            log("INFO", "Dialog answered", f"{'OK' if accept else 'Cancel'}: {dialog[1]}")
 
     def _answer_confirm(self, yes):
         then, self._confirm = self._confirm, None
@@ -1745,11 +1793,19 @@ class LauncherApp:
         if self.shown_games:
             self.launch_game(self.shown_games[self.game_index])
 
-    def launch_game(self, game, from_roulette=False):
+    def launch_game(self, game, from_roulette=False, firmware_checked=False):
         """Show who plays where for a moment, then start the game."""
         log("INFO", "Game selected", game["path"])
         self.roulette.close()
         self.menu.close()
+        if not firmware_checked and self.emulator_for(game).needs_firmware(game):
+            # Eden would stop at a mouse-only "Game Requires Firmware" dialog
+            name = self.emulator_for(game).display_name
+            self.sounds.play("error")
+            self.confirm(t("fw_title"), t("fw_text", game=game["title"], name=name),
+                         lambda: self.launch_game(game, from_roulette, firmware_checked=True),
+                         buttons=(("a", "fw_anyway"), ("b", "alert_back")))
+            return
         self.sounds.play("launch")
         if not self.ui.animations:
             self._launch_now(game, from_roulette)
@@ -1918,6 +1974,7 @@ class LauncherApp:
                 self.process = launch(cmd_args, emulator.env or self.emu.env)
                 self.running_emu = emulator
                 self.launched_at = time.monotonic()
+                self._dialogs_seen = set()
                 self.sounds.suspend()
             except Exception as e:
                 log("EXCEPTION", "Launch failed", e)

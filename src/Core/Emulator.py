@@ -216,6 +216,14 @@ class Emulator:
         """The last error lines of the emulator's own log, newest last."""
         return []
 
+    def needs_firmware(self, game):
+        """True if `game` will not start because the emulator lacks the console firmware it requires."""
+        return False
+
+    def window_names(self):
+        """Words in the titles of the emulator's main windows (its other windows are dialogs)."""
+        return []
+
     def game_folders(self):
         """((folder, deep scan) pairs, True if they come from the launcher's settings)."""
         return [], False

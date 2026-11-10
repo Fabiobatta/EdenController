@@ -1766,6 +1766,8 @@ class LauncherUi:
         "GAME_FAILED": ("alert_failed_title", "alert_failed_text", "WARN", (("a", "alert_ok"),)),
         "CONFIRM": ("alert_confirm_title", "alert_confirm_text", "TEXT",
                     (("a", "alert_yes"), ("b", "alert_no"))),
+        "EMU_DIALOG": ("alert_dialog_title", "alert_dialog_text", "WARN",
+                       (("a", "alert_dialog_ok"), ("b", "alert_dialog_cancel"))),
     }
 
     def show_alert(self, mode, buttons=None, lines=(), name=None, title=None, text=None):

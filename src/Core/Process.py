@@ -260,6 +260,113 @@ def request_close(process):
 
 
 # ============================================================================
+# THE EMULATOR'S DIALOGS
+# ============================================================================
+# A dialog (Eden's "Game Requires Firmware", an error...) needs a mouse: the
+# launcher finds it, asks the players and answers it with Enter or Escape.
+VK_RETURN, VK_ESCAPE = 0x0D, 0x1B
+WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+
+
+def pick_dialogs(windows, main_names):
+    """
+    The dialogs among an emulator's visible top-level windows.
+
+    Args:
+        windows (list): [(hwnd, title, owned)] - owned: it has an owner window.
+        main_names (list[str]): lower-case words in its main windows' titles
+                                ("eden" for "Eden | v0.2.1 | Mario Kart 8 Deluxe").
+
+    Returns:
+        list: [(hwnd, title)] of the windows owned by another one, or titled
+              without the emulator's name (an untitled window is not one).
+    """
+    found = []
+    for hwnd, title, owned in windows:
+        title = (title or "").strip()
+        if not title:
+            continue
+        lowered = title.lower()
+        if owned or not any(name in lowered for name in main_names):
+            found.append((hwnd, title))
+    return found
+
+
+def _process_windows(pid):
+    """[(hwnd, title, owned)] of a process's visible top-level windows (Windows)."""
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    found = []
+
+    @enum_proc
+    def each(hwnd, _):
+        owner_pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner_pid))
+        if owner_pid.value == pid and user32.IsWindowVisible(hwnd):
+            buffer = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(hwnd, buffer, 256)
+            found.append((int(hwnd), buffer.value, bool(user32.GetWindow(hwnd, 4))))   # GW_OWNER
+        return True
+
+    user32.EnumWindows(each, 0)
+    return found
+
+
+def find_dialogs(process, main_names):
+    """The emulator's open dialogs: [(hwnd, title)] (always [] outside Windows)."""
+    if sys.platform != "win32" or process is None or process.poll() is not None:
+        return []
+    try:
+        return pick_dialogs(_process_windows(process.pid), main_names)
+    except Exception as e:
+        log("WARNING", "Could not list the emulator's windows", e)
+        return []
+
+
+def dialog_open(hwnd):
+    if sys.platform != "win32":
+        return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.IsWindow.argtypes = [wintypes.HWND]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        return bool(user32.IsWindow(hwnd) and user32.IsWindowVisible(hwnd))
+    except Exception:
+        return False
+
+
+def answer_dialog(hwnd, accept):
+    """
+    Answer a dialog as its keyboard would: Enter (its default button, OK)
+    or Escape (Cancel). It is brought to the front first.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        key = VK_RETURN if accept else VK_ESCAPE
+        scan = 0x1C if accept else 0x01
+        user32.SetForegroundWindow(hwnd)
+        user32.PostMessageW(hwnd, WM_KEYDOWN, key, 1 | (scan << 16))
+        user32.PostMessageW(hwnd, WM_KEYUP, key, 1 | (scan << 16) | (1 << 30) | (1 << 31))
+        return True
+    except Exception as e:
+        log("WARNING", "Could not answer the emulator's dialog", e)
+        return False
+
+
+# ============================================================================
 # APPIMAGE MOUNT HELPERS (LINUX ONLY)
 # ============================================================================
 _mount_proc = None  # Popen handle - terminating it unmounts the squashfs

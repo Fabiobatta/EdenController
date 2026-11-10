@@ -41,7 +41,7 @@ import threading
 import time
 from tkinter import messagebox
 
-from . import Library, Stats
+from . import Glyphs, Library, Stats
 from .Achievements import ACHIEVEMENTS, Achievements
 from .Art import ArtLibrary
 from .Backup import backup_saves, list_backups, restore
@@ -98,6 +98,7 @@ DPAD_BUTTONS = ("SDL_CONTROLLER_BUTTON_DPAD_UP", "SDL_CONTROLLER_BUTTON_DPAD_DOW
                 "SDL_CONTROLLER_BUTTON_DPAD_LEFT", "SDL_CONTROLLER_BUTTON_DPAD_RIGHT")
 TRIGGER_PRESSED = 0.5
 HELD_POLL_S = 0.1
+BATTERY_POLL_S = 20.0              # controller batteries are read this often
 
 # kill_combo button names -> button picture
 COMBO_GLYPHS = {"select": "back", "up": "dpad", "down": "dpad", "left": "dpad", "right": "dpad"}
@@ -238,6 +239,8 @@ class LauncherApp:
         self._carried_keys = None           # path-less pad keys kept across scan_hardware()
         self._held = None                   # close menu: last held-buttons report
         self._held_next = 0.0
+        self._battery_next = 0.0           # next battery reading
+        self._batteries = None              # last batteries shown
         self.hid_profiles = {}              # {path: profile_key} across reconnects
         self.process = None                 # Emulator subprocess handle
         self.returning_to_launcher = False  # Flag for kill -> restart flow
@@ -724,6 +727,9 @@ class LauncherApp:
             self.on_pads_changed()
         if self.ui.alert_mode == "KILL_CONFIRM":
             self.report_held_buttons()
+        if now >= self._battery_next and not self.process:
+            self._battery_next = now + BATTERY_POLL_S
+            self.poll_batteries()
 
         # ====================================================================
         # BACKGROUND WORK RESULTS
@@ -929,10 +935,12 @@ class LauncherApp:
             self.open_settings()
         elif button == sdl.SDL_CONTROLLER_BUTTON_X:
             self.toggle_profile_edit(which)         # Enter/exit profile selection
-        elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
-            self.cycle_profile(which, -1)
-        elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT:
-            self.cycle_profile(which, 1)
+        elif button in (sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT, sdl.SDL_CONTROLLER_BUTTON_DPAD_RIGHT):
+            direction = -1 if button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT else 1
+            if editing:
+                self.cycle_profile(which, direction)
+            else:
+                self.cycle_avatar(which, direction)
         elif button == sdl.SDL_CONTROLLER_BUTTON_START:
             self.check_launch()                     # Launch / choose a game
         elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
@@ -1051,6 +1059,59 @@ class LauncherApp:
     # ========================================================================
     # UI UPDATE METHODS
     # ========================================================================
+    def avatar_of(self, index):
+        """Player index + 1's avatar (Glyphs.AVATARS name): the one they picked, else one per number."""
+        chosen = (self.emu.settings.state or {}).get("avatars") or []
+        name = chosen[index] if index < len(chosen) else None
+        return name if name in Glyphs.AVATARS else Glyphs.AVATARS[index % len(Glyphs.AVATARS)]
+
+    def cycle_avatar(self, instance_id, direction):
+        """D-pad left / right on the player screen: the next avatar for that player."""
+        slot_idx = self.find_slot_by_instance(instance_id)
+        if slot_idx == -1:
+            return
+        names = Glyphs.AVATARS
+        chosen = [self.avatar_of(i) for i in range(max(slot_idx + 1, len(self.assignments)))]
+        taken = {name for i, name in enumerate(chosen) if i != slot_idx and i < len(self.assignments)}
+        index = names.index(chosen[slot_idx])
+        for _ in range(len(names)):                 # skip the ones other players have
+            index = (index + direction) % len(names)
+            if names[index] not in taken:
+                break
+        chosen[slot_idx] = names[index]
+        self.emu.settings.save_state(avatars=chosen)
+        self.sounds.play("move")
+        self.refresh_grid()
+
+    def poll_batteries(self):
+        """Read the battery of every connected controller (None: wired or unknown)."""
+        reader = getattr(self.sdl, "battery", None)
+        if reader is None:
+            return
+        changed = False
+        for pad in self.pads.values():
+            try:
+                level = reader(pad["ctrl"])
+            except Exception:
+                level = None
+            changed |= level != pad.get("battery")
+            pad["battery"] = level
+        if changed:
+            self.refresh_grid()
+
+    def _battery_of(self, path):
+        pad = next((p for p in self.pads.values() if p["path"] == path), None)
+        return pad.get("battery") if pad else None
+
+    def _show_batteries(self):
+        """The batteries next to the clock: one per player whose controller reports one."""
+        shown = [(player_color(i), self.avatar_of(i), self._battery_of(a["path"]))
+                 for i, a in enumerate(self.assignments) if not a.get("waiting")]
+        shown = [entry for entry in shown if entry[2]]
+        if shown != self._batteries:
+            self._batteries = shown
+            self.ui.set_batteries(shown)
+
     def get_assigned_color(self, path):
         """The colour of the player this controller is: one per player number."""
         index = next((i for i, a in enumerate(self.assignments) if a["path"] == path), None)
@@ -1064,7 +1125,10 @@ class LauncherApp:
             "color": self.get_assigned_color(a["path"]),
             "profile": a["profile_key"],
             "editing": a["is_editing"],
-        } for a in self.assignments])
+            "avatar": self.avatar_of(i),
+            "battery": self._battery_of(a["path"]),
+        } for i, a in enumerate(self.assignments)])
+        self._show_batteries()
 
     def update_hints(self):
         """The hint dock, the shortcuts next to the clock and the "continue" card for the current screen."""
@@ -1608,7 +1672,7 @@ class LauncherApp:
     def _set_browsing(self, pad):
         """The grid shows who is browsing: that player's number and colour on the selected tile."""
         slot = next((i for i, a in enumerate(self.assignments) if a["path"] == pad["path"]), None)
-        self.ui.grid.nav = None if slot is None else (f"P{slot + 1}", player_color(slot))
+        self.ui.grid.nav = None if slot is None else (self.avatar_of(slot), player_color(slot))
 
     def _navigate_menu(self, action):
         if action in ("up", "down"):
@@ -1679,13 +1743,15 @@ class LauncherApp:
             return
         emulator = self.emulator_for(game)
         players = [player_color(i) for i in range(len(self.assignments))]
+        icons = [self.avatar_of(i) for i in range(len(self.assignments))]
         mode = split_mode(game, ((self.emu.settings.state or {}).get("split") or {}).get(self.game_key(game)))
         self._mode_before_splash = "PLAYERS" if self.mode == "PLAYERS" else "GAMES"
         self.mode = "SPLASH"
         self.update_hints()
         self.ui.set_backdrop(game)
         self.ui.show_splash(game, players, split_layout(len(players), mode),
-                            emulator.display_name if len(self.emu.variants) > 1 else None)
+                            emulator.display_name if len(self.emu.variants) > 1 else None,
+                            icons=icons, starting=emulator.display_name)
         self._splash_job = self.root.after(SPLASH_MS, self._launch_now, game, from_roulette)
 
     def cancel_splash(self):

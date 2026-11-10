@@ -1938,5 +1938,88 @@ class CloseRequestTests(unittest.TestCase):
         self.assertFalse(request_close(None))
 
 
+class AvatarTests(unittest.TestCase):
+    """Player avatars, controller batteries and the light sweep (Core/Glyphs, Core/GameGrid)."""
+
+    def test_every_avatar_draws_something(self):
+        from Core import Glyphs
+        for name in Glyphs.AVATARS:
+            image = Glyphs.avatar(name, 40, "#FFFFFF")
+            self.assertEqual(image.size, (40, 40))
+            covered = sum(1 for a in image.getchannel("A").getdata() if a > 128)
+            self.assertGreater(covered, 40 * 40 * 0.12, name)
+            self.assertLess(covered, 40 * 40 * 0.9, name)
+
+    def test_disc_without_avatar_shows_text(self):
+        from Core import Glyphs
+        self.assertEqual(Glyphs.avatar_disc("P1", 30, "#4FA3FF").size, (30, 30))
+        self.assertEqual(Glyphs.avatar_disc("star", 30, "#4FA3FF").size, (30, 30))
+
+    def test_battery_fill_follows_the_level(self):
+        from Core import Glyphs
+        full, low = Glyphs.battery(20, 100, "#FFFFFF"), Glyphs.battery(20, 10, "#FFFFFF")
+        self.assertEqual(full.size, low.size)
+        lit = lambda image: sum(1 for a in image.getchannel("A").getdata() if a > 128)
+        self.assertGreater(lit(full), lit(low))
+        red = low.getpixel((int(low.width * 0.12), low.height // 2))
+        self.assertGreater(red[0], 200)
+        self.assertLess(red[1], 120)
+
+    def test_split_map_with_icons(self):
+        from Core import Glyphs
+        regions = ((0, 0, 0.5, 1), (0.5, 0, 1, 1))
+        plain = Glyphs.split_map(200, 112, regions, ("#4FA3FF", "#FF5C5C"))
+        icons = Glyphs.split_map(200, 112, regions, ("#4FA3FF", "#FF5C5C"), icons=("star", "heart"))
+        self.assertEqual(plain.size, icons.size)
+        self.assertNotEqual(list(plain.getdata()), list(icons.getdata()))
+
+    def test_shine_stays_inside_the_tile(self):
+        from Core.GameGrid import shine_image
+        middle = shine_image(100, 14, 0.5)
+        alpha = middle.getchannel("A")
+        self.assertEqual(alpha.getpixel((0, 0)), 0)                 # rounded corner
+        self.assertGreater(max(alpha.getdata()), 60)                  # the band is there
+        self.assertEqual(max(shine_image(100, 14, 0.0).getchannel("A").getdata()), 0)
+        self.assertEqual(max(shine_image(100, 14, 1.0).getchannel("A").getdata()), 0)
+
+
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class AvatarChoiceTests(unittest.TestCase):
+    def _app(self, avatars=None):
+        from Core.App import LauncherApp
+        app = LauncherApp.__new__(LauncherApp)
+        saved = {}
+        state = {"avatars": avatars} if avatars else {}
+
+        def save_state(**values):
+            saved.update(values)
+            state.update(values)
+        app.emu = types.SimpleNamespace(settings=types.SimpleNamespace(state=state, save_state=save_state))
+        app.sounds = types.SimpleNamespace(play=lambda *a: None)
+        app.refresh_grid = lambda: None
+        app.pads = {i: {"path": f"XInput#{i}"} for i in range(3)}
+        app.assignments = [{"path": f"XInput#{i}"} for i in range(3)]
+        return app, saved
+
+    def test_defaults_differ_per_player(self):
+        app, _ = self._app()
+        self.assertEqual(len({app.avatar_of(i) for i in range(8)}), 8)
+
+    def test_cycle_skips_the_ones_taken(self):
+        from Core import Glyphs
+        app, saved = self._app()
+        first, second = app.avatar_of(0), app.avatar_of(1)
+        self.assertEqual(Glyphs.AVATARS.index(second), Glyphs.AVATARS.index(first) + 1)
+        app.cycle_avatar(0, 1)                      # player 2 has the next one: skipped
+        self.assertNotIn(saved["avatars"][0], (first, second, app.avatar_of(2)))
+        app.cycle_avatar(0, -1)
+        self.assertEqual(app.avatar_of(0), first)
+
+    def test_unknown_saved_avatar_falls_back(self):
+        app, _ = self._app(avatars=["nope", "moon"])
+        self.assertEqual(app.avatar_of(1), "moon")
+        self.assertIn(app.avatar_of(0), __import__("Core.Glyphs", fromlist=["AVATARS"]).AVATARS)
+
+
 if __name__ == "__main__":
     unittest.main()

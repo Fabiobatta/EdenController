@@ -63,6 +63,7 @@ FONT_WEIGHTS = {"semibold": "Segoe UI Semibold", "light": "Segoe UI Light"} if s
 MARGIN = 64
 FOOTER_H = 64
 DOCK_Y = 42             # centre of the hint dock above the bottom edge
+SPLASH_SHINE_MS = 760   # the light sweeping over the cover on the launch screen
 ART_MAX = 720           # art is kept in memory at most this big
 ART_CACHE = 48          # pictures kept decoded
 BG_CACHE = 8            # blurred backgrounds kept (screen-sized each)
@@ -288,6 +289,7 @@ class LauncherUi:
         self.hints = []
         self.tip = ""
         self.pads = 0
+        self.batteries = []                 # [(colour, avatar, (percent, charging))] next to the clock
 
         self._fonts = {}
         self._photos = {}
@@ -419,6 +421,9 @@ class LauncherUi:
         if image is None:
             image = self._photos[key] = ImageTk.PhotoImage(make())
         return image
+
+    def has_photo(self, key):
+        return key in self._photos
 
     def load_art(self, path):
         """Decoded picture (RGB, at most ART_MAX px), LRU-cached; None if unreadable."""
@@ -813,6 +818,12 @@ class LauncherUi:
             self.pads = count
             self._draw_header()
 
+    def set_batteries(self, entries):
+        """Controller batteries next to the clock: [(player colour, avatar, (percent, charging))]."""
+        if list(entries) != self.batteries:
+            self.batteries = list(entries)
+            self._draw_header()
+
     def set_quick(self, hints):
         """Shortcuts shown next to the clock: [(button, label)] (settings, achievements)."""
         if list(hints) != list(self.quick):
@@ -832,8 +843,21 @@ class LauncherUi:
         clock_w = clock_font.measure("00:00")
         count_w = count_font.measure(str(self.pads))
         w = self.px(18) + pad_h * 2 + self.px(8) + count_w + self.px(18) + clock_w + self.px(18)
+        # One avatar + battery per player whose controller reports a battery
+        icon_h, cell_h = self.px(16), self.px(13)
+        cells = [(color, avatar, battery, self.px(5) + icon_h + self.px(5) + int(cell_h * 1.9) + self.px(8))
+                 for color, avatar, battery in self.batteries]
+        w += sum(cell[3] for cell in cells)
         h = self.px(40)
         c.create_image(right, y, image=self.glass(w, h, h // 2, "PILL"), anchor="e", tags="header")
+        x = right - w + self.px(14)
+        for color, avatar, (level, charging), cell_w in cells:
+            mark = self.photo(("avatar", avatar, icon_h, color), lambda: Glyphs.avatar(avatar, icon_h, color))
+            c.create_image(x + self.px(5), y, image=mark, anchor="w", tags="header")
+            gauge = self.photo(("battery", cell_h, level, COLOR["TEXT_DIM"], charging),
+                               lambda: Glyphs.battery(cell_h, level, COLOR["TEXT_DIM"], charging))
+            c.create_image(x + self.px(10) + icon_h, y, image=gauge, anchor="w", tags="header")
+            x += cell_w
         c.create_text(right - self.px(18), y, text=time.strftime("%H:%M"), anchor="e", fill=COLOR["TEXT"],
                       font=clock_font, tags=("header", "clock"))
         x = right - self.px(18) - clock_w - self.px(18)
@@ -982,8 +1006,9 @@ class LauncherUi:
         layout = split_layout(count) if count else None
         regions = tuple(region for region, _ in layout) if layout else None
         colors = tuple(slot["color"] for slot in slots)
-        screen = self.photo(("tv", tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"]),
-                            lambda: Glyphs.split_map(tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"]))
+        icons = tuple(slot.get("avatar") for slot in slots)
+        screen = self.photo(("tv", tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"], icons),
+                            lambda: Glyphs.split_map(tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"], icons))
         c.create_image(left, top, image=screen, anchor="nw", tags="players")
         if not count:
             self.rich(left + tv_w // 2, top + tv_h // 2, t("slot_join"), 17, COLOR["TEXT_DIM"],
@@ -1044,8 +1069,9 @@ class LauncherUi:
             c.create_image(x - pad, y - pad, image=image, anchor="nw", tags=tags)
 
             size = self.px(40)
-            disc = self.photo(("disc", i, size, color), lambda: Glyphs.disc(f"P{i + 1}", size, color,
-                                                                           COLOR["DISC_TEXT"]))
+            avatar = slot.get("avatar") or f"P{i + 1}"
+            disc = self.photo(("disc", avatar, size, color), lambda: Glyphs.avatar_disc(avatar, size, color,
+                                                                                       COLOR["DISC_TEXT"]))
             c.create_image(x + self.px(14), middle, image=disc, anchor="w", tags=tags)
 
             # Right: where this player plays, then the button layout
@@ -1078,8 +1104,20 @@ class LauncherUi:
             if slot["editing"]:
                 self.rich(text_x, middle + self.px(12), t("slot_editing_hints"), 11, COLOR["TEXT_DIM"], tags=tags)
             else:
-                c.create_text(text_x, middle + self.px(12), anchor="w", fill=COLOR["TEXT_FAINT"], font=small,
-                              text=self.truncate(slot["name"], small, room), tags=tags)
+                sub_x = text_x
+                if slot.get("battery"):
+                    level, charging = slot["battery"]
+                    gauge_h = self.px(11)
+                    gauge = self.photo(("battery", gauge_h, level, COLOR["TEXT_FAINT"], charging),
+                                       lambda: Glyphs.battery(gauge_h, level, COLOR["TEXT_FAINT"], charging))
+                    c.create_image(sub_x, middle + self.px(12), image=gauge, anchor="w", tags=tags)
+                    sub_x += gauge.width() + self.px(6)
+                    label = f"{level}%"
+                    c.create_text(sub_x, middle + self.px(12), anchor="w", font=small, text=label, tags=tags,
+                                  fill=COLOR["NEON_RED"] if level < 15 else COLOR["TEXT_FAINT"])
+                    sub_x += small.measure(label) + self.px(10)
+                c.create_text(sub_x, middle + self.px(12), anchor="w", fill=COLOR["TEXT_FAINT"], font=small,
+                              text=self.truncate(slot["name"], small, max(self.px(40), right - sub_x)), tags=tags)
         self._raise_overlays()
 
     # ========================================================================
@@ -1357,7 +1395,7 @@ class LauncherUi:
     # ========================================================================
     # "LET'S GO" SCREEN
     # ========================================================================
-    def show_splash(self, game, players, layout, emulator=None):
+    def show_splash(self, game, players, layout, emulator=None, icons=None, starting=None):
         """
         The moment between choosing a game and the emulator appearing: the
         cover, the title, and who plays where on the split screen.
@@ -1365,23 +1403,28 @@ class LauncherUi:
         Args:
             players (list[str]): the players' colours, in player order.
             layout  (list | None): split_layout() for them (None = shared screen).
+            icons   (list[str]): the players' avatars, in player order.
+            starting (str): the emulator's name, for "Starting ...".
         """
-        self._splash = (game, tuple(players), layout, emulator)
-        self._draw_splash()
+        self._splash = (game, tuple(players), layout, emulator, tuple(icons or ()), starting)
+        self._draw_splash(entering=True)
 
     def hide_splash(self):
         self._splash = None
-        self.animator.finish("splash")
+        for key in ("splash", "splash-in", "splash-shine"):
+            self.animator.finish(key)
         self.canvas.delete("splash")
 
-    def _draw_splash(self):
+    def _draw_splash(self, entering=False):
+        from .GameGrid import SHINE_FRAMES, shine_frame
         from .I18n import players_label
         c = self.canvas
         c.delete("splash")
-        self.animator.finish("splash")
+        for key in ("splash", "splash-in", "splash-shine"):
+            self.animator.finish(key)
         if not self.width or self._splash is None:
             return
-        game, players, layout, emulator = self._splash
+        game, players, layout, emulator, icons, starting = self._splash
         shade = self.photo(("splash-overlay", self.width, self.height),
                            lambda: Image.new("RGBA", (self.width, self.height), COLOR["SCREEN"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="splash")
@@ -1391,51 +1434,99 @@ class LauncherUi:
             c.create_image(self.width, 0, image=frames[-1], anchor="ne", tags="splash")
 
         left = self.px(96)
-        tile = self.px(150)
-        block_h = tile + (self.px(64) + self.px(190) + self.px(40) if players else 0)
-        top = (self.height - block_h) // 2 - self.px(20)
+        tile = self.px(196) // 2 * 2
+        map_w, map_h = self.px(338), self.px(190)
+        block_h = tile + (self.px(64) + map_h if players else 0) + self.px(70)
+        top = max(self.px(40), (self.height - block_h) // 2 - self.px(16))
         accent = self.grid.accent(game)
-        c.create_image(left + tile // 2, top + tile // 2, image=self.grid.halo(game, tile, tile), tags="splash")
-        c.create_image(left, top, image=self.grid.tile(game, tile, tile), anchor="nw", tags="splash")
-        tx = left + tile + self.px(34)
-        width = int(self.width * 0.56) - tx
-        c.create_text(tx, top + self.px(30), text=t("splash_title").upper(), anchor="w", fill=accent,
-                      font=self.font(13), tags="splash")
-        title_font = next((f for f in (self.font(40, "semibold"), self.font(32, "semibold"))
-                           if f.measure(game["title"]) <= width), self.font(28, "semibold"))
-        c.create_text(tx, top + self.px(76), text=self.truncate(game["title"], title_font, width), anchor="w",
-                      fill=COLOR["TEXT"], font=title_font, tags="splash")
+        cover = ("splash", "splash-cover")
+        words = ("splash", "splash-words")
+        lower = ("splash", "splash-lower")
+        c.create_image(left + tile // 2, top + tile // 2, image=self.grid.halo(game, tile, tile), tags=cover)
+        c.create_image(left, top, image=self.grid.tile(game, tile, tile), anchor="nw", tags=cover)
+        tx = left + tile + self.px(38)
+        width = int(self.width * 0.58) - tx
+        c.create_text(tx, top + tile // 2 - self.px(62), text=t("splash_title").upper(), anchor="w", fill=accent,
+                      font=self.font(14), tags=words)
+        title_font = next((f for f in (self.font(44, "semibold"), self.font(36, "semibold"))
+                           if f.measure(game["title"]) <= width), self.font(30, "semibold"))
+        c.create_text(tx, top + tile // 2 - self.px(14), text=self.truncate(game["title"], title_font, width),
+                      anchor="w", fill=COLOR["TEXT"], font=title_font, tags=words)
         details = [text for text in (players_label(game["players"]) if game.get("players") else "", emulator) if text]
-        c.create_text(tx, top + self.px(120), text="   ·   ".join(details), anchor="w", fill=COLOR["TEXT_DIM"],
-                      font=self.font(15, False), tags="splash")
+        c.create_text(tx, top + tile // 2 + self.px(34), text="   ·   ".join(details), anchor="w",
+                      fill=COLOR["TEXT_DIM"], font=self.font(16, False), tags=words)
 
-        bar_y = top + tile + self.px(34)
-        bar_w = self.px(338)
+        y = top + tile + self.px(34)
         if players:
-            map_w, map_h = self.px(338), self.px(190)
             regions = tuple(region for region, _ in layout) if layout else None
-            picture = self.photo(("tv", map_w, map_h, regions, players, COLOR["DISC_TEXT"]),
-                                 lambda: Glyphs.split_map(map_w, map_h, regions, players, COLOR["DISC_TEXT"]))
+            picture = self.photo(("tv", map_w, map_h, regions, players, COLOR["DISC_TEXT"], icons),
+                                 lambda: Glyphs.split_map(map_w, map_h, regions, players, COLOR["DISC_TEXT"], icons))
             caption = t("split_shared") if not layout else t("splash_split")
-            c.create_text(left + self.px(2), top + tile + self.px(44), text=caption.upper(), anchor="w",
-                          fill=COLOR["TEXT_FAINT"], font=self.font(11), tags="splash")
-            map_y = top + tile + self.px(64)
-            c.create_image(left, map_y, image=picture, anchor="nw", tags="splash")
-            bar_y = map_y + map_h + self.px(26)
-        # A thin bar filling up until the game starts
+            c.create_text(left + self.px(2), y + self.px(10), text=caption.upper(), anchor="w",
+                          fill=COLOR["TEXT_FAINT"], font=self.font(11), tags=lower)
+            c.create_image(left, y + self.px(30), image=picture, anchor="nw", tags=lower)
+            y += self.px(30) + map_h + self.px(28)
+        # "Starting Eden..." over a thin bar filling up until the game starts
+        bar_w = map_w
+        status = t("splash_starting", name=starting) if starting else ""
+        status_item = c.create_text(left + self.px(2), y, text=status, anchor="w", fill=COLOR["TEXT_DIM"],
+                                    font=self.font(13, False), tags=lower)
+        bar_y = y + self.px(18)
         line = max(2, self.px(4))
-        c.create_rectangle(left, bar_y, left + bar_w, bar_y + line, fill=COLOR["LINE"], width=0, tags="splash")
-        bar = c.create_rectangle(left, bar_y, left, bar_y + line, fill=accent, width=0, tags="splash")
+        c.create_rectangle(left, bar_y, left + bar_w, bar_y + line, fill=COLOR["LINE"], width=0, tags=lower)
+        bar = c.create_rectangle(left, bar_y, left, bar_y + line, fill=accent, width=0, tags=lower)
         self.rich(self.width // 2, self.height - self.px(DOCK_Y), t("splash_hints"), 14, COLOR["TEXT_DIM"],
                   anchor="center", tags="splash")
         self._raise_overlays()
-        if self.animations and self.splash_ms:
-            started = time.monotonic()
+        if not (self.animations and self.splash_ms):
+            return
+        started = time.monotonic()
 
-            def step(_progress):                # linear: the bar is a clock, not a gesture
-                done = min(1.0, (time.monotonic() - started) * 1000 / self.splash_ms)
-                c.coords(bar, left, bar_y, left + int(bar_w * done), bar_y + line)
-            self.animator.run("splash", self.splash_ms, step)
+        def step(_progress):                    # linear: the bar is a clock, not a gesture
+            elapsed = time.monotonic() - started
+            done = min(1.0, elapsed * 1000 / self.splash_ms)
+            c.coords(bar, left, bar_y, left + int(bar_w * done), bar_y + line)
+            if status:
+                c.itemconfigure(status_item, text=status + "." * (1 + int(elapsed * 4) % 3))
+        self.animator.run("splash", self.splash_ms, step)
+
+        if entering:
+            # Cover from the left, words and the map rising after it
+            moves = (("splash-cover", -self.px(40), 0, 0.0), ("splash-words", 0, self.px(22), 0.12),
+                     ("splash-lower", 0, self.px(30), 0.24))
+            for tag, dx, dy, _ in moves:
+                c.move(tag, dx, dy)
+            placed = {tag: 0.0 for tag, *_ in moves}
+
+            def enter(progress):
+                for tag, dx, dy, delay in moves:
+                    p = max(0.0, min(1.0, (progress - delay) / (1.0 - delay)))
+                    c.move(tag, -dx * (p - placed[tag]), -dy * (p - placed[tag]))
+                    placed[tag] = p
+
+            def settle():
+                enter(1.0)
+                self._splash_shine(left + tile // 2, top + tile // 2, tile, shine_frame, SHINE_FRAMES)
+            self.animator.run("splash-in", 380, enter, settle)
+
+    def _splash_shine(self, x, y, size, frame, count):
+        """The light sweeps once over the cover, as on the selected tile in the grid."""
+        c = self.canvas
+        if self._splash is None:
+            return
+        item = c.create_image(x, y, image=frame(self, size, 0), tags=("splash", "splash-cover"))
+        shown = [0]
+
+        started = time.monotonic()
+
+        def step(_progress):                # the sweep keeps an even pace (smoothstep), not the eased one
+            linear = min(1.0, (time.monotonic() - started) * 1000 / SPLASH_SHINE_MS)
+            progress = linear * linear * (3 - 2 * linear)
+            n = min(count - 1, int(progress * count))
+            if n != shown[0]:
+                shown[0] = n
+                c.itemconfigure(item, image=frame(self, size, n))
+        self.animator.run("splash-shine", SPLASH_SHINE_MS, step, lambda: c.delete(item))
 
     # ========================================================================
     # TOAST

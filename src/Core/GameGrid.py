@@ -26,6 +26,7 @@ area matters more than the number of items):
 Tiles are composed once per game (a master at the focused size) and cached.
 """
 
+import time
 from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -55,6 +56,10 @@ SIZE_STEPS = 3                  # sizes a tile passes through between normal and
 PULSE = (0.5, 0.6, 0.72, 0.84, 0.94, 1.0)
 PULSE_MS = 120
 PRELOAD_MS = 40
+SHINE_DELAY_MS = 420            # the selection rests this long before the light sweeps over it
+SHINE_MS = 620
+SHINE_FRAMES = 18
+SHINE_ALPHA = 105               # brightest point of the sweep (0-255)
 SQUARE_MIN = 0.9                # width / height from which a tile counts as square
 
 BADGE = {                       # fill, text
@@ -62,6 +67,39 @@ BADGE = {                       # fill, text
     "bad": ((214, 60, 52, 245), (255, 255, 255)),
     "neutral": ((10, 12, 18, 215), (245, 245, 245)),
 }
+
+
+def shine_image(size, radius, position, alpha=SHINE_ALPHA):
+    """
+    A soft diagonal band of light over a rounded square `size` px wide;
+    position 0-1 sweeps it from the top-left corner off the bottom-right one.
+    """
+    S = 2
+    W = size * S
+    band = Image.new("L", (W, W), 0)
+    d = ImageDraw.Draw(band)
+    centre = (-0.15 + 1.3 * position) * W * 2       # along x + y
+    half = W * 0.2
+    d.polygon([(centre - half, 0), (centre + half, 0), (centre + half - W, W), (centre - half - W, W)],
+              fill=alpha)
+    thin = W * 0.04                                 # a brighter thin line inside the band
+    d.polygon([(centre + half * 0.55 - thin, 0), (centre + half * 0.55 + thin, 0),
+               (centre + half * 0.55 + thin - W, W), (centre + half * 0.55 - thin - W, W)],
+              fill=min(255, int(alpha * 1.6)))
+    band = band.filter(ImageFilter.GaussianBlur(W * 0.035)).resize((size, size), Image.BILINEAR)
+    mask = Image.new("L", (W, W), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, W - 1), radius=radius * S, fill=255)
+    mask = mask.resize((size, size), Image.LANCZOS)
+    from PIL import ImageChops
+    image = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    image.putalpha(ImageChops.multiply(band, mask))
+    return image
+
+
+def shine_frame(ui, size, n, radius=None):
+    """Frame n of the sweep over a tile `size` px wide (cached PhotoImage, made when first needed)."""
+    radius = radius if radius is not None else max(2, int(ui.px(RADIUS) * size / ui.px(TILE)))
+    return ui.photo(("shine", size, radius, n), lambda: shine_image(size, radius, n / (SHINE_FRAMES - 1)))
 
 
 def badge_state(game_players, joined):
@@ -184,7 +222,7 @@ class GameGrid:
         self.tabs = []                  # [(key, label, count)] over the grid
         self.tab = "all"
         self.sort_label = ""
-        self.nav = None                 # (label, colour) of the player browsing
+        self.nav = None                 # (avatar, colour) of the player browsing
         self._masters = OrderedDict()   # tile key -> PIL image at the focused size
         self._photos = OrderedDict()    # (tile key, px) -> PhotoImage
         self._heroes = OrderedDict()    # banners for the launch screen
@@ -196,6 +234,8 @@ class GameGrid:
         self._beat = 0
         self._preload_job = None
         self._letter_job = None
+        self._shine_job = None
+        self._shone = None              # the game the light last swept over
         self._pulse_tick()
 
     # ------------------------------------------------------------------
@@ -499,6 +539,7 @@ class GameGrid:
         self._draw_header(selected, count)
         self._draw_scrollbar(metrics, count)
         ui.set_backdrop(selected, BACKGROUND_DELAY_MS)
+        self._schedule_shine(selected)
         if self._preload_job is None:
             self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
 
@@ -608,6 +649,14 @@ class GameGrid:
             self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
             return
         sizes = self._sizes()
+        if ui.animations:                               # the light sweep, a few frames per call
+            missing = [n for n in range(SHINE_FRAMES) if not ui.has_photo(("shine", sizes[-1],
+                       max(2, int(ui.px(RADIUS) * sizes[-1] / ui.px(TILE))), n))]
+            if missing:
+                for n in missing[:4]:
+                    shine_frame(ui, sizes[-1], n)
+                self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
+                return
         rows = range(self.first_row - 1, self.first_row + self.rows + 1)
         near = [i for i in range(len(self.games)) if self.layout.cell(i)[0] in rows]
         order = sorted(near, key=lambda i: abs(i - self.index))
@@ -663,12 +712,58 @@ class GameGrid:
         c.delete("games-nav")
         if self.nav:
             d = ui.px(30)
-            disc = ui.photo(("nav", self.nav, d), lambda: Glyphs.disc(self.nav[0], d, self.nav[1], COLOR["DISC_TEXT"]))
+            disc = ui.photo(("nav", self.nav, d), lambda: Glyphs.avatar_disc(self.nav[0], d, self.nav[1],
+                                                                             COLOR["DISC_TEXT"]))
             back = ui.photo(("nav-back", d), lambda: Glyphs.panel(d + 6, d + 6, (d + 6) // 2, (8, 9, 14, 255)))
             cx, cy = (glide_from or (x, y))
             cx, cy = cx - size / 2 + ui.px(3), cy - size / 2 + ui.px(3)
             c.create_image(cx, cy, image=back, tags=("games", "games-nav"))
             c.create_image(cx, cy, image=disc, tags=("games", "games-nav"))
+
+    # ------------------------------------------------------------------
+    # The light sweeping once over the selected tile
+    # ------------------------------------------------------------------
+    def _schedule_shine(self, selected):
+        self._stop_shine()
+        if not self.ui.animations or selected is self._shone:
+            return
+        self._shine_job = self.ui.root.after(SHINE_DELAY_MS, self._shine)
+
+    def _stop_shine(self):
+        ui = self.ui
+        if self._shine_job:
+            ui.root.after_cancel(self._shine_job)
+            self._shine_job = None
+        ui.animator.finish("shine")
+        ui.canvas.delete("games-shine")
+
+    def _shine(self):
+        ui, c = self.ui, self.ui.canvas
+        self._shine_job = None
+        if ui.view != "games" or not self.games or self.index not in self._items or ui.quiet():
+            return
+        if any(ui.animator.active(key) for key in ("grid", "grid-size", "ring")):
+            self._shine_job = ui.root.after(SHINE_MS // 4, self._shine)
+            return
+        self._shone = self.games[self.index]
+        size = self._grown()
+        x, y = c.coords(self._items[self.index])
+        item = c.create_image(x, y, image=shine_frame(ui, size, 0), tags=("games", "games-shine"))
+        c.tag_raise("games-shine")
+        c.tag_raise("games-ring")
+        c.tag_raise("games-nav")
+        shown = [0]
+
+        started = time.monotonic()
+
+        def step(_progress):                # the sweep keeps an even pace (smoothstep), not the eased one
+            linear = min(1.0, (time.monotonic() - started) * 1000 / SHINE_MS)
+            progress = linear * linear * (3 - 2 * linear)
+            n = min(SHINE_FRAMES - 1, int(progress * SHINE_FRAMES))
+            if n != shown[0]:
+                shown[0] = n
+                c.itemconfigure(item, image=shine_frame(ui, size, n))
+        ui.animator.run("shine", SHINE_MS, step, lambda: c.delete(item))
 
     def _pulse_tick(self):
         """The glow of the focus frame breathes: six cached pictures, there and back."""
@@ -873,6 +968,8 @@ class GameGrid:
 
     def _clear(self):
         ui = self.ui
+        self._stop_shine()
+        self._shone = None
         for key in ("grid", "grid-size", "ring"):
             ui.animator.finish(key)
         if self._preload_job:

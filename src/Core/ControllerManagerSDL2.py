@@ -136,6 +136,22 @@ class SDLManager:
         """
         return list(range(sdl2.SDL_NumJoysticks()))
 
+    # SDL_JoystickPowerLevel -> rough percentage (SDL2 only knows four steps)
+    _POWER_PERCENT = {0: 5, 1: 20, 2: 60, 3: 100}
+
+    @staticmethod
+    def battery(ctrl):
+        """
+        (percent, charging) of a wireless controller's battery, or None when
+        unknown or wired. SDL2 reports four steps: 5, 20, 60 or 100 %.
+        """
+        try:
+            level = sdl2.SDL_JoystickCurrentPowerLevel(sdl2.SDL_GameControllerGetJoystick(ctrl))
+        except Exception:
+            return None
+        percent = SDLManager._POWER_PERCENT.get(int(level))
+        return None if percent is None else (percent, False)
+
     @staticmethod
     def rumble(ctrl, strength, duration_ms):
         """Vibrate a controller; strength 0.0-1.0. Silently ignored if unsupported."""

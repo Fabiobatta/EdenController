@@ -296,12 +296,13 @@ def split_screen(width, height, regions, highlight, color):
 
 
 @lru_cache(maxsize=16)
-def split_map(width, height, regions, colors, text_color="#111111"):
+def split_map(width, height, regions, colors, text_color="#111111", icons=None):
     """
     A TV showing every player's part of the screen: `regions` (fractions, one
     per player) filled with that player's colour and labelled P1, P2...; with
     regions=None the screen is shared and the players are discs in a row
-    (no players: just the empty screen).
+    (no players: just the empty screen). `icons`: each player's avatar
+    (AVATARS name), drawn above the label.
     """
     w, h = max(16, int(width)), max(9, int(height))
     s = 2
@@ -326,8 +327,17 @@ def split_map(width, height, regions, colors, text_color="#111111"):
                    inset + x1 * inner[0] - gap, inset + y1 * inner[1] - gap)
             rgb = _rgb(colors[i])
             d.rounded_rectangle(box, radius=radius, fill=rgb + (255,))
-            d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), f"P{i + 1}",
-                   font=font(min(box[3] - box[1], box[2] - box[0]) * 0.3), fill=_rgb(text_color), anchor="mm")
+            cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+            short = min(box[3] - box[1], box[2] - box[0])
+            icon = icons[i] if icons and i < len(icons) else None
+            if icon in AVATARS:
+                side = int(short * 0.36)
+                mark = _avatar_mask(icon, side)
+                img.paste(_rgb(text_color) + (255,), (int(cx - side / 2), int(cy - side * 0.78)), mark)
+                d.text((cx, cy + short * 0.2), f"P{i + 1}", font=font(short * 0.2), fill=_rgb(text_color),
+                       anchor="mm")
+            else:
+                d.text((cx, cy), f"P{i + 1}", font=font(short * 0.3), fill=_rgb(text_color), anchor="mm")
     elif colors:
         d.rounded_rectangle((inset + gap, inset + gap, W - inset - gap, H - inset - gap),
                             radius=radius, fill=(255, 255, 255, 20))
@@ -340,7 +350,13 @@ def split_map(width, height, regions, colors, text_color="#111111"):
             cx = W / 2 + ((i % per_row) - (in_row - 1) / 2) * size * 1.2
             cy = H / 2 + ((i // per_row) - (rows - 1) / 2) * size * 1.2
             d.ellipse((cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2), fill=_rgb(color) + (255,))
-            d.text((cx, cy), f"P{i + 1}", font=font(size * 0.42), fill=_rgb(text_color), anchor="mm")
+            icon = icons[i] if icons and i < len(icons) else None
+            if icon in AVATARS:
+                side = int(size * 0.56)
+                img.paste(_rgb(text_color) + (255,), (int(cx - side / 2), int(cy - side / 2)),
+                          _avatar_mask(icon, side))
+            else:
+                d.text((cx, cy), f"P{i + 1}", font=font(size * 0.42), fill=_rgb(text_color), anchor="mm")
     return _finish(img, (w, h))
 
 
@@ -477,3 +493,143 @@ def vertical_fade(width, height, alpha_top, alpha_bottom, color=(0, 0, 0)):
     band = Image.new("RGBA", (1, max(1, int(height))), tuple(color) + (0,))
     band.putalpha(column)
     return band.resize((max(1, int(width)), max(1, int(height))))
+
+
+# ============================================================================
+# PLAYER AVATARS AND BATTERIES
+# ============================================================================
+AVATARS = ("star", "heart", "leaf", "bolt", "mushroom", "flame", "moon", "crown", "flower", "ghost")
+
+
+def _avatar_shape(name, d, S):
+    """Draw avatar `name` on the mask `d` (S x S): 255 = shape, 0 = cut out."""
+    import math
+
+    def P(*points):
+        return [(x * S, y * S) for x, y in points]
+
+    def E(x0, y0, x1, y1, value=255):
+        d.ellipse((x0 * S, y0 * S, x1 * S, y1 * S), fill=value)
+
+    if name == "star":
+        pts = []
+        for i in range(10):
+            r = 0.49 if i % 2 == 0 else 0.22
+            a = -math.pi / 2 + i * math.pi / 5
+            pts.append((0.5 + r * math.cos(a), 0.54 + r * math.sin(a)))
+        d.polygon(P(*pts), fill=255)
+    elif name == "heart":
+        E(0.06, 0.14, 0.52, 0.6)
+        E(0.48, 0.14, 0.94, 0.6)
+        d.polygon(P((0.09, 0.47), (0.5, 0.92), (0.91, 0.47), (0.5, 0.3)), fill=255)
+    elif name == "leaf":
+        pts = []
+        for i in range(48):                        # a pointed leaf: two arcs
+            a = math.pi * i / 47
+            pts.append((0.5 + 0.42 * math.cos(a) * 0.98, 0.5 - 0.3 * math.sin(a)))
+        pts += [(x, 1 - y) for x, y in reversed(pts)]
+        rotated = [(0.5 + (x - 0.5) * 0.7071 - (y - 0.5) * 0.7071 * -1, 0.5 - (x - 0.5) * 0.7071 + (y - 0.5) * 0.7071)
+                   for x, y in pts]
+        d.polygon(P(*rotated), fill=255)
+        d.line(P((0.24, 0.76), (0.66, 0.34)), fill=0, width=max(1, int(S * 0.06)))
+        d.line(P((0.08, 0.92), (0.26, 0.74)), fill=255, width=max(1, int(S * 0.08)))
+    elif name == "bolt":
+        d.polygon(P((0.6, 0.03), (0.18, 0.56), (0.46, 0.56), (0.36, 0.97), (0.82, 0.41), (0.54, 0.41),
+                    (0.68, 0.03)), fill=255)
+    elif name == "mushroom":
+        d.pieslice((0.04 * S, 0.1 * S, 0.96 * S, 0.94 * S), 180, 360, fill=255)
+        d.rounded_rectangle((0.3 * S, 0.56 * S, 0.7 * S, 0.94 * S), radius=0.1 * S, fill=255)
+        d.rectangle((0.04 * S, 0.5 * S, 0.96 * S, 0.555 * S), fill=0)
+        E(0.38, 0.17, 0.62, 0.38, 0)
+        E(0.13, 0.32, 0.3, 0.48, 0)
+        E(0.7, 0.32, 0.87, 0.48, 0)
+    elif name == "flame":
+        E(0.2, 0.4, 0.8, 0.96)
+        d.polygon(P((0.2, 0.68), (0.34, 0.36), (0.52, 0.04), (0.6, 0.3), (0.74, 0.2), (0.8, 0.68)), fill=255)
+        E(0.38, 0.62, 0.62, 0.9, 0)
+        d.polygon(P((0.38, 0.76), (0.5, 0.5), (0.62, 0.76)), fill=0)
+    elif name == "moon":
+        E(0.06, 0.06, 0.94, 0.94)
+        E(0.32, -0.04, 1.08, 0.72, 0)
+    elif name == "crown":
+        d.polygon(P((0.08, 0.8), (0.08, 0.3), (0.3, 0.52), (0.5, 0.16), (0.7, 0.52), (0.92, 0.3), (0.92, 0.8)),
+                  fill=255)
+        d.rectangle((0.08 * S, 0.84 * S, 0.92 * S, 0.93 * S), fill=255)
+        for x, y in ((0.08, 0.27), (0.5, 0.13), (0.92, 0.27)):
+            E(x - 0.07, y - 0.07, x + 0.07, y + 0.07)
+    elif name == "flower":
+        for i in range(5):
+            a = -math.pi / 2 + i * 2 * math.pi / 5
+            x, y = 0.5 + 0.25 * math.cos(a), 0.5 + 0.25 * math.sin(a)
+            E(x - 0.2, y - 0.2, x + 0.2, y + 0.2)
+        E(0.37, 0.37, 0.63, 0.63, 0)
+        E(0.42, 0.42, 0.58, 0.58)
+    elif name == "ghost":
+        d.pieslice((0.14 * S, 0.06 * S, 0.86 * S, 0.78 * S), 180, 360, fill=255)
+        d.rectangle((0.14 * S, 0.42 * S, 0.86 * S, 0.84 * S), fill=255)
+        for i in range(3):                          # the wavy hem
+            x = 0.14 + i * 0.24
+            E(x, 0.72, x + 0.24, 0.96)
+        for x in (0.38, 0.62):
+            E(x - 0.07, 0.86, x + 0.07, 1.0, 0)
+        E(0.3, 0.32, 0.43, 0.5, 0)
+        E(0.57, 0.32, 0.7, 0.5, 0)
+
+
+@lru_cache(maxsize=64)
+def _avatar_mask(name, size):
+    """Alpha mask (L) of avatar `name`, size x size."""
+    size = max(4, int(size))
+    S = size * SUPERSAMPLE
+    mask = Image.new("L", (S, S), 0)
+    _avatar_shape(name, ImageDraw.Draw(mask), S)
+    return mask.resize((size, size), Image.LANCZOS)
+
+
+@lru_cache(maxsize=64)
+def avatar(name, size, color):
+    """Avatar `name` in `color` on transparent."""
+    mask = _avatar_mask(name, size)
+    image = Image.new("RGBA", mask.size, _rgb(color) + (0,))
+    image.putalpha(mask)
+    return image
+
+
+@lru_cache(maxsize=64)
+def avatar_disc(name, diameter, fill, icon_color="#111111"):
+    """A player's disc: their colour with their avatar inside (P-number disc without one)."""
+    if name not in AVATARS:
+        return disc(name or "", diameter, fill, icon_color)
+    image = disc("", diameter, fill, icon_color).copy()
+    side = int(max(8, int(diameter)) * 0.56)
+    offset = (image.width - side) // 2
+    image.paste(_rgb(icon_color) + (255,), (offset, offset), _avatar_mask(name, side))
+    return image
+
+
+@lru_cache(maxsize=64)
+def battery(height, level, color, charging=False):
+    """
+    A battery seen from the side, `level` 0-100 full, in `color` (the outline)
+    - the fill turns amber under 35 % and red under 15 %. A bolt when charging.
+    """
+    h = max(6, int(height))
+    w = int(h * 1.9)
+    s = SUPERSAMPLE
+    W, H = w * s, h * s
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    rgb = _rgb(color) + (255,)
+    line = max(s, int(H * 0.12))
+    nub = int(W * 0.08)
+    d.rounded_rectangle((0, 0, W - nub - 1, H - 1), radius=H * 0.22, outline=rgb, width=line)
+    d.rounded_rectangle((W - nub, H * 0.3, W - 1, H * 0.7), radius=nub * 0.4, fill=rgb)
+    level = max(0, min(100, int(level)))
+    fill = (255, 82, 82, 255) if level < 15 else (255, 196, 60, 255) if level < 35 else rgb
+    inner = line + s
+    right = inner + (W - nub - 2 * inner) * max(0.08, level / 100)
+    d.rounded_rectangle((inner, inner, right, H - inner - 1), radius=H * 0.1, fill=fill)
+    if charging:
+        bolt = [(0.56, 0.08), (0.36, 0.56), (0.5, 0.56), (0.44, 0.92), (0.66, 0.42), (0.52, 0.42), (0.6, 0.08)]
+        d.polygon([(x * (W - nub), y * H) for x, y in bolt], fill=(20, 22, 28, 255))
+    return _finish(img, (w, h))

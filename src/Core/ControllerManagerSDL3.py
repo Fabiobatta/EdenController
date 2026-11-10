@@ -160,6 +160,22 @@ class SDLManager:
         sdl3.SDL_GUIDToString(guid, buf, size)
 
     @staticmethod
+    def battery(ctrl):
+        """
+        (percent, charging) of a wireless controller's battery, or None when
+        unknown, wired or without one.
+        """
+        try:
+            percent = ctypes.c_int(-1)
+            state = int(sdl3.SDL_GetGamepadPowerInfo(ctrl, ctypes.byref(percent)))
+        except Exception:
+            return None
+        # SDL_PowerState: 1 on battery, 3 charging, 4 charged (0 unknown, 2 no battery, -1 error)
+        if state not in (1, 3, 4) or percent.value < 0:
+            return None
+        return min(100, percent.value), state in (3, 4)
+
+    @staticmethod
     def rumble(ctrl, strength, duration_ms):
         """Vibrate a controller; strength 0.0-1.0. Silently ignored if unsupported."""
         level = int(max(0.0, min(1.0, strength)) * 0xFFFF)

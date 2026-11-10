@@ -25,7 +25,7 @@ STRINGS = {
     "en": {
         # Player grid
         "title_players":        "Who's playing?",
-        "subtitle_players":     "Each controller takes the next place · any button lights up your row",
+        "subtitle_players":     "Each controller takes the next place · any button lights up your row · [dpad] your icon",
         "slot_empty":           "Press [a]",
         "slot_profile":         "Layout: {name}",
         "slot_hints":           "[x] Layout    [b] Leave",
@@ -256,6 +256,7 @@ STRINGS = {
         "splash_title":         "Here we go",
         "splash_split":         "Who plays where",
         "splash_hints":         "[b] Cancel",
+        "splash_starting":      "Starting {name}",
         "alert_kill_games":     "Another game",
         "alert_ok":             "OK",
         "alert_failed_title":   "THE GAME DID NOT START",
@@ -289,7 +290,7 @@ STRINGS = {
     },
     "it": {
         "title_players":        "Chi gioca?",
-        "subtitle_players":     "Ogni controller prende il primo posto libero · qualsiasi tasto illumina la tua riga",
+        "subtitle_players":     "Ogni controller prende il primo posto libero · qualsiasi tasto illumina la tua riga · [dpad] la tua icona",
         "slot_empty":           "Premi [a]",
         "slot_profile":         "Layout: {name}",
         "slot_hints":           "[x] Layout    [b] Esci",
@@ -512,6 +513,7 @@ STRINGS = {
         "splash_title":         "Si parte",
         "splash_split":         "Chi gioca dove",
         "splash_hints":         "[b] Annulla",
+        "splash_starting":      "Avvio di {name}",
         "alert_kill_games":     "Altro gioco",
         "alert_ok":             "OK",
         "alert_failed_title":   "IL GIOCO NON È PARTITO",

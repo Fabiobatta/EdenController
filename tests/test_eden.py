@@ -424,10 +424,14 @@ class AdapterTests(unittest.TestCase):
                 emu.locate(self.eden_dir)
                 emu.settings = settings
                 self.assertEqual(emu.applet_scheme(), scheme)
-                self.assertEqual(cache[exe][2], scheme)
+                self.assertEqual(cache[exe]["applet"], scheme)
             # Remembered: a cached answer for the same size and date is reused
-            cache[exe][2] = "mode"
-            self.assertEqual(emu.applet_scheme(), "mode")
+            cache[exe]["applet"] = "mode"
+            again = Eden()                      # a new run of the launcher
+            again.locate(self.eden_dir)
+            again.settings = settings
+            self.assertEqual(again.applet_scheme(), "mode")
+            self.assertEqual(emu.applet_scheme(), "ui")         # within a run: asked once
         finally:
             adapter.PROBE_CHUNK = saved
 
@@ -1406,6 +1410,381 @@ class BadgeTests(unittest.TestCase):
         self.assertEqual(badge_state(2, 3), "bad")
         self.assertEqual(badge_state(4, 1), "neutral")       # one player: nothing to compare
         self.assertEqual(badge_state(None, 3), "neutral")    # unknown count
+
+
+class SettingsWriteTests(unittest.TestCase):
+    TEXT = "; top\n[Launcher]\n; a comment\nsounds = true\nlanguage=auto\n\n[Eden]\ndocked = auto\n"
+
+    def test_only_the_one_line_changes(self):
+        from Core.Settings import set_in_text
+        self.assertEqual(set_in_text(self.TEXT, "Launcher", "sounds", "false"),
+                         self.TEXT.replace("sounds = true", "sounds = false"))
+        self.assertEqual(set_in_text(self.TEXT, "launcher", "LANGUAGE", "it"),
+                         self.TEXT.replace("language=auto", "language = it"))
+
+    def test_missing_key_and_section_are_added(self):
+        from Core.Settings import _parse, set_in_text
+        text = set_in_text(self.TEXT, "Launcher", "theme", "oled")
+        self.assertIn("language=auto\ntheme = oled\n\n[Eden]", text)       # end of its section
+        text = set_in_text(text, "Emulators", "eglantine", "C:\\e\\eglantine.exe")
+        parsed = _parse(text)
+        self.assertEqual(parsed["launcher"]["theme"], "oled")
+        self.assertEqual(parsed["emulators"]["eglantine"], "C:\\e\\eglantine.exe")
+        self.assertEqual(parsed["eden"]["docked"], "auto")
+        self.assertIn("; a comment", text)
+
+    def test_set_writes_the_file(self):
+        from Core.Settings import load_settings
+        with tempfile.TemporaryDirectory() as tmp:
+            settings = load_settings(tmp, "EdenLauncher", "[Eden]\ndocked = auto\n", language="en")
+            settings.set("Launcher", "sound_volume", 40)
+            settings.set("Eden", "docked", "always")
+            again = load_settings(tmp, "EdenLauncher", "[Eden]\ndocked = auto\n", language="en")
+            self.assertEqual(again.get_int("Launcher", "sound_volume", 70), 40)
+            self.assertEqual(again.get("Eden", "docked"), "always")
+            with open(os.path.join(tmp, "EdenLauncher.ini"), encoding="utf-8") as f:
+                self.assertIn("; Sound volume, 0 to 100", f.read())           # comments kept
+
+
+class UpdateTests(unittest.TestCase):
+    def _settings(self, **state):
+        return types.SimpleNamespace(state=dict(state), save_state=lambda **v: state.update(v) or None,
+                                     _state=state)
+
+    def test_newer_build_is_reported(self):
+        from Core.Update import UpdateCheck, build_of
+        self.assertEqual(build_of("build-27"), 27)
+        self.assertIsNone(build_of("v1.2"))
+        settings = self._settings()
+        check = UpdateCheck(settings, 21, fetch=lambda: "build-27")
+        self.assertTrue(check.due(now=10 ** 9))
+        check.run(now=10 ** 9)
+        self.assertEqual(check.newer, 27)
+        self.assertEqual(settings._state["update_latest"], 27)
+
+    def test_same_build_source_build_and_errors(self):
+        from Core.Update import UpdateCheck
+        check = UpdateCheck(self._settings(), 27, fetch=lambda: "build-27")
+        check.run()
+        self.assertIsNone(check.newer)
+        self.assertFalse(UpdateCheck(self._settings(), 0).enabled)             # built from source
+
+        def fail():
+            raise OSError("offline")
+        check = UpdateCheck(self._settings(), 5, fetch=fail)
+        check.run()
+        self.assertIsNone(check.newer)
+        # Checked today already: not again
+        settings = types.SimpleNamespace(state={"update_checked": 10 ** 9, "update_latest": 30},
+                                         save_state=lambda **v: None)
+        check = UpdateCheck(settings, 21)
+        self.assertFalse(check.due(now=10 ** 9 + 3600))
+        self.assertEqual(check.newer, 30)                                       # remembered from the last check
+
+
+class StatsTests(unittest.TestCase):
+    def test_summary(self):
+        import time
+        from Core import Stats
+        now = time.mktime((2026, 11, 10, 15, 0, 0, 0, 0, -1))
+        day = 86400
+        sessions = []
+        for args in (("A", "Alpha", now - 3600, 1800, 2), ("B", "Bravo", now - day, 7200, 4),
+                     ("A", "Alpha", now - 9 * day, 600, 1)):
+            sessions = Stats.add_session(sessions, *args)
+        state = {"play": {"A": [5000, 1], "B": [7200, 2], "C": [0, 0]}, "sessions": sessions}
+        summary = Stats.summarize(state, {"A": "Alpha (library)"}, now=now)
+        self.assertEqual(summary["total"], 12200)
+        self.assertEqual(summary["games"], 2)
+        self.assertEqual((summary["week"], summary["week_sessions"]), (9000, 2))
+        self.assertEqual(summary["longest"][:2], ("Bravo", 7200))
+        self.assertEqual(summary["top"], [("Bravo", 7200), ("Alpha (library)", 5000)])
+        self.assertEqual(len(summary["days"]), 7)
+        self.assertEqual([seconds for _, seconds in summary["days"]][-2:], [7200, 1800])
+        self.assertAlmostEqual(summary["players"], 7 / 3)
+
+    def test_empty_state_and_cap(self):
+        from Core import Stats
+        summary = Stats.summarize({})
+        self.assertEqual((summary["total"], summary["sessions"], summary["longest"]), (0, 0, None))
+        sessions = []
+        for i in range(Stats.MAX_SESSIONS + 5):
+            sessions = Stats.add_session(sessions, "k", "t", i, 60, 1)
+        self.assertEqual(len(sessions), Stats.MAX_SESSIONS)
+        self.assertEqual(sessions[-1][2], Stats.MAX_SESSIONS + 4)
+
+
+class RestoreTests(unittest.TestCase):
+    def test_backup_list_and_restore(self):
+        from Core.Backup import backup_saves, list_backups, restore
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "save")
+            folder = os.path.join(root, "0000000000000000", "user", "0100152000022000")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "progress.bin"), "w") as f:
+                f.write("first")
+            game = {"title": "Mario Kart", "title_id": "0100152000022000"}
+            backups = os.path.join(tmp, "backups")
+            first = backup_saves(game, root, [folder], backups, now=1000)
+            with open(os.path.join(folder, "progress.bin"), "w") as f:
+                f.write("second")
+            with open(os.path.join(folder, "extra.bin"), "w") as f:
+                f.write("new file")
+            backup_saves(game, root, [folder], backups, now=2000)
+            found = list_backups(game, backups)
+            self.assertEqual(len(found), 2)
+            self.assertGreater(found[0]["time"], found[1]["time"])             # newest first
+            self.assertEqual(found[1]["path"], first)
+
+            self.assertEqual(restore(first, root, [folder]), 1)
+            with open(os.path.join(folder, "progress.bin")) as f:
+                self.assertEqual(f.read(), "first")
+            self.assertFalse(os.path.exists(os.path.join(folder, "extra.bin")))  # not in that backup
+            self.assertEqual(list_backups({"title": "Other"}, backups), [])
+
+    def test_restore_refuses_paths_outside_the_save_folder(self):
+        import zipfile
+        from Core.Backup import restore
+        with tempfile.TemporaryDirectory() as tmp:
+            root = os.path.join(tmp, "save")
+            os.makedirs(root)
+            keep = os.path.join(root, "keep")
+            os.makedirs(keep)
+            bad = os.path.join(tmp, "bad.zip")
+            with zipfile.ZipFile(bad, "w") as archive:
+                archive.writestr("../outside.txt", "x")
+            with self.assertRaises(ValueError):
+                restore(bad, root, [keep])
+            self.assertTrue(os.path.isdir(keep))                                # nothing was deleted
+            self.assertFalse(os.path.exists(os.path.join(tmp, "outside.txt")))
+
+
+class DiagnosticsTests(unittest.TestCase):
+    def test_log_errors(self):
+        from Eden.Eden import parse_log_errors
+        log_text = (
+            "[   0.100000] Frontend <Info> yuzu/main.cpp:main:10: starting\n"
+            "[   1.000000] Loader <Error> core/loader/nsp.cpp:Load:112: Failed to load NSP\n"
+            "[   1.100000] Service <Warning> x.cpp:f:1: ignored\n"
+            "[   1.200000] Loader <Error> core/loader/nsp.cpp:Load:112: Failed to load NSP\n"
+            "[   1.300000] Core <Critical> core/core.cpp:Load:310: Failed to load ROM (Error 3)!\n"
+            "garbage line\n")
+        self.assertEqual(parse_log_errors(log_text),
+                         ["Loader: Failed to load NSP", "Core: Failed to load ROM (Error 3)!"])
+        self.assertEqual(parse_log_errors(log_text, limit=1), ["Core: Failed to load ROM (Error 3)!"])
+        self.assertEqual(parse_log_errors(""), [])
+
+    def test_games_with_their_own_input_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            custom = os.path.join(tmp, "custom")
+            os.makedirs(custom)
+            files = {
+                "0100152000022000.ini": "[Controls]\nplayer_0_profile_name\\default=false\n"
+                                        "player_0_profile_name=MyPad\n",
+                "01006A800016E000.ini": "[Controls]\nplayer_0_profile_name\\default=true\n"
+                                        "player_0_profile_name=\n[Renderer]\nfoo=1\n",
+                "0100F2C0115B6000.ini": "[Renderer]\nfoo=1\n",
+                "notes.txt": "x",
+            }
+            for name, text in files.items():
+                with open(os.path.join(custom, name), "w", encoding="utf-8") as f:
+                    f.write(text)
+            self.assertEqual(Config.custom_input_titles(tmp), {"0100152000022000"})
+            self.assertEqual(Config.custom_input_titles(os.path.join(tmp, "missing")), set())
+
+    def test_close_confirmation_is_turned_off_with_the_players(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "qt-config.ini")
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(QT_CONFIG)
+            profiles = Config.load_profiles(os.path.join(tmp, "none"), Config.load_template(IniFile.load(path)))
+            assignment = [{"path": "p1", "name": "p1", "profile_key": Config.DEFAULT_PROFILE}]
+            Config.write_input(path, assignment, hardware(("p1", RAW_GUID)), profiles, never_confirm_stop=True)
+            items = IniFile.load(path).items("UI")
+            self.assertEqual(items["confirmStop"], "2")
+            self.assertEqual(items["confirmStop\\default"], "false")
+
+
+class VariantTests(unittest.TestCase):
+    """More than one emulator of the family behind one launcher."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.saved_env, self.saved_cwd = dict(os.environ), os.getcwd()
+        os.chdir(self.tmp.name)
+        self.dir = os.path.join(self.tmp.name, "emu")
+        os.makedirs(self.dir)
+        for name, content in (("eden", b"qt-config.ini"), ("eglantine", b"qt-config.ini .. NUP directory tree ..")):
+            with open(os.path.join(self.dir, name), "wb") as f:
+                f.write(content)
+        os.environ["XDG_CONFIG_HOME"] = os.path.join(self.tmp.name, "cfg")
+        os.environ["XDG_DATA_HOME"] = os.path.join(self.tmp.name, "data")
+        os.environ.pop("EDEN_LAUNCHER_USER_DIR", None)
+
+    def tearDown(self):
+        os.chdir(self.saved_cwd)
+        os.environ.clear()
+        os.environ.update(self.saved_env)
+        self.tmp.cleanup()
+
+    def _emulator(self, sections=None):
+        from Core.Settings import Settings
+        from Eden import Eden
+        emu = Eden()
+        emu.settings = Settings(sections or {})
+        emu.locate(self.dir)
+        return emu
+
+    def test_switch_2_games_go_to_the_emulator_that_runs_them(self):
+        emu = self._emulator()
+        self.assertEqual([v.display_name for v in emu.variants], ["Eden", "Eglantine"])
+        eglantine = emu.variants[1]
+        self.assertFalse(emu.supports_nx2())
+        self.assertTrue(eglantine.supports_nx2())
+        self.assertIs(emu.emulator_for({"title": "Old", "nx2": False}), emu)
+        self.assertIs(emu.emulator_for({"title": "New", "nx2": True}), eglantine)
+        # The user's own choice for a game wins; an emulator no longer installed does not
+        self.assertIs(emu.emulator_for({"title": "Old"}, "eglantine"), eglantine)
+        self.assertIs(emu.emulator_for({"title": "New", "nx2": True}, "Eden"), emu)
+        self.assertIs(emu.emulator_for({"title": "Old"}, "Gone"), emu)
+        self.assertEqual(eglantine.game_command("g.nup")[0], os.path.join(self.dir, "eglantine"))
+
+    def test_emulators_listed_in_the_settings(self):
+        other = os.path.join(self.tmp.name, "forks", "lichii")
+        os.makedirs(other)
+        with open(os.path.join(other, "lichii"), "wb") as f:
+            f.write(b"qt-config.ini")
+        emu = self._emulator({"emulators": {"lichii": other, "gone": os.path.join(self.tmp.name, "nope")}})
+        self.assertEqual([v.display_name for v in emu.variants], ["Eden", "Eglantine", "Lichii"])
+        lichii = emu.variants[2]
+        self.assertTrue(lichii.is_variant)
+        lichii.ensure_ready(emu)
+        self.assertIn(Config.DEFAULT_PROFILE, lichii.profiles)
+
+    def test_one_emulator_alone(self):
+        os.remove(os.path.join(self.dir, "eglantine"))
+        emu = self._emulator()
+        self.assertEqual(emu.variants, [emu])
+        self.assertIs(emu.emulator_for({"title": "New", "nx2": True}), emu)
+
+
+class MenuTests(unittest.TestCase):
+    def _menu(self):
+        from Core.Menu import Menu
+        sounds = []
+        ui = types.SimpleNamespace(width=0, canvas=types.SimpleNamespace(delete=lambda tag: None))
+        return Menu(ui, sound=sounds.append), sounds
+
+    def test_selection_skips_captions_and_changes_values(self):
+        menu, sounds = self._menu()
+        state = {"volume": 70, "played": 0}
+        rows = lambda: [                                                        # noqa: E731
+            {"label": "Sound", "kind": "header"},
+            {"label": "Volume", "value": state["volume"],
+             "change": lambda delta: state.update(volume=state["volume"] + 10 * delta)},
+            {"label": "Nothing here", "kind": "info"},
+            {"label": "Play", "action": lambda: state.update(played=state["played"] + 1)},
+        ]
+        menu.open("Settings", rows)
+        self.assertEqual(menu.frame["index"], 1)                                # first row that can be chosen
+        menu.change(-1)
+        self.assertEqual(state["volume"], 60)
+        self.assertEqual(menu.frame["rows"][1]["value"], 60)                    # rebuilt after the change
+        menu.move(1)
+        self.assertEqual(menu.frame["index"], 3)
+        menu.activate()
+        self.assertEqual(state["played"], 1)
+        menu.move(1)                                                            # wraps
+        self.assertEqual(menu.frame["index"], 1)
+        menu.activate()                                                         # A on a value: next value
+        self.assertEqual(state["volume"], 70)
+        self.assertIn("move", sounds)
+
+    def test_menus_stack(self):
+        menu, _ = self._menu()
+        left = []
+        menu.open("First", lambda: [{"label": "Open", "action": lambda: menu.open(
+            "Second", lambda: [{"label": "x", "action": lambda: None}], on_back=lambda: left.append("second"))}])
+        menu.activate()
+        self.assertEqual(len(menu.stack), 2)
+        menu.back()
+        self.assertEqual((len(menu.stack), left), (1, ["second"]))
+        menu.back()
+        self.assertFalse(menu.active)
+        menu.back()                                                             # nothing open: no error
+
+
+@unittest.skipUnless(HAS_TK, "Tk not available")
+class SplitModeTests(unittest.TestCase):
+    def test_modes(self):
+        from Core.Ui import split_layout, split_mode
+        names = lambda players, mode: [name for _, name in split_layout(players, mode) or []]   # noqa: E731
+        self.assertEqual(names(2, "rows"), ["split_top", "split_bottom"])
+        self.assertEqual(names(2, "columns"), ["split_left", "split_right"])
+        self.assertEqual(names(4, "columns"), ["split_tl", "split_tr", "split_bl", "split_br"])
+        self.assertIsNone(split_layout(2, "shared"))
+        self.assertEqual(names(1, "shared"), ["split_full"])
+        # Mario Kart 8 Deluxe is known to play two players side by side
+        self.assertEqual(split_mode({"title_id": "0100152000022000"}), "columns")
+        self.assertEqual(split_mode({"title_id": "0100152000022000"}, "rows"), "rows")
+        self.assertEqual(split_mode({"title_id": None}, "auto"), "rows")
+        self.assertEqual(split_mode(None, "bogus"), "rows")
+
+    def test_themes_have_the_same_colours(self):
+        from Core.Theme import COLOR, THEMES, apply_theme, player_color
+        for name, theme in THEMES.items():
+            self.assertEqual(set(theme), set(THEMES["dark"]), name)
+            self.assertEqual(len(set(theme["PLAYERS"])), 8, name)
+        try:
+            self.assertEqual(apply_theme("light"), "light")
+            self.assertEqual(player_color(0), THEMES["light"]["PLAYERS"][0])
+            self.assertEqual(apply_theme("nope"), "dark")
+        finally:
+            apply_theme("dark")
+        self.assertEqual(COLOR["BG"], THEMES["dark"]["BG"])
+
+
+class CrashReportTests(unittest.TestCase):
+    def test_startup_error_is_written_and_shown(self):
+        import importlib
+        bootstrap = importlib.import_module("Core.Bootstrap")
+        shown = []
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = (bootstrap.base_dir, bootstrap._run, sys.modules["tkinter"].messagebox.showerror)
+            bootstrap.base_dir = lambda: tmp
+
+            def broken(emulator):
+                raise RuntimeError("boom at startup")
+            bootstrap._run = broken
+            sys.modules["tkinter"].messagebox.showerror = lambda title, text: shown.append(text)
+            try:
+                with self.assertRaises(SystemExit) as stop:
+                    bootstrap.run(types.SimpleNamespace(name="Eden"))
+                self.assertEqual(stop.exception.code, 1)
+                with open(os.path.join(tmp, "EdenLauncher.crash.log"), encoding="utf-8") as f:
+                    text = f.read()
+            finally:
+                bootstrap.base_dir, bootstrap._run, sys.modules["tkinter"].messagebox.showerror = saved
+        self.assertIn("RuntimeError: boom at startup", text)
+        self.assertIn("startup", text)
+        self.assertEqual(len(shown), 1)
+        self.assertIn("boom at startup", shown[0])
+
+
+class CloseRequestTests(unittest.TestCase):
+    @unittest.skipIf(sys.platform == "win32", "POSIX signal path")
+    def test_a_running_process_is_asked_to_close(self):
+        import subprocess
+        from Core.Process import request_close
+        process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            self.assertTrue(request_close(process))
+            self.assertIsNotNone(process.wait(timeout=10))
+            self.assertFalse(request_close(process))                            # already gone
+        finally:
+            if process.poll() is None:
+                process.kill()
+        self.assertFalse(request_close(None))
 
 
 if __name__ == "__main__":

@@ -204,6 +204,62 @@ def launch(cmd_args, env):
 
 
 # ============================================================================
+# CLOSING
+# ============================================================================
+WM_CLOSE = 0x0010
+
+
+def request_close(process):
+    """
+    Ask the emulator to close the way its own window's X button does, so it
+    stops the game and saves its settings before exiting. Returns at once;
+    the caller waits for the process and kills it if it does not go.
+
+    Windows : WM_CLOSE posted to the process's visible top-level windows
+    Others  : SIGTERM
+
+    Returns:
+        bool: True if the request could be delivered.
+    """
+    if process is None or process.poll() is not None:
+        return False
+    if sys.platform != "win32":
+        try:
+            process.terminate()
+            return True
+        except OSError:
+            return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumWindows.argtypes = [enum_proc, wintypes.LPARAM]
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetWindow.restype = wintypes.HWND
+        user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+        found = []
+
+        @enum_proc
+        def each(hwnd, _):
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == process.pid and user32.IsWindowVisible(hwnd) \
+                    and not user32.GetWindow(hwnd, 4):          # GW_OWNER: skip owned dialogs
+                found.append(hwnd)
+            return True
+
+        user32.EnumWindows(each, 0)
+        for hwnd in found:
+            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        return bool(found)
+    except Exception as e:
+        log("WARNING", "Could not ask the emulator to close", e)
+        return False
+
+
+# ============================================================================
 # APPIMAGE MOUNT HELPERS (LINUX ONLY)
 # ============================================================================
 _mount_proc = None  # Popen handle - terminating it unmounts the squashfs

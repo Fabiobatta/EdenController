@@ -26,6 +26,7 @@ from collections import OrderedDict
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import Glyphs
+from .Theme import COLOR
 from .I18n import last_played_label, players_label, playtime_label, t
 
 TILE_W, TILE_H = 150, 225       # 720p baseline
@@ -43,11 +44,6 @@ BADGE = {                       # fill, text
     "bad": ((210, 58, 48, 240), (255, 255, 255)),
     "neutral": ((12, 14, 20, 200), (240, 240, 240)),
 }
-ACCENT = "#F5D90A"
-TEXT = "#F4F5F7"
-TEXT_DIM = "#A9AFBB"
-OK = "#3FB950"
-BAD = "#E5534B"
 
 
 def badge_state(game_players, joined):
@@ -94,6 +90,8 @@ class GameGrid:
         self._selected_items = None     # (halo, enlarged tile)
         self._layout = None             # what the items were built for
         self._shown_index = None
+        self.nav = None                 # (label, colour) of the player browsing, on the selected tile
+        self._letter_job = None
 
     # ------------------------------------------------------------------
     # State
@@ -128,13 +126,13 @@ class GameGrid:
     def accent(self, game):
         """Highlight colour for `game`: from its art, computed once per picture."""
         if not self.ui.dynamic_colors:
-            return ACCENT
+            return COLOR["ACCENT"]
         path = game.get("cover") or game.get("image") or game.get("background")
         cached = game.get("_accent")
         if cached and cached[0] == path:
             return cached[1]
         art = self.ui.load_art(path)
-        color = Glyphs.vivid_color(art, ACCENT) if art is not None else ACCENT
+        color = Glyphs.vivid_color(art, COLOR["ACCENT"]) if art is not None else COLOR["ACCENT"]
         game["_accent"] = (path, color)
         return color
 
@@ -158,7 +156,7 @@ class GameGrid:
             line_h = font.size * 1.25
             y = (height - line_h * len(lines)) / 2
             for line in lines:
-                draw.text((width / 2, y), line, font=font, fill=TEXT, anchor="ma")
+                draw.text((width / 2, y), line, font=font, fill="#F4F5F7", anchor="ma")
                 y += line_h
 
         tile = tile.convert("RGBA")
@@ -167,16 +165,38 @@ class GameGrid:
         ImageDraw.Draw(mask).rounded_rectangle((0, 0, width - 1, height - 1), radius=radius, fill=255)
         tile.putalpha(mask)
 
+        if game.get("hidden"):
+            # Shown only while "show hidden games" is on: clearly set apart
+            dark = Image.new("RGBA", tile.size, (0, 0, 0, 255))
+            dark.putalpha(mask)
+            tile = Image.blend(tile, dark, 0.62)
+
         players = game.get("players")
         if players:
             self._draw_badge(tile, players, badge)
         if game.get("favorite"):
             self._draw_star(tile)
+        if game.get("custom_input"):
+            self._draw_corner(tile, "!", COLOR["WARN"], right=True, bottom=True)
         if selected:
             ImageDraw.Draw(tile).rounded_rectangle(
                 (0, 0, width - 1, height - 1), radius=radius, outline=self.accent(game),
                 width=max(2, ui.px(BORDER)))
+            if self.nav:
+                self._draw_corner(tile, *self.nav)
         return tile
+
+    def _draw_corner(self, tile, text, color, right=False, bottom=False):
+        """A small disc in a corner: the browsing player (top left), a warning (bottom right)."""
+        ui = self.ui
+        d = max(14, ui.px(30))
+        margin = ui.px(8)
+        disc = Glyphs.disc(text, d, color, COLOR["DISC_TEXT"] if text != "!" else "#111111")
+        ring = Glyphs.panel(d + 4, d + 4, (d + 4) // 2, (12, 14, 20, 220))
+        x = tile.width - margin - d if right else margin
+        y = tile.height - margin - d if bottom else margin
+        tile.alpha_composite(ring, (x - 2, y - 2))
+        tile.alpha_composite(disc, (x, y))
 
     def _draw_badge(self, tile, players, state):
         """Players pill in the bottom-left corner: [people icon] 1-4."""
@@ -201,7 +221,7 @@ class GameGrid:
         d = max(14, ui.px(28))
         margin = ui.px(7)
         disc = Glyphs.panel(d, d, d // 2, (12, 14, 20, 210))
-        icon = Glyphs.star(int(d * 0.66), ACCENT)
+        icon = Glyphs.star(int(d * 0.66), COLOR["ACCENT"])
         x = tile.width - margin - d
         tile.alpha_composite(disc, (x, margin))
         tile.alpha_composite(icon, (x + (d - icon.width) // 2, margin + (d - icon.height) // 2))
@@ -213,7 +233,8 @@ class GameGrid:
     def _tile(self, game, width, height, selected):
         badge = badge_state(game.get("players"), self.players)
         key = (game["path"], width, height, selected, badge, bool(game.get("cover")), bool(game.get("image")),
-               bool(game.get("favorite")), self.accent(game) if selected else None)
+               bool(game.get("favorite")), self.accent(game) if selected else None,
+               bool(game.get("hidden")), bool(game.get("custom_input")), self.nav if selected else None)
         photo = self._tiles.get(key)
         if photo is None:
             photo = ImageTk.PhotoImage(self._compose(game, width, height, selected, badge))
@@ -244,41 +265,47 @@ class GameGrid:
         title_x = left
         if selected.get("favorite"):
             star_h = ui.px(26)
-            star = ui.photo(("star", star_h), lambda: Glyphs.star(star_h, ACCENT))
+            star = ui.photo(("star", star_h), lambda: Glyphs.star(star_h, COLOR["ACCENT"]))
             c.create_image(left, ui.px(46), image=star, anchor="w", tags=tags)
             title_x += star_h + ui.px(12)
-        c.create_text(title_x, ui.px(46), anchor="w", fill=TEXT, font=title_font, tags=tags,
+        c.create_text(title_x, ui.px(46), anchor="w", fill=COLOR["TEXT"], font=title_font, tags=tags,
                       text=ui.truncate(selected["title"], title_font, ui.width - title_x - ui.px(300)))
         x, y = left, ui.px(90)
         players = selected.get("players")
         if players:
             icon_h = ui.px(20)
             icon = ui.photo(("people", 1 if players <= 1 else 2, icon_h),
-                            lambda: Glyphs.people(1 if players <= 1 else 2, icon_h, TEXT))
+                            lambda: Glyphs.people(1 if players <= 1 else 2, icon_h, COLOR["TEXT"]))
             c.create_image(x, y, image=icon, anchor="w", tags=tags)
             x += icon.width() + ui.px(8)
-            item = c.create_text(x, y, anchor="w", fill=TEXT, font=ui.font(16),
+            item = c.create_text(x, y, anchor="w", fill=COLOR["TEXT"], font=ui.font(16),
                                  text=players_label(players), tags=tags)
             x = c.bbox(item)[2] + ui.px(16)
             if self.players >= 2:
                 fits = players >= self.players
                 text = ("✓  " + t("players_fit", n=self.players)) if fits else \
                        ("✕  " + t("players_too_many", max=players, n=self.players))
-                x += self._chip(x, y, text, OK if fits else BAD) + ui.px(16)
+                x += self._chip(x, y, text, COLOR["OK"] if fits else COLOR["BAD"]) + ui.px(16)
         if self.filter_players:
-            x += self._chip(x, y, t("games_filter", n=self.filter_players), ACCENT) + ui.px(16)
-        item = c.create_text(x, y, anchor="w", fill=TEXT_DIM, font=ui.font(14, False),
+            x += self._chip(x, y, t("games_filter", n=self.filter_players), COLOR["ACCENT"]) + ui.px(16)
+        if selected.get("emulator_name"):
+            x += self._chip(x, y, selected["emulator_name"], COLOR["TEXT_DIM"]) + ui.px(16)
+        if selected.get("custom_input"):
+            x += self._chip(x, y, "!  " + t("games_custom_input"), COLOR["WARN"]) + ui.px(16)
+        if selected.get("hidden"):
+            x += self._chip(x, y, t("games_hidden"), COLOR["TEXT_DIM"]) + ui.px(16)
+        item = c.create_text(x, y, anchor="w", fill=COLOR["TEXT_DIM"], font=ui.font(14, False),
                              text=f"{self.index + 1} / {visible_count}", tags=tags)
         seconds = selected.get("playtime") or 0
         if seconds >= 60:
             x = c.bbox(item)[2] + ui.px(24)
             icon_h = ui.px(17)
-            icon = ui.photo(("clock", icon_h), lambda: Glyphs.clock(icon_h, TEXT_DIM))
+            icon = ui.photo(("clock", icon_h), lambda: Glyphs.clock(icon_h, COLOR["TEXT_DIM"]))
             c.create_image(x, y, image=icon, anchor="w", tags=tags)
             text = playtime_label(seconds)
             if selected.get("last_played"):
                 text += "  ·  " + last_played_label(selected["last_played"])
-            c.create_text(x + icon.width() + ui.px(8), y, anchor="w", fill=TEXT_DIM, font=ui.font(14, False),
+            c.create_text(x + icon.width() + ui.px(8), y, anchor="w", fill=COLOR["TEXT_DIM"], font=ui.font(14, False),
                           text=text, tags=tags)
 
     def _chip(self, x, y, text, color):
@@ -287,7 +314,7 @@ class GameGrid:
         font = ui.font(13)
         w, h = font.measure(text) + ui.px(24), ui.px(26)
         pill = ui.photo(("chip", w, h, color), lambda: Glyphs.panel(
-            w, h, h // 2, (0, 0, 0, 140), outline=(color, max(1, ui.px(1.5)))))
+            w, h, h // 2, COLOR["CHIP"], outline=(color, max(1, ui.px(1.5)))))
         c.create_image(x, y, image=pill, anchor="w", tags=("games", "games-header"))
         c.create_text(x + w // 2, y, text=text, fill=color, font=font, tags=("games", "games-header"))
         return w
@@ -299,7 +326,7 @@ class GameGrid:
         Tk repaints a small area instead of the whole grid.
         """
         ui, c = self.ui, self.ui.canvas
-        if not ui.width:
+        if not ui.width or ui._hold_draw:
             return
         if self.loading or not self.games:
             self._clear()
@@ -373,9 +400,9 @@ class GameGrid:
         # More rows hint
         arrow_font = ui.font(14)
         if self.first_row > 0:
-            c.create_text(ui.width // 2, top - ui.px(16), text="▲", fill=TEXT_DIM, font=arrow_font, tags="games")
+            c.create_text(ui.width // 2, top - ui.px(16), text="▲", fill=COLOR["TEXT_DIM"], font=arrow_font, tags="games")
         if self.first_row + self.rows <= last_row:
-            c.create_text(ui.width // 2, ui.height - ui.px(BOTTOM) + ui.px(4), text="▼", fill=TEXT_DIM,
+            c.create_text(ui.width // 2, ui.height - ui.px(BOTTOM) + ui.px(4), text="▼", fill=COLOR["TEXT_DIM"],
                           font=arrow_font, tags="games")
 
         self._layout = layout
@@ -384,6 +411,30 @@ class GameGrid:
             self._slide((self.first_row - previous_first) * (tile_h + gap))
         if self._preload_job is None:
             self._preload_job = ui.root.after_idle(self._preload, (tile_w, tile_h))
+
+    def halo(self, game, width, height):
+        return self._halo(game, width, height)
+
+    def flash_letter(self, letter):
+        """The letter just jumped to, large in the middle of the grid for a moment."""
+        ui, c = self.ui, self.ui.canvas
+        c.delete("games-letter")
+        if self._letter_job:
+            ui.root.after_cancel(self._letter_job)
+            self._letter_job = None
+        if not ui.width or ui._hold_draw:
+            return
+        size = ui.px(150)
+        cx, cy = ui.width // 2, ui.height // 2
+        box = ui.photo(("letter-box", size), lambda: Glyphs.panel(
+            size, size, ui.px(28), COLOR["DIALOG"], outline=(COLOR["ACCENT"], ui.px(3))))
+        c.create_image(cx, cy, image=box, tags=("games", "games-letter"))
+        c.create_text(cx, cy, text=letter, fill=COLOR["ACCENT"], font=ui.font(84), tags=("games", "games-letter"))
+
+        def clear():
+            self._letter_job = None
+            c.delete("games-letter")
+        self._letter_job = ui.root.after(650, clear)
 
     def _halo(self, game, width, height):
         """Soft glow behind the selected tile, in the game's colour."""
@@ -403,13 +454,17 @@ class GameGrid:
     def _draw_placeholder(self):
         ui, c = self.ui, self.ui.canvas
         if self.loading:
-            c.create_text(ui.px(64), ui.px(46), anchor="w", fill=TEXT, font=ui.font(30),
+            c.create_text(ui.px(64), ui.px(46), anchor="w", fill=COLOR["TEXT"], font=ui.font(30),
                           text=t("games_loading"), tags="games")
         else:
-            c.create_text(ui.width // 2, ui.height // 2 - ui.px(20), fill=TEXT, font=ui.font(24),
-                          text=t("games_none_for", n=self.filter_players), tags="games")
-            ui.rich(ui.width // 2, ui.height // 2 + ui.px(24), f"[y] {t('hint_filter_off')}", 16,
-                    TEXT_DIM, anchor="center", tags="games")
+            if self.filter_players:
+                c.create_text(ui.width // 2, ui.height // 2 - ui.px(20), fill=COLOR["TEXT"], font=ui.font(24),
+                              text=t("games_none_for", n=self.filter_players), tags="games")
+                ui.rich(ui.width // 2, ui.height // 2 + ui.px(24), f"[y] {t('hint_filter_off')}", 16,
+                        COLOR["TEXT_DIM"], anchor="center", tags="games")
+            else:
+                c.create_text(ui.width // 2, ui.height // 2, fill=COLOR["TEXT"], font=ui.font(24),
+                              text=t("games_none"), tags="games")
 
     def _slide(self, distance):
         """Ease the tiles into place after a scroll (about 100 ms)."""

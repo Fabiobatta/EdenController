@@ -296,6 +296,47 @@ def split_screen(width, height, regions, highlight, color):
 
 
 @lru_cache(maxsize=16)
+def split_map(width, height, regions, colors, text_color="#111111"):
+    """
+    A TV showing every player's part of the screen: `regions` (fractions, one
+    per player) filled with that player's colour and labelled P1, P2...; with
+    regions=None the screen is shared and the players are discs in a row.
+    """
+    w, h = max(16, int(width)), max(9, int(height))
+    s = 2
+    W, H = w * s, h * s
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    border = max(2, int(s * 2))
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=H * 0.07, fill=(18, 20, 27, 255),
+                        outline=(120, 126, 140, 255), width=border)
+    inset = border + s * 2
+    inner = (W - 2 * inset, H - 2 * inset)
+    if regions:
+        for i, (x0, y0, x1, y1) in enumerate(regions[:len(colors)]):
+            gap = s * 2
+            box = (inset + x0 * inner[0] + gap, inset + y0 * inner[1] + gap,
+                   inset + x1 * inner[0] - gap, inset + y1 * inner[1] - gap)
+            d.rounded_rectangle(box, radius=s * 5, fill=_rgb(colors[i]) + (255,))
+            d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), f"P{i + 1}",
+                   font=font(min(box[3] - box[1], box[2] - box[0]) * 0.34), fill=_rgb(text_color), anchor="mm")
+    else:
+        d.rounded_rectangle((inset + s * 2, inset + s * 2, W - inset - s * 2, H - inset - s * 2),
+                            radius=s * 5, fill=(255, 255, 255, 30))
+        count = len(colors)
+        per_row = 4 if count > 4 else count
+        rows = (count + per_row - 1) // per_row
+        size = int(min(inner[0] / (per_row * 1.25), inner[1] / (rows * 1.3)))
+        for i, color in enumerate(colors):
+            in_row = min(per_row, count - (i // per_row) * per_row)
+            cx = W / 2 + ((i % per_row) - (in_row - 1) / 2) * size * 1.2
+            cy = H / 2 + ((i // per_row) - (rows - 1) / 2) * size * 1.2
+            d.ellipse((cx - size / 2, cy - size / 2, cx + size / 2, cy + size / 2), fill=_rgb(color) + (255,))
+            d.text((cx, cy), f"P{i + 1}", font=font(size * 0.42), fill=_rgb(text_color), anchor="mm")
+    return _finish(img, (w, h))
+
+
+@lru_cache(maxsize=16)
 def clock(height, color):
     """Clock face (play time)."""
     h = max(8, int(height))
@@ -362,10 +403,10 @@ def disc(text, diameter, fill, text_color="#111111"):
 
 
 @lru_cache(maxsize=8)
-def vertical_fade(width, height, alpha_top, alpha_bottom):
-    """Black band fading from alpha_top to alpha_bottom (footer backdrop)."""
+def vertical_fade(width, height, alpha_top, alpha_bottom, color=(0, 0, 0)):
+    """Band of `color` fading from alpha_top to alpha_bottom (footer backdrop)."""
     column = Image.linear_gradient("L").resize((1, max(1, int(height))))
     column = column.point(lambda v: int(alpha_top + (alpha_bottom - alpha_top) * v / 255))
-    band = Image.new("RGBA", (1, max(1, int(height))), (0, 0, 0, 0))
+    band = Image.new("RGBA", (1, max(1, int(height))), tuple(color) + (0,))
     band.putalpha(column)
     return band.resize((max(1, int(width)), max(1, int(height))))

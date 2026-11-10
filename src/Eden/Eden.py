@@ -13,6 +13,7 @@ first.
 """
 
 import os
+import re
 import sys
 
 from Core.Emulator import Emulator
@@ -43,7 +44,13 @@ NOT_EMULATORS = ("edenlauncher", "unins", "maintenancetool", "crashpad", "vc_red
 # controller applet: a build that still has the [UI] option contains its key
 APPLET_PROBES = ((Config.APPLET_UI, b"disableControllerApplet"),
                  (Config.APPLET_MODE, b"controller_applet_mode"))
+# A string only a build that boots Switch 2 containers carries (a log message
+# of core/file_sys/nup_container.cpp)
+NX2_PROBE = b"NUP directory tree"
 PROBE_CHUNK = 8 * 1024 * 1024
+EMULATORS_SECTION = "emulators"
+LOG_FILE = "eden_log.txt"
+LOG_TAIL_BYTES = 256 * 1024
 
 
 def probe_binary(path, needles):
@@ -98,6 +105,30 @@ def _find_fork(directory, extension=".exe"):
     return None
 
 
+_LOG_LINE = re.compile(r"^\[\s*[\d.]+\]\s+(?P<category>\S+)\s+<(?P<level>\w+)>\s+(?P<rest>.*)$")
+_LOG_SOURCE = re.compile(r"^\S+:\S*:\d+:\s*")
+
+
+def parse_log_errors(text, limit=3):
+    """
+    Error and critical messages of a yuzu-style log, newest last:
+
+        [  12.345678] Loader <Error> core/loader/nsp.cpp:Load:112: message
+
+    becomes "Loader: message". Repeated messages are listed once.
+    """
+    messages = []
+    for line in text.splitlines():
+        match = _LOG_LINE.match(line.strip())
+        if not match or match.group("level") not in ("Error", "Critical"):
+            continue
+        message = f"{match.group('category')}: {_LOG_SOURCE.sub('', match.group('rest')).strip()}"
+        if message in messages:
+            messages.remove(message)
+        messages.append(message)
+    return messages[-limit:]
+
+
 def data_folder_name(exe):
     """
     Name of the per-user data folder a fork may use instead of Eden's
@@ -140,6 +171,19 @@ fullscreen = true
 ; Empty = find eden.exe, eglantine.exe, lichii.exe or any other Eden fork
 ; in the launcher's folder.
 emulator_exe =
+; The "Are you sure you want to close?" question Eden asks when its window is
+; closed during a game. It cannot be answered with a gamepad, and it stops
+; the launcher from closing Eden cleanly:
+;   off  = never ask (recommended)
+;   keep = leave Eden's setting alone
+confirm_close = off
+
+; More emulators of the Eden family for the same game list: one per line,
+; any name = the emulator's exe or folder. Switch 2 games then start with
+; the first one that runs them (Eglantine), the others with the emulator
+; above; each game's menu ([start] in the grid) can pick another one.
+[Emulators]
+; Eglantine = D:\\Emulators\\Eglantine\\eglantine.exe
 """
 
 _SETTINGS_IT = f"""\
@@ -175,6 +219,20 @@ fullscreen = true
 ; Vuoto = cerca eden.exe, eglantine.exe, lichii.exe o un altro fork di Eden
 ; nella cartella del launcher.
 emulator_exe =
+; La domanda "Vuoi davvero chiudere?" che Eden fa quando si chiude la finestra
+; durante un gioco. Con il gamepad non si puo' rispondere, e impedisce al
+; launcher di chiudere Eden in modo pulito:
+;   off  = non chiedere mai (consigliato)
+;   keep = non toccare l'impostazione di Eden
+confirm_close = off
+
+; Altri emulatori della famiglia Eden per la stessa lista di giochi: uno per
+; riga, un nome qualsiasi = l'exe o la cartella dell'emulatore. I giochi
+; Switch 2 partono con il primo che li supporta (Eglantine), gli altri con
+; l'emulatore qui sopra; dal menu di ogni gioco ([start] nella lista) se ne
+; puo' scegliere un altro.
+[Emulators]
+; Eglantine = D:\\Emulatori\\Eglantine\\eglantine.exe
 """
 
 DEFAULT_SETTINGS = {"en": _SETTINGS_EN, "it": _SETTINGS_IT}
@@ -190,6 +248,10 @@ register({
         "eden_config_text": "Could not read Eden's qt-config.ini.\n\n"
                             "Open Eden manually once so it writes a valid configuration,\n"
                             "then start this launcher again.",
+        "opt_docked": "TV (docked) mode",
+        "opt_controller_applet": "The games' own controllers window",
+        "opt_confirm_close": "Ask before closing the emulator",
+        "opt_fullscreen": "Start games in fullscreen",
     },
     "it": {
         "eden_missing_title": "Eden non trovato",
@@ -201,6 +263,10 @@ register({
         "eden_config_text": "Impossibile leggere qt-config.ini di Eden.\n\n"
                             "Apri Eden una volta a mano per creare una configurazione valida,\n"
                             "poi riavvia il launcher.",
+        "opt_docked": "Modalità TV (docked)",
+        "opt_controller_applet": "Finestra dei controller dei giochi",
+        "opt_confirm_close": "Chiedi conferma prima di chiudere l'emulatore",
+        "opt_fullscreen": "Avvia i giochi a schermo intero",
     },
 })
 
@@ -236,6 +302,13 @@ class Eden(Emulator):
 
     name = "Eden"
     default_settings = DEFAULT_SETTINGS
+    settings_section = SETTINGS_SECTION
+    setting_choices = (
+        ("docked", ("auto", "always", "never"), "auto"),
+        ("controller_applet", ("off", "on", "keep"), "off"),
+        ("confirm_close", ("off", "keep"), "off"),
+        ("fullscreen", ("true", "false"), "true"),
+    )
 
     def __init__(self):
         super().__init__()
@@ -244,6 +317,11 @@ class Eden(Emulator):
         self.backend = "SDL3"
         self.appimage_path = None
         self._sdl_dir = None
+        self.config_dir = None
+        self.variants = [self]              # every emulator found, this one first
+        self.is_variant = False
+        self._profiles_loaded = False
+        self._facts = {}                    # _binary_fact() answers of this run
 
     # ------------------------------------------------------------------
     # 1. Where everything lives
@@ -256,6 +334,10 @@ class Eden(Emulator):
         User folder        : mirrors common/fs/path_util.cpp - a portable
                              "user" folder wins over the global location.
         On Linux an AppImage is mounted and self.dir becomes <mount>/usr/bin.
+
+        Also finds the other emulators of the family this launcher can start
+        (self.variants): the other known binaries in the same folder and the
+        ones listed under [Emulators] in the settings.
         """
         self.dir = read_path_override(base, self.name) or base
         platform = _platform()
@@ -272,16 +354,6 @@ class Eden(Emulator):
                     fork = _find_fork(self.dir)
                     if fork:
                         self.display_name, self.exe = fork_name(fork), fork
-            log("INFO", "Emulator binary", self.exe)
-            portable = os.path.join(self.dir, "user")
-            appdata = os.getenv("APPDATA") or ""
-            own = os.path.join(appdata, data_folder_name(self.exe))
-            global_dir = own if os.path.isfile(os.path.join(own, "config", "qt-config.ini")) \
-                else os.path.join(appdata, "eden")
-            self.user_dir = portable if os.path.isdir(portable) else global_dir
-            config_dir = os.path.join(self.user_dir, "config")
-            self.cache_dir = os.path.join(self.user_dir, "cache")
-
         else:
             if platform == "darwin":
                 self.display_name, self.exe = _pick_binary(
@@ -306,12 +378,44 @@ class Eden(Emulator):
                 self.dir = os.path.dirname(chosen)
                 self.display_name, self.exe = fork_name(chosen), chosen
 
+        self._locate_data(platform)
+
+        # Explicit override for unusual setups (custom data directory, ...)
+        override = os.getenv(ENV_USER_DIR)
+        if override:
+            self.user_dir = override
+            self.config_dir = os.path.join(override, "config")
+            self.cache_dir = os.path.join(override, "cache")
+            self.config_path = os.path.join(self.config_dir, "qt-config.ini")
+            self.profiles_dir = os.path.join(self.config_dir, "input")
+
+        if not os.path.exists(self.exe):
+            extension = os.path.splitext(self.exe)[1]
+            fatal(
+                t("eden_missing_title"),
+                t("eden_missing_text", exe=" / ".join(stem + extension for _, stem in BINARIES), dir=self.dir),
+                "Eden binary not found", self.exe
+            )
+        self.variants = [self] + self._find_variants(platform)
+
+    def _locate_data(self, platform):
+        """user_dir, config and cache folders of the emulator at self.dir / self.exe."""
+        if platform == "win32":
+            portable = os.path.join(self.dir, "user")
+            appdata = os.getenv("APPDATA") or ""
+            own = os.path.join(appdata, data_folder_name(self.exe))
+            global_dir = own if os.path.isfile(os.path.join(own, "config", "qt-config.ini")) \
+                else os.path.join(appdata, "eden")
+            self.user_dir = portable if os.path.isdir(portable) else global_dir
+            self.config_dir = os.path.join(self.user_dir, "config")
+            self.cache_dir = os.path.join(self.user_dir, "cache")
+        else:
             # Eden checks "user" in its working directory, which it inherits
             # from the launcher
             portable = os.path.join(os.getcwd(), "user")
             if os.path.isdir(portable):
                 self.user_dir = portable
-                config_dir = os.path.join(portable, "config")
+                self.config_dir = os.path.join(portable, "config")
                 self.cache_dir = os.path.join(portable, "cache")
             else:
                 xdg_data = os.getenv("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")
@@ -321,26 +425,125 @@ class Eden(Emulator):
                 if not os.path.isfile(os.path.join(xdg_config, folder, "qt-config.ini")):
                     folder = "eden"
                 self.user_dir = os.path.join(xdg_data, folder)
-                config_dir = os.path.join(xdg_config, folder)
+                self.config_dir = os.path.join(xdg_config, folder)
                 self.cache_dir = os.path.join(xdg_cache, folder)
+        self.config_path = os.path.join(self.config_dir, "qt-config.ini")
+        self.profiles_dir = os.path.join(self.config_dir, "input")
 
-        # Explicit override for unusual setups (custom data directory, ...)
-        override = os.getenv(ENV_USER_DIR)
-        if override:
-            self.user_dir = override
-            config_dir = os.path.join(override, "config")
-            self.cache_dir = os.path.join(override, "cache")
+    # ------------------------------------------------------------------
+    # 1b. The other emulators of the family
+    # ------------------------------------------------------------------
+    def _find_variants(self, platform):
+        """
+        Emulators besides this one: known binaries next to it (they share
+        its data folder) and the [Emulators] entries of the settings (each
+        with its own folder, portable or not).
+        """
+        if self.is_appimage or self.settings is None:
+            return []
+        extension = ".exe" if platform == "win32" else ""
+        paths = [os.path.join(self.dir, stem + extension) for _, stem in BINARIES]
+        for value in (self.settings.sections.get(EMULATORS_SECTION) or {}).values():
+            path = os.path.expandvars(os.path.expanduser(value.strip().strip('"')))
+            if os.path.isdir(path):
+                _, found = _pick_binary([(n, os.path.join(path, stem + extension)) for n, stem in BINARIES])
+                path = found if os.path.isfile(found) else (_find_fork(path, extension or ".exe") or found)
+            paths.append(path)
 
-        self.config_path = os.path.join(config_dir, "qt-config.ini")
-        self.profiles_dir = os.path.join(config_dir, "input")
+        variants, seen = [], {os.path.normcase(os.path.abspath(self.exe))}
+        for path in paths:
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen or not os.path.isfile(path):
+                continue
+            seen.add(key)
+            variant = Eden()
+            variant.settings = self.settings
+            variant.is_variant = True
+            variant.dir, variant.exe = os.path.dirname(os.path.abspath(path)), path
+            variant.display_name = fork_name(path)
+            if platform == "win32":
+                variant._locate_data(platform)
+            else:
+                # Started with the launcher's working directory, like this one
+                variant.user_dir, variant.config_dir, variant.cache_dir = \
+                    self.user_dir, self.config_dir, self.cache_dir
+                variant.config_path, variant.profiles_dir = self.config_path, self.profiles_dir
+            variant.variants = [variant]
+            variants.append(variant)
+            log("INFO", "Also available", f"{variant.display_name}: {path} | {variant.config_path}")
+        return variants
 
-        if not os.path.exists(self.exe):
-            extension = os.path.splitext(self.exe)[1]
-            fatal(
-                t("eden_missing_title"),
-                t("eden_missing_text", exe=" / ".join(stem + extension for _, stem in BINARIES), dir=self.dir),
-                "Eden binary not found", self.exe
-            )
+    def emulator_for(self, game, choice=None):
+        """
+        The emulator that starts `game`.
+
+        Args:
+            choice (str | None): display name picked for this game by the
+                                 user, if any (and still installed).
+
+        A Switch 2 game goes to the first emulator that runs them; anything
+        else to this one.
+        """
+        if choice:
+            match = next((v for v in self.variants if v.display_name.lower() == choice.lower()), None)
+            if match:
+                return match
+        if game and game.get("nx2"):
+            return next((v for v in self.variants if v.supports_nx2()), self)
+        return self
+
+    def supports_nx2(self):
+        """True for a build that boots Switch 2 games (Eglantine and what derives from it)."""
+        return self._binary_fact("nx2", lambda: bool(probe_binary(self.exe, [NX2_PROBE])))
+
+    def _binary_fact(self, name, find):
+        """
+        Something read from the emulator binary, found once per binary (size
+        and date) and remembered in the "emulator" cache: {path: {"sig": [...],
+        name: value}}.
+        """
+        if name in self._facts:
+            return self._facts[name]
+        # An AppImage is mounted at a new path every run: remember it by its file
+        key = self.appimage_path or self.exe
+        try:
+            stat = os.stat(key)
+        except OSError:
+            return None
+        signature = [stat.st_size, int(stat.st_mtime)]
+        cache = self.settings.load_cache("emulator") if self.settings else {}
+        entry = cache.get(key)
+        if not isinstance(entry, dict) or entry.get("sig") != signature:
+            entry = {"sig": signature}
+        if name not in entry:
+            try:
+                entry[name] = find()
+            except OSError as e:
+                log("WARNING", "Could not read the emulator binary", e)
+                return None
+            cache[key] = entry
+            if self.settings:
+                self.settings.save_cache("emulator", cache)
+        self._facts[name] = entry[name]
+        return entry[name]
+
+    def ensure_ready(self, main):
+        """
+        Make an emulator found by _find_variants() usable for a launch: the
+        child environment of the main one, and its own controller profiles
+        (the main one's when its config cannot be read).
+        """
+        if not self.is_variant or self._profiles_loaded:
+            return
+        self.env = main.env
+        self.backend = main.backend
+        try:
+            ini = IniFile.load(self.config_path) if os.path.exists(self.config_path) else None
+            self.profiles = Config.load_profiles(self.profiles_dir, Config.load_template(ini))
+        except Exception as e:
+            log("EXCEPTION", f"Could not read {self.display_name}'s configuration, using the main profiles", e)
+            self.profiles = main.profiles
+        self._profiles_loaded = True
 
     def log_dir(self):
         return os.path.join(self.user_dir, "log")
@@ -473,7 +676,8 @@ class Eden(Emulator):
         scheme = self.applet_scheme() if disable_applet is not None else None
         Config.write_input(self.config_path, assignments, hardware, self.profiles,
                            force_docked=force_docked, disable_controller_applet=disable_applet,
-                           applet_scheme=scheme)
+                           applet_scheme=scheme,
+                           never_confirm_stop=self._setting("confirm_close", "off").lower() == "off")
 
     def applet_scheme(self):
         """
@@ -484,31 +688,40 @@ class Eden(Emulator):
         so the binary is checked for the old option's key. Read once per
         binary (size and date), then remembered.
         """
-        # An AppImage is mounted at a new path every run: remember it by its file
-        key = self.appimage_path or self.exe
-        try:
-            stat = os.stat(key)
-        except OSError:
-            return Config.APPLET_UI
-        signature = [stat.st_size, int(stat.st_mtime)]
-        cache = self.settings.load_cache("emulator") if self.settings else {}
-        entry = cache.get(key)
-        if entry and entry[:2] == signature:
-            return entry[2]
-        try:
+        def find():
             found = probe_binary(self.exe, [needle for _, needle in APPLET_PROBES])
             scheme = next((s for s, needle in APPLET_PROBES if needle in found), None)
-        except OSError as e:
-            log("WARNING", "Could not read the emulator binary", e)
-            scheme = None
-        if scheme is None:
-            log("WARNING", "Unknown controller applet option - using the [UI] one", self.exe)
-            scheme = Config.APPLET_UI
-        log("INFO", "Controller applet option", scheme)
-        cache[key] = signature + [scheme]
-        if self.settings:
-            self.settings.save_cache("emulator", cache)
-        return scheme
+            if scheme is None:
+                log("WARNING", "Unknown controller applet option - using the [UI] one", self.exe)
+            log("INFO", "Controller applet option", scheme or Config.APPLET_UI)
+            return scheme or Config.APPLET_UI
+        return self._binary_fact("applet", find) or Config.APPLET_UI
+
+    # ------------------------------------------------------------------
+    # 4b. What happened: the emulator's own log, per-game input settings
+    # ------------------------------------------------------------------
+    def last_errors(self, limit=3):
+        """
+        The last error lines of the emulator's log (eden_log.txt), newest
+        last, without timestamps and source locations - what to show when a
+        game closed right after starting.
+
+        Returns:
+            list[str]: at most `limit` messages ("Loader: Failed to ...").
+        """
+        path = os.path.join(self.log_dir(), LOG_FILE)
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - LOG_TAIL_BYTES))
+                text = f.read().decode("utf-8", "replace")
+        except OSError:
+            return []
+        return parse_log_errors(text, limit)
+
+    def custom_input_titles(self):
+        """Title IDs whose per-game configuration overrides the launcher's players."""
+        return Config.custom_input_titles(self.config_dir) if self.config_dir else set()
 
     # ------------------------------------------------------------------
     # 6. Game picker
@@ -516,30 +729,69 @@ class Eden(Emulator):
     def game_picker_enabled(self):
         return self.settings.get_bool(SETTINGS_SECTION, "game_picker", True)
 
+    def game_folders(self):
+        """
+        Where the games are looked for.
+
+        Returns:
+            (list[tuple[str, bool]], bool): (folder, deep scan) pairs, and
+            True when they come from the launcher's own game_dirs setting
+            rather than from the folders configured in the emulators.
+        """
+        folders = [(os.path.expandvars(os.path.expanduser(d)), True)
+                   for d in self.settings.get_list(SETTINGS_SECTION, "game_dirs")]
+        if folders:
+            return folders, True
+        seen = set()
+        for emulator in self.variants:
+            if not os.path.exists(emulator.config_path):
+                continue
+            try:
+                found = Games.eden_game_dirs(IniFile.load(emulator.config_path).items("UI"))
+            except Exception as e:
+                log("EXCEPTION", f"Could not read {emulator.display_name}'s game folders", e)
+                continue
+            for folder, deep in found:
+                key = os.path.normcase(os.path.abspath(folder))
+                if key not in seen:
+                    seen.add(key)
+                    folders.append((folder, deep))
+        return folders, False
+
+    def set_game_folders(self, folders):
+        self.settings.set(SETTINGS_SECTION, "game_dirs", ";".join(folders))
+
     def list_games(self):
         """Runs on a background thread (see Core/App.py)."""
         if not self.game_picker_enabled():
             return []
 
-        folders = [(os.path.expandvars(os.path.expanduser(d)), True)
-                   for d in self.settings.get_list(SETTINGS_SECTION, "game_dirs")]
-        if not folders and os.path.exists(self.config_path):
-            try:
-                folders = Games.eden_game_dirs(IniFile.load(self.config_path).items("UI"))
-            except Exception as e:
-                log("EXCEPTION", "Could not read Eden's game folders", e)
+        folders, _ = self.game_folders()
         log("INFO", "Game folders", "; ".join(f for f, _ in folders) or "none")
 
         # prod.keys lets the launcher read title IDs inside NSP/XCI files
-        keys_file = os.path.join(self.user_dir, "keys", "prod.keys")
-        header_key = Switch.load_header_key(keys_file)
+        header_key = None
+        for emulator in self.variants:
+            keys_file = os.path.join(emulator.user_dir, "keys", "prod.keys")
+            header_key = Switch.load_header_key(keys_file)
+            if header_key:
+                break
         if not header_key:
-            log("WARNING", "No header_key in prod.keys - updates/DLC recognised by name only", keys_file)
+            log("WARNING", "No header_key in prod.keys - updates/DLC recognised by name only",
+                os.path.join(self.user_dir, "keys", "prod.keys"))
         known = self.settings.load_cache("library")
         icon_dir = os.path.join(base_dir(), self.settings.get("Launcher", "covers_dir", "covers"), "nup")
         games = Games.find_games(folders, header_key=header_key, cache_dir=self.cache_dir,
                                  titledb=TitleDb.load(), known=known, icon_dir=icon_dir)
         self.settings.save_cache("library", known)
+
+        # Games whose own Eden configuration replaces the launcher's players
+        custom = {}
+        for game in games:
+            emulator = self.emulator_for(game)
+            if id(emulator) not in custom:
+                custom[id(emulator)] = emulator.custom_input_titles()
+            game["custom_input"] = (game.get("title_id") or "").upper() in custom[id(emulator)]
         return games
 
     def game_command(self, path):

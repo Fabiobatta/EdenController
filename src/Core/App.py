@@ -13,6 +13,10 @@ Screens (self.mode):
               was passed on the command line
     ROULETTE  "tonight we play...": a random game for everyone who joined
     TROPHIES  the achievements list (RB on the player cards)
+    STATS     play statistics (X on the achievements list)
+    MENU      a list menu over the screen below it: the settings (LB on the
+              player cards), a game's own menu (START in the grid)
+    SPLASH    the "let's go" screen between choosing a game and its start
 
 Remembered between sessions (Settings state file): the last game, play time
 and last-played date per game, favourites and the grid's sort order.
@@ -37,17 +41,22 @@ import threading
 import time
 from tkinter import messagebox
 
+from . import Stats
 from .Achievements import ACHIEVEMENTS, Achievements
 from .Art import ArtLibrary
-from .Backup import backup_saves
-from .I18n import t
+from .Backup import backup_saves, list_backups, restore
+from .Build import BUILD
+from .I18n import STRINGS, last_played_label, players_label, playtime_label, set_language, t
 from .Log import log
+from .Menu import Menu
 from .Paths import base_dir
-from .Process import launch
+from .Process import launch, request_close
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
-from .Ui import COLOR, LauncherUi, player_color
+from .Theme import THEME_NAMES, apply_theme
+from .Ui import COLOR, SPLIT_MODES, LauncherUi, player_color, split_layout, split_mode
+from .Update import DOWNLOAD_PAGE, UpdateCheck
 
 MAX_PLAYERS = 8
 POLL_INTERVAL_MS = 16
@@ -69,6 +78,12 @@ WIN_RUMBLE = (0.8, 450)
 SORT_MODES = ("recent", "az", "most")
 ALERT_GUARD_S = 0.6         # dialogs ignore buttons this long after they open
 MIN_SESSION_S = 10          # shorter runs (crash at boot...) are not play time
+SPLASH_MS = 1500            # the "let's go" screen before a game starts
+CLOSE_TIMEOUT_S = 5.0       # the emulator gets this long to close by itself
+QUICK_EXIT_S = 20           # an emulator gone this soon after a launch...
+INSTANT_EXIT_S = 5          # ...is reported if it failed, or closed sooner than this
+IDLE_DIM_CHOICES = ("0", "2", "5", "10", "20")
+MAX_LOOP_ERRORS_LOGGED = 5
 
 # What the close menu reports as held (diagnostics for stuck buttons):
 # (glyph, SDLManager button attribute), in display order
@@ -151,6 +166,7 @@ class LauncherApp:
         self._scan_result = None            # handed over by the scan thread
         self.waiting_for_games = False      # START pressed while still scanning
 
+        apply_theme(settings.get(LAUNCHER_SECTION, "theme", "dark").lower())
         self.ui = LauncherUi(root, emulator.name, emulator.display_name)
 
         # Launcher options
@@ -173,6 +189,25 @@ class LauncherApp:
             settings.get(LAUNCHER_SECTION, "backup_dir", "saves_backup"))))
         self.ui.motion = settings.get_bool(LAUNCHER_SECTION, "background_motion", True)
         self.ui.dynamic_colors = settings.get_bool(LAUNCHER_SECTION, "dynamic_colors", True)
+        self.ui.animations = settings.get_bool(LAUNCHER_SECTION, "animations", True)
+        self.idle_dim_s = max(0, settings.get_int(LAUNCHER_SECTION, "idle_dim_minutes", 5)) * 60
+        self.last_input = time.monotonic()
+        self.menu = Menu(self.ui, sound=lambda name: self.sounds.play(name))
+        self.ui.menu = self.menu
+        self._mode_before_menu = "PLAYERS"
+        self._confirm = None                # what A does in a "CONFIRM" dialog
+        self._alert_then = None             # what closing the "GAME_FAILED" dialog does
+        self.update = UpdateCheck(settings, BUILD, settings.get_bool(LAUNCHER_SECTION, "check_updates", True))
+        self._update_told = False
+        self.update.start()
+        self.show_hidden = False            # hidden games visible in the grid (this run only)
+        self.closing = None                 # {"deadline", "then"} while the emulator is asked to close
+        self.running_emu = None             # the emulator of self.process
+        self.launched_at = 0.0
+        self._splash_job = None
+        self._mode_before_splash = "GAMES"
+        self._loop_errors = 0
+        self._trigger_held = {}             # {instance id: (LT, RT)} for the letter jump
         self.roulette = Roulette(self.ui, on_tick=self.on_roulette_tick, on_done=self.on_roulette_done)
         state = settings.state or {}
         self.sort_mode = state.get("sort") if state.get("sort") in SORT_MODES else SORT_MODES[0]
@@ -186,7 +221,7 @@ class LauncherApp:
         self.root.bind("<Escape>", lambda e: self.handle_esc_key())
         for key, action in (("<Up>", "up"), ("<Down>", "down"), ("<Left>", "left"),
                             ("<Right>", "right"), ("<Prior>", "page_up"), ("<Next>", "page_down")):
-            self.root.bind(key, lambda e, a=action: self.move_game_selection(a))
+            self.root.bind(key, lambda e, a=action: self._key_navigation(a))
 
         # Initialize SDL2/SDL3 controller subsystem
         self.sdl.SDL_Init()
@@ -215,14 +250,26 @@ class LauncherApp:
         self.profile_keys = list(self.emu.profiles.keys())
         self.default_profile = self.profile_keys[0] if self.profile_keys else ""
 
-        combo_markup = " + ".join(f"[{COMBO_GLYPHS.get(n, n)}]" for n in self._combo_names(combo))
-        self.ui.set_tip(t("tip_kill", combo=combo_markup, name=emulator.display_name))
+        self._combo = combo
+        self._set_tip()
+        self._set_brand()
         self.update_hints()
 
         if self.picker:
             threading.Thread(target=self._scan_games, daemon=True).start()
 
         self.update_loop()
+
+    def _set_tip(self):
+        combo_markup = " + ".join(f"[{COMBO_GLYPHS.get(n, n)}]" for n in self._combo_names(self._combo))
+        self.ui.set_tip(t("tip_kill", combo=combo_markup, name=self.emu.display_name))
+
+    def _set_brand(self):
+        """Footer: the build this is, and a newer one once the check found it."""
+        parts = [t("brand_build", n=BUILD)] if BUILD else []
+        if self.update.newer:
+            parts.append(t("brand_update", n=self.update.newer))
+        self.ui.set_brand("  ·  ".join(parts))
 
     @staticmethod
     def _combo_names(text):
@@ -233,8 +280,19 @@ class LauncherApp:
     # ========================================================================
     # KEYBOARD INPUT HANDLERS
     # ========================================================================
+    def _key_navigation(self, action):
+        self._woke()
+        if self.ui.alert_mode or self.process or self.closing:
+            return
+        if self.mode == "MENU":
+            self._navigate_menu(action)
+        else:
+            self.move_game_selection(action)
+
     def handle_enter_key(self):
         """Handle Enter key press (confirm action in alerts)."""
+        if self._woke():
+            return
         if self.ui.alert_mode == "LAUNCH":
             self.ui.close_alert()
             self.proceed()
@@ -242,7 +300,15 @@ class LauncherApp:
             self.quit()
         elif self.ui.alert_mode == "KILL_CONFIRM":
             self.kill_and_quit()
-        elif self.mode == "TROPHIES":
+        elif self.ui.alert_mode == "CONFIRM":
+            self._answer_confirm(True)
+        elif self.ui.alert_mode == "GAME_FAILED":
+            self._close_failed_alert()
+        elif self.closing or self.mode == "SPLASH":
+            return
+        elif self.mode == "MENU":
+            self.menu.activate()
+        elif self.mode in ("TROPHIES", "STATS"):
             self.close_trophies()
         elif self.mode == "ROULETTE":
             if not self.roulette.spinning:
@@ -254,9 +320,17 @@ class LauncherApp:
 
     def handle_esc_key(self):
         """Handle Escape key press (cancel/back action)."""
-        if self.ui.alert_mode:
+        if self._woke():
+            return
+        if self.ui.alert_mode == "GAME_FAILED":
+            self._close_failed_alert()
+        elif self.ui.alert_mode:
             self.ui.close_alert()
-        elif self.mode == "TROPHIES":
+        elif self.mode == "SPLASH":
+            self.cancel_splash()
+        elif self.mode == "MENU":
+            self.menu.back()
+        elif self.mode in ("TROPHIES", "STATS"):
             self.close_trophies()
         elif self.mode == "ROULETTE":
             self.close_roulette()
@@ -272,61 +346,111 @@ class LauncherApp:
         self.emu.cleanup()
         self.root.destroy()
 
-    def kill_and_quit(self):
-        """Kill the emulator and exit the launcher (kill menu -> Desktop)."""
-        if self.process:
+    def _close_emulator(self, then):
+        """
+        Close the running emulator the gentle way - the same as its window's
+        X button, so it stops the game and saves its settings - and call
+        then() once it is gone. It gets CLOSE_TIMEOUT_S; an emulator that is
+        frozen (or asks for confirmation) is killed after that.
+        """
+        self.ui.close_alert()
+        if not self.process:
+            then()
+            return
+        name = (self.running_emu or self.emu).display_name
+        if request_close(self.process):
+            log("INFO", f"{name} asked to close")
+            self.closing = {"deadline": time.monotonic() + CLOSE_TIMEOUT_S, "then": then}
+            self.ui.show_toast(t("toast_closing", name=name), COLOR["ACCENT"])
+        else:
             self.process.kill()
-            log("INFO", f"{self.emu.name} killed - exiting to desktop")
+            log("INFO", f"{name} killed (no window to close)")
+            self._closed(then)
+
+    def _poll_closing(self):
+        closing = self.closing
+        if self.process and self.process.poll() is None:
+            if time.monotonic() < closing["deadline"]:
+                return
+            self.process.kill()
+            log("WARNING", "The emulator did not close in time - killed")
+        else:
+            log("INFO", "The emulator closed by itself")
+        self.closing = None
+        self._closed(closing["then"])
+
+    def _closed(self, then):
+        self.process = None
         self.end_session()
+        self.sounds.resume()
+        then()
+
+    def kill_and_quit(self):
+        """Close the emulator and exit the launcher (close menu -> Desktop)."""
+        def leave():
+            self.emu.cleanup()
+            self.root.quit()
+            sys.exit()
+        self._close_emulator(leave)
+
+    def kill_and_restart(self):
+        """Close the emulator and go back to the player cards (close menu -> Launcher)."""
+        def restart():
+            self.assignments = []           # fresh assignment
+            self.show_players()
+            self.root.deiconify()
+        self._close_emulator(restart)
+
+    def kill_and_pick(self):
+        """Close the emulator and go back to the game grid, same players (close menu -> Another game)."""
+        def pick():
+            self.show_games()
+            self.root.deiconify()
+        self._close_emulator(pick)
+
+    def _check_process(self):
+        """React to the emulator exiting by itself."""
+        code = self.process.poll()
+        if code is None:
+            return False
+        emulator = self.running_emu or self.emu
+        elapsed = time.monotonic() - self.launched_at
+        self.process = None
+        self.end_session()
+        self.sounds.resume()
+        self.root.deiconify()
+        log("INFO", f"{emulator.display_name} exited", f"code {code} after {elapsed:.0f} s")
+
+        # Gone right after the launch: a game that did not start. Say so,
+        # with what the emulator's own log says about it.
+        failed = elapsed < QUICK_EXIT_S and (code != 0 or elapsed < INSTANT_EXIT_S)
+        back_to_grid = bool(self.picker and self.games)
+        if failed:
+            errors = emulator.last_errors()
+            log("WARNING", "The game did not start", " | ".join(errors) or "no errors in the emulator's log")
+            self.sounds.play("error")
+            self._alert_then = None if back_to_grid else self._exit_launcher
+            self.ui.show_alert(
+                "GAME_FAILED", name=emulator.display_name,
+                text=t("alert_failed_text", name=emulator.display_name, seconds=max(1, int(elapsed))),
+                lines=errors or [t("alert_failed_no_errors", name=emulator.display_name)])
+        if back_to_grid:
+            # Picked from the game grid: offer it again, same players
+            self.show_games()
+        elif not failed:
+            self._exit_launcher()           # emulator closed normally
+        return False
+
+    def _exit_launcher(self):
         self.emu.cleanup()
         self.root.quit()
         sys.exit()
 
-    def kill_and_restart(self):
-        """
-        Kill the emulator and return to the launcher (kill menu -> Launcher).
-
-        Sets a flag to prevent automatic exit when the process terminates.
-        """
-        self.returning_to_launcher = True
-        if self.process:
-            self.process.kill()
-            log("INFO", f"{self.emu.name} killed - returning to launcher")
-        self.process = None
-        self.end_session()
-        self.sounds.resume()
-
-        # Reset launcher state for fresh assignment
-        self.assignments = []
+    def _close_failed_alert(self):
+        then, self._alert_then = self._alert_then, None
         self.ui.close_alert()
-        self.show_players()
-        self.root.deiconify()
-
-    def _check_process(self):
-        """React to the emulator exiting. Returns True if the loop should stop here."""
-        if self.process.poll() is None:
-            return False
-        self.process = None
-        self.end_session()
-        self.sounds.resume()
-        self.root.deiconify()
-        if self.returning_to_launcher:
-            # User chose "Launcher" from the kill menu - fresh assignment
-            log("INFO", f"{self.emu.name} exited - returning to launcher")
-            self.returning_to_launcher = False
-            self.assignments = []
-            self.show_players()
-        elif self.picker and self.games:
-            # Picked from the game grid: offer it again, same players
-            log("INFO", f"{self.emu.name} exited - back to the game grid")
-            self.show_games()
-        else:
-            # Emulator closed normally or crashed - exit launcher
-            log("INFO", f"{self.emu.name} exited - closing launcher")
-            self.emu.cleanup()
-            self.root.quit()
-            sys.exit()
-        return False
+        if then:
+            then()
 
     # ========================================================================
     # CONTROLLERS
@@ -537,16 +661,34 @@ class LauncherApp:
     # ========================================================================
     def update_loop(self):
         """
-        Main event processing loop (runs every 16ms).
+        Runs every 16 ms. An error in one pass is logged and the loop goes
+        on: a launcher that stops reading the controllers cannot even be
+        closed with one.
+        """
+        try:
+            self._tick()
+        except SystemExit:
+            raise
+        except Exception as e:
+            self._loop_errors += 1
+            if self._loop_errors <= MAX_LOOP_ERRORS_LOGGED:
+                log("EXCEPTION", "Error in the main loop", e)
+        try:
+            self.root.after(POLL_INTERVAL_MS, self.update_loop)
+        except Exception:
+            pass                                # the window is gone: quitting
 
-        Handles:
-        - Emulator process monitoring and the kill combo
-        - Controller hot-plug
-        - Game scan results and downloaded pictures
-        - Game grid navigation
-        - Gamepad button events
+    def _tick(self):
+        """
+        One pass of the main loop:
+        - emulator process monitoring and the kill combo
+        - controller hot-plug
+        - game scan results and downloaded pictures
+        - menu / game grid navigation
+        - gamepad button events
         """
         sdl = self.sdl
+        now = time.monotonic()
 
         if self._scan_result is not None:
             games, self._scan_result = self._scan_result, None
@@ -555,13 +697,20 @@ class LauncherApp:
         # ====================================================================
         # EMULATOR PROCESS MONITORING / KILL COMBO (ANY CONTROLLER)
         # ====================================================================
-        if self.process and not self.ui.alert_mode:
+        if self.closing:
+            self._poll_closing()
+        elif self.process and not self.ui.alert_mode:
             self._check_process()
             if self.process and self.kill_combo_pressed():
                 self.root.deiconify()  # Bring launcher to foreground
                 log("INFO", "Kill combo detected - showing menu")
                 self._held, self._held_next = None, 0.0
-                self.ui.show_alert("KILL_CONFIRM")
+                buttons = [("a", "alert_kill_launcher")]
+                if self.picker and self.games:
+                    buttons.append(("x", "alert_kill_games"))
+                buttons += [("y", "alert_kill_desktop"), ("b", "alert_kill_cancel")]
+                self.ui.show_alert("KILL_CONFIRM", buttons=tuple(buttons),
+                                   name=(self.running_emu or self.emu).display_name)
 
         # ====================================================================
         # HOT-PLUG
@@ -576,14 +725,23 @@ class LauncherApp:
         # ====================================================================
         for game in self.art.take_finished():
             self.ui.games_art_changed(game)
-        if self.trophy_queue and not self.process and not self.ui.trophy_showing and not self.ui.alert_mode:
+        idle = not self.process and not self.ui.alert_mode and not self.closing
+        if self.trophy_queue and idle and not self.ui.trophy_showing and self.mode != "SPLASH":
             self.announce_trophy(self.trophy_queue.pop(0))
         if self.art.sgdb_missing != self._sgdb_missing_saved:
             self._sgdb_missing_saved = set(self.art.sgdb_missing)
             self.emu.settings.save_state(covers_not_found=sorted(self._sgdb_missing_saved))
+        if self.update.newer and not self._update_told and idle and self.mode == "PLAYERS":
+            self._update_told = True
+            self._set_brand()
+            self.ui.show_toast(t("toast_update", n=self.update.newer), COLOR["ACCENT"])
 
-        if self.mode == "GAMES" and not self.ui.alert_mode and not self.process:
-            self.poll_game_navigation()
+        if idle and self.mode in ("GAMES", "MENU"):
+            self.poll_navigation()
+
+        # Nobody touched anything for a while: dim the screen (not during a game)
+        if self.idle_dim_s and idle and now - self.last_input > self.idle_dim_s:
+            self.ui.set_dim(True)
 
         # ====================================================================
         # GAMEPAD BUTTON EVENT PROCESSING
@@ -592,38 +750,55 @@ class LauncherApp:
         while sdl.SDL_PollEvent(ctypes.byref(event)) != 0:
             if event.type == sdl.SDL_CONTROLLERBUTTONDOWN:
                 button, which = sdl.get_button_info(event)
+                if self._woke():
+                    continue                    # that press only lit the screen again
                 if self.ui.alert_mode:
                     self.on_alert_button(button)
-                elif self.process:
+                elif self.process or self.closing:
                     continue    # Ignore input while a game runs (no mid-game reassignment)
+                elif self.mode == "SPLASH":
+                    if button == sdl.SDL_CONTROLLER_BUTTON_B:
+                        self.cancel_splash()
+                elif self.mode == "MENU":
+                    self.on_menu_button(button)
                 elif self.mode == "ROULETTE":
                     self.on_roulette_button(button)
-                elif self.mode == "TROPHIES":
+                elif self.mode in ("TROPHIES", "STATS"):
                     if button in (sdl.SDL_CONTROLLER_BUTTON_B, sdl.SDL_CONTROLLER_BUTTON_BACK,
                                   sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
                         self.close_trophies()
+                    elif button == sdl.SDL_CONTROLLER_BUTTON_X:
+                        self.toggle_stats()
                 elif self.mode == "GAMES":
                     self.on_games_button(button)
                 else:
                     self.on_players_button(button, which)
 
             elif event.type == sdl.SDL_CONTROLLERAXISMOTION:
-                if self.mode != "PLAYERS" or self.process:
-                    continue
                 direction, which = sdl.get_axis_motion_info(event)
-                if which is not None:
-                    if direction != 0 and not sdl.axis_engaged.get(which, False):
-                        sdl.axis_engaged[which] = True
-                        self.cycle_profile(which, direction)
-                    elif direction == 0:
-                        sdl.axis_engaged[which] = False  # reset when stick returns to center
+                if which is None:
+                    continue
+                if direction != 0 and self._woke():
+                    continue
+                if self.mode != "PLAYERS" or self.process or self.ui.alert_mode:
+                    continue
+                if direction != 0 and not sdl.axis_engaged.get(which, False):
+                    sdl.axis_engaged[which] = True
+                    self.cycle_profile(which, direction)
+                elif direction == 0:
+                    sdl.axis_engaged[which] = False  # reset when stick returns to center
 
             elif event.type == sdl.SDL_QUIT:
                 self.quit()
                 return
 
-        # Schedule next update
-        self.root.after(POLL_INTERVAL_MS, self.update_loop)
+    def _woke(self):
+        """Note an input; True when it only woke the dimmed screen (and must do nothing else)."""
+        self.last_input = time.monotonic()
+        if self.ui.dimmed:
+            self.ui.set_dim(False)
+            return True
+        return False
 
     def on_alert_button(self, button):
         sdl = self.sdl
@@ -632,12 +807,23 @@ class LauncherApp:
             return      # a press meant for the screen underneath (e.g. A to join)
         if mode == "KILL_CONFIRM":
             if button == sdl.SDL_CONTROLLER_BUTTON_A:
-                self.kill_and_restart()             # Return to launcher
+                self.kill_and_restart()             # Return to the player cards
+            elif button == sdl.SDL_CONTROLLER_BUTTON_X and self.picker and self.games:
+                self.kill_and_pick()                # Another game, same players
             elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
                 self.kill_and_quit()                # Exit to desktop
             elif button == sdl.SDL_CONTROLLER_BUTTON_B:
                 self.ui.close_alert()
                 self.root.withdraw()                # Cancel, resume game
+        elif mode == "GAME_FAILED":
+            if button in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
+                self.sounds.play("back")
+                self._close_failed_alert()
+        elif mode == "CONFIRM":
+            if button == sdl.SDL_CONTROLLER_BUTTON_A:
+                self._answer_confirm(True)
+            elif button == sdl.SDL_CONTROLLER_BUTTON_B:
+                self._answer_confirm(False)
         elif button == sdl.SDL_CONTROLLER_BUTTON_A:
             if mode == "LAUNCH":
                 self.ui.close_alert()
@@ -647,6 +833,35 @@ class LauncherApp:
         elif button == sdl.SDL_CONTROLLER_BUTTON_B:
             self.ui.close_alert()
             self.sounds.play("back")
+
+    def confirm(self, title, text, then):
+        """Ask a yes / no question; then() runs on yes."""
+        self._confirm = then
+        self.ui.show_alert("CONFIRM", title=title, text=text)
+
+    def _answer_confirm(self, yes):
+        then, self._confirm = self._confirm, None
+        self.ui.close_alert()
+        self.sounds.play("select" if yes else "back")
+        if yes and then:
+            then()
+
+    def on_menu_button(self, button):
+        """A / B in a menu; the directions are polled (poll_navigation) so that holding repeats."""
+        sdl = self.sdl
+        if button == sdl.SDL_CONTROLLER_BUTTON_A:
+            self.menu.activate()
+        elif button in (sdl.SDL_CONTROLLER_BUTTON_B, sdl.SDL_CONTROLLER_BUTTON_START):
+            self.menu.back()
+        self._after_menu()
+
+    def _after_menu(self):
+        """The last menu was closed: back to the screen it was opened from."""
+        if self.mode == "MENU" and not self.menu.active:
+            self.mode = self._mode_before_menu
+            self.nav_direction = "held"             # the press that closed it must not move the grid
+            self.nav_next_repeat = float("inf")
+            self.update_hints()
 
     def on_games_button(self, button):
         sdl = self.sdl
@@ -660,10 +875,10 @@ class LauncherApp:
         elif button == sdl.SDL_CONTROLLER_BUTTON_Y:
             self.toggle_filter()
         elif button == sdl.SDL_CONTROLLER_BUTTON_START:
-            self.cycle_sort()
+            self.open_game_menu()
         elif button == sdl.SDL_CONTROLLER_BUTTON_BACK:
             self.toggle_favorite()
-        # D-pad, stick and LB/RB are polled in poll_game_navigation()
+        # D-pad, stick, LB/RB and the triggers are polled in poll_navigation()
 
     def on_roulette_button(self, button):
         sdl = self.sdl
@@ -700,6 +915,8 @@ class LauncherApp:
             self.resume_last_game(which)
         elif button == sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER:
             self.show_trophies()
+        elif button == sdl.SDL_CONTROLLER_BUTTON_LEFT_SHOULDER:
+            self.open_settings()
         elif button == sdl.SDL_CONTROLLER_BUTTON_X:
             self.toggle_profile_edit(which)         # Enter/exit profile selection
         elif button == sdl.SDL_CONTROLLER_BUTTON_DPAD_LEFT:
@@ -739,7 +956,7 @@ class LauncherApp:
         player = len(self.assignments)
         log("INFO", f"Assigned {pad['name']} -> Player {player} | Profile: {profile_key}")
         self.refresh_grid()
-        self.ui.flash_slot(player - 1)
+        self.ui.flash_slot(player - 1, pop=True)
         self.update_hints()
         self.confirm_player_number(instance_id, player)
 
@@ -841,15 +1058,14 @@ class LauncherApp:
 
     def update_hints(self):
         """Footer button hints for the current screen."""
-        if self.mode in ("ROULETTE", "TROPHIES"):
+        if self.mode in ("ROULETTE", "TROPHIES", "STATS", "MENU", "SPLASH"):
             hints = []                          # they draw their own
         elif self.mode == "GAMES":
-            hints = [(("lb", "rb"), t("hint_page")), ("x", t("hint_surprise"))]
+            hints = [(("lt", "rt"), t("hint_letter")), ("x", t("hint_surprise"))]
             joined = len(self.assignments)
             if joined >= 2:
                 hints.append(("y", t("hint_filter_off") if self.filter_on else t("hint_filter_on", n=joined)))
-            hints += [("start", t("hint_sort", mode=t("sort_" + self.sort_mode))),
-                      ("back", t("hint_favorite")),
+            hints += [("back", t("hint_favorite")), ("start", t("hint_menu")),
                       ("a", t("hint_play")), ("b", t("hint_back"))]
         else:
             if self.has_game_args:
@@ -861,9 +1077,10 @@ class LauncherApp:
             hints = [("a", t("hint_join"))]
             last = self._last_game() if self.picker else None
             if last:
-                title = last["title"] if len(last["title"]) <= 26 else last["title"][:25].rstrip() + "…"
+                title = last["title"] if len(last["title"]) <= 20 else last["title"][:19].rstrip() + "…"
                 hints.append(("y", t("hint_resume", title=title)))
-            hints += [("rb", t("hint_trophies")), ("start", start), ("back", t("hint_quit"))]
+            hints += [("lb", t("hint_settings")), ("rb", t("hint_trophies")), ("start", start),
+                      ("back", t("hint_quit"))]
         self.ui.set_hints(hints)
 
     # ========================================================================
@@ -884,6 +1101,15 @@ class LauncherApp:
             log("EXCEPTION", "Game scan failed", e)
             games = []
         self._scan_result = games               # picked up by update_loop
+
+    def rescan_games(self):
+        """The game folders changed: list the games again in the background."""
+        self.picker = not self.has_game_args and self.emu.game_picker_enabled()
+        if not self.picker:
+            return
+        self.games_loaded = False
+        self.shown_games = []
+        threading.Thread(target=self._scan_games, daemon=True).start()
 
     def on_games_scanned(self, games):
         self.games = games
@@ -927,11 +1153,16 @@ class LauncherApp:
         state = self.emu.settings.state or {}
         played = state.get("play") or {}
         favorites = set(state.get("favorites") or ())
+        hidden = set(state.get("hidden") or ())
+        several = len(getattr(self.emu, "variants", ())) > 1
         for game in self.games:
             key = self.game_key(game)
             seconds, last = (list(played.get(key) or []) + [0, 0])[:2]
             game["playtime"], game["last_played"] = seconds, last
             game["favorite"] = key in favorites
+            game["hidden"] = key in hidden
+            # With more than one emulator, the grid says which one starts the game
+            game["emulator_name"] = self.emulator_for(game).display_name if several else None
         by_title = lambda g: g["title"].lower()     # noqa: E731
         orders = {
             "recent": lambda g: (not g["favorite"], -(g["last_played"] or 0), by_title(g)),
@@ -940,9 +1171,15 @@ class LauncherApp:
         }
         self.games = sorted(self.games, key=orders[self.sort_mode])
 
+    def emulator_for(self, game):
+        """The emulator that starts `game`: the one chosen in its menu, else the automatic one."""
+        choice = ((self.emu.settings.state or {}).get("emulators") or {}).get(self.game_key(game))
+        return self.emu.emulator_for(game, choice)
+
     def start_session(self, game, from_roulette=False):
         key = self.game_key(game)
-        self.session = {"key": key, "start": time.monotonic(), "game": game}
+        self.session = {"key": key, "start": time.monotonic(), "game": game, "epoch": time.time(),
+                        "players": len(self.assignments)}
         played = dict(self.emu.settings.state.get("play") or {})
         seconds = (list(played.get(key) or []) + [0])[0]
         played[key] = [seconds, int(time.time())]
@@ -960,7 +1197,10 @@ class LauncherApp:
         played = dict(self.emu.settings.state.get("play") or {})
         seconds, last = (list(played.get(session["key"]) or []) + [0, int(time.time())])[:2]
         played[session["key"]] = [seconds + elapsed, last]
-        self.emu.settings.save_state(play=played)
+        sessions = Stats.add_session(self.emu.settings.state.get("sessions"), session["key"],
+                                     session["game"]["title"], session.get("epoch", time.time() - elapsed),
+                                     elapsed, session.get("players", 0))
+        self.emu.settings.save_state(play=played, sessions=sessions)
         log("INFO", "Play time", f"{session['key']}: +{elapsed // 60} min")
         self.trophy_queue += self.achievements.game_ended(session["game"], session["key"], elapsed)
         if self.games:
@@ -985,13 +1225,6 @@ class LauncherApp:
         self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["ACCENT"])
         self._reorder_keeping(game)
 
-    def cycle_sort(self):
-        self.sort_mode = SORT_MODES[(SORT_MODES.index(self.sort_mode) + 1) % len(SORT_MODES)]
-        self.emu.settings.save_state(sort=self.sort_mode)
-        self.sounds.play("toggle")
-        self.ui.show_toast(t("hint_sort", mode=t("sort_" + self.sort_mode)), COLOR["ACCENT"])
-        self._reorder_keeping(self.shown_games[self.game_index] if self.shown_games else None)
-
     def _reorder_keeping(self, game):
         """Re-sort the grid, keeping `game` selected."""
         self.order_games()
@@ -1011,6 +1244,12 @@ class LauncherApp:
         self.ui.show_trophy(t(f"ach_{achievement}"), t(f"ach_{achievement}_desc"))
 
     def show_trophies(self):
+        self._mode_before_trophies = self.mode
+        self.sounds.play("toggle")
+        self._show_trophy_list()
+        self.update_hints()
+
+    def _show_trophy_list(self):
         unlocked = self.achievements.unlocked
         items = []
         for achievement in ACHIEVEMENTS:
@@ -1020,13 +1259,38 @@ class LauncherApp:
                 desc += f" · {info['game']}"
             date = time.strftime("%d/%m/%Y", time.localtime(info["at"])) if info else ""
             items.append((t(f"ach_{achievement}"), desc, bool(info), date))
-        self._mode_before_trophies = self.mode
         self.mode = "TROPHIES"
-        self.sounds.play("toggle")
         self.ui.show_trophies(items, t("trophies_count", n=sum(1 for i in items if i[2]), total=len(items)))
-        self.update_hints()
+
+    def toggle_stats(self):
+        """X on the achievements list: the statistics, and back."""
+        self.sounds.play("toggle")
+        if self.mode == "STATS":
+            self.ui.hide_stats()
+            self._show_trophy_list()
+            return
+        state = self.emu.settings.state or {}
+        summary = Stats.summarize(state, {self.game_key(g): g["title"] for g in self.games})
+        longest = summary["longest"]
+        tiles = [
+            (t("stats_total"), playtime_label(summary["total"]) if summary["total"] >= 60 else "—",
+             t("stats_total_detail", n=summary["games"])),
+            (t("stats_week"), playtime_label(summary["week"]) if summary["week"] >= 60 else "—",
+             t("stats_week_detail", n=summary["week_sessions"])),
+            (t("stats_longest"), playtime_label(longest[1]) if longest else "—",
+             f"{longest[0]} · {time.strftime('%d/%m/%Y', time.localtime(longest[2]))}" if longest else
+             t("stats_none_yet")),
+            (t("stats_players"), f"{summary['players']:.1f}".rstrip("0").rstrip(".") if summary["players"] else "—",
+             t("stats_players_detail", n=summary["sessions"])),
+        ]
+        days = [(t("weekday_short").split()[time.localtime(start).tm_wday], seconds)
+                for start, seconds in summary["days"]]
+        self.mode = "STATS"
+        self.ui.hide_trophies()
+        self.ui.show_stats({"tiles": tiles, "days": days, "games": summary["top"]})
 
     def close_trophies(self):
+        self.ui.hide_stats()
         self.ui.hide_trophies()
         self.sounds.play("back")
         self.mode = self._mode_before_trophies
@@ -1040,7 +1304,7 @@ class LauncherApp:
     # ========================================================================
     def start_roulette(self, exclude=None):
         joined = len(self.assignments)
-        candidates = pick_candidates(self.games, joined)
+        candidates = pick_candidates([g for g in self.games if not g.get("hidden")], joined)
         if not candidates:
             self.sounds.play("error")
             self.ui.show_toast(t("roulette_none", n=joined))
@@ -1075,23 +1339,29 @@ class LauncherApp:
         if chosen is not None:
             if chosen not in self.shown_games:
                 self.filter_on = False
-                self.shown_games = self.games
-            self.game_index = self.shown_games.index(chosen)
+                self._apply_filter()
+            if chosen in self.shown_games:
+                self.game_index = self.shown_games.index(chosen)
         self.show_games()
 
     # ========================================================================
     # GAME GRID
     # ========================================================================
     def _apply_filter(self):
-        """Games on screen: all, or only those that take every joined player."""
+        """
+        Games on screen: every game that is not hidden, or only those that
+        take every joined player. The list object is kept when its content
+        did not change, so the grid does not scroll back to the top.
+        """
         joined = len(self.assignments)
         if joined < 2:
             self.filter_on = False
         selected = self.shown_games[self.game_index] if 0 <= self.game_index < len(self.shown_games) else None
+        games = [g for g in self.games if self.show_hidden or not g.get("hidden")]
         if self.filter_on:
-            self.shown_games = [g for g in self.games if (g.get("players") or 0) >= joined]
-        else:
-            self.shown_games = self.games
+            games = [g for g in games if (g.get("players") or 0) >= joined]
+        if games != self.shown_games or not self.shown_games:
+            self.shown_games = games
         if selected in self.shown_games:
             self.game_index = self.shown_games.index(selected)
         else:
@@ -1104,8 +1374,6 @@ class LauncherApp:
             self.waiting_for_games = True
             self.ui.show_games_loading()
         else:
-            if not self.shown_games:
-                self.shown_games = self.games
             self._apply_filter()
             joined = len(self.assignments)
             self.ui.show_games(self.shown_games, self.game_index, players=joined,
@@ -1165,19 +1433,32 @@ class LauncherApp:
             self.ui.show_games(self.shown_games, index, players=joined,
                                filter_players=joined if self.filter_on else 0)
 
-    def poll_game_navigation(self):
+    def poll_navigation(self):
         """
         Read the held direction from every pad: D-pad or left stick move one
-        game/row, LB/RB a page. Holding repeats, like a console menu.
+        game/row (or one menu row / value), LB/RB a page. Holding repeats,
+        like a console menu. In the grid the triggers jump to the next letter.
         """
         sdl = self.sdl
         action = None
-        for pad in self.pads.values():
+        for instance_id, pad in self.pads.items():
             ctrl = pad["ctrl"]
             try:
                 stick_x, stick_y = sdl.get_left_x(ctrl), sdl.get_left_y(ctrl)
+                left, right = sdl.get_triggers(ctrl)
             except Exception:
-                stick_x = stick_y = 0.0
+                stick_x = stick_y = left = right = 0.0
+            # Triggers: one jump per press
+            held = (left > TRIGGER_PRESSED, right > TRIGGER_PRESSED)
+            before = self._trigger_held.get(instance_id, (False, False))
+            self._trigger_held[instance_id] = held
+            if self.mode == "GAMES" and held != before and not self._woke():
+                jump = -1 if held[0] and not before[0] else 1 if held[1] and not before[1] else 0
+                if jump:
+                    self._set_browsing(pad)
+                    self.jump_letter(jump)
+            if action:
+                continue
             pressed = lambda button: sdl.SDL_GameControllerGetButton(ctrl, button)  # noqa: E731
             if pressed(sdl.SDL_CONTROLLER_BUTTON_DPAD_UP) or stick_y < -STICK_THRESHOLD:
                 action = "up"
@@ -1192,34 +1473,133 @@ class LauncherApp:
             elif pressed(sdl.SDL_CONTROLLER_BUTTON_RIGHT_SHOULDER):
                 action = "page_down"
             if action:
-                break
+                self._set_browsing(pad)
 
         now = time.monotonic()
         if action is None:
             self.nav_direction = None
-        elif action != self.nav_direction:
+            return
+        if self.nav_direction == "held":
+            return                              # still the press that opened / closed a menu
+        if action != self.nav_direction:
+            if self._woke():                    # the screen was dimmed: only wake it
+                self.nav_direction = action
+                self.nav_next_repeat = float("inf")
+                return
             self.nav_direction = action
             self.nav_next_repeat = now + NAV_REPEAT_DELAY
-            self.move_game_selection(action)
         elif now >= self.nav_next_repeat:
+            self.last_input = now
             self.nav_next_repeat = now + NAV_REPEAT_RATE
+        else:
+            return
+        if self.mode == "MENU":
+            self._navigate_menu(action)
+        else:
             self.move_game_selection(action)
+
+    def _set_browsing(self, pad):
+        """The grid shows who is browsing: that player's number and colour on the selected tile."""
+        slot = next((i for i, a in enumerate(self.assignments) if a["path"] == pad["path"]), None)
+        self.ui.grid.nav = None if slot is None else (f"P{slot + 1}", player_color(slot))
+
+    def _navigate_menu(self, action):
+        if action in ("up", "down"):
+            self.menu.move(-1 if action == "up" else 1)
+        elif action in ("page_up", "page_down"):
+            self.menu.move(-5 if action == "page_up" else 5)
+        else:
+            self.menu.change(-1 if action == "left" else 1)
+
+    @staticmethod
+    def _letter(game):
+        first = game["title"].strip()[:1].upper()
+        return first if first.isalpha() else "#"
+
+    def jump_letter(self, direction):
+        """
+        LT / RT in the grid: to the first game of the previous / next letter.
+        Letters only line up in the A-Z order, so the grid switches to it.
+        """
+        if self.mode != "GAMES" or not self.shown_games or self.process:
+            return
+        if self.sort_mode != "az":
+            self.sort_mode = "az"
+            self.emu.settings.save_state(sort=self.sort_mode)
+            self._reorder_keeping(self.shown_games[self.game_index])
+            self.ui.show_toast(t("hint_sort", mode=t("sort_az")), COLOR["ACCENT"])
+        games, count = self.shown_games, len(self.shown_games)
+        letter = self._letter
+
+        def group_start(i):
+            while i > 0 and letter(games[i - 1]) == letter(games[i]) \
+                    and bool(games[i - 1].get("favorite")) == bool(games[i].get("favorite")):
+                i -= 1
+            return i
+
+        index = self.game_index
+        if direction > 0:
+            start = group_start(index)
+            index = start
+            while index < count and group_start(index) == start:
+                index += 1
+            index %= count                       # past the last letter: back to the first
+        else:
+            start = group_start(index)
+            index = group_start(start - 1) if start > 0 else group_start(count - 1)
+        self.game_index = index
+        self.sounds.play("move")
+        joined = len(self.assignments)
+        self.ui.show_games(games, index, players=joined, filter_players=joined if self.filter_on else 0)
+        self.ui.grid.flash_letter(letter(games[index]))
 
     def launch_selected_game(self):
         if self.shown_games:
             self.launch_game(self.shown_games[self.game_index])
 
     def launch_game(self, game, from_roulette=False):
-        """Back up the saves, remember the game, start it."""
+        """Show who plays where for a moment, then start the game."""
         log("INFO", "Game selected", game["path"])
         self.roulette.close()
+        self.menu.close()
         self.sounds.play("launch")
+        if not self.ui.animations:
+            self._launch_now(game, from_roulette)
+            return
+        emulator = self.emulator_for(game)
+        players = [player_color(i) for i in range(len(self.assignments))]
+        mode = split_mode(game, ((self.emu.settings.state or {}).get("split") or {}).get(self.game_key(game)))
+        self._mode_before_splash = "PLAYERS" if self.mode == "PLAYERS" else "GAMES"
+        self.mode = "SPLASH"
+        self.update_hints()
+        self.ui.set_backdrop(game)
+        self.ui.show_splash(game, players, split_layout(len(players), mode),
+                            emulator.display_name if len(self.emu.variants) > 1 else None)
+        self._splash_job = self.root.after(SPLASH_MS, self._launch_now, game, from_roulette)
+
+    def cancel_splash(self):
+        """B on the "let's go" screen: do not start after all."""
+        if self._splash_job:
+            self.root.after_cancel(self._splash_job)
+            self._splash_job = None
+        self.ui.hide_splash()
+        self.sounds.play("back")
+        if self._mode_before_splash == "PLAYERS":
+            self.show_players()
+        else:
+            self.show_games()
+
+    def _launch_now(self, game, from_roulette=False):
+        """Back up the saves, remember the game, start it."""
+        self._splash_job = None
+        emulator = self.emulator_for(game)
         if self.backup_keep > 0:
-            root, folders = self.emu.save_folders(game)
+            root, folders = emulator.save_folders(game)
             backup_saves(game, root, folders, self.backup_dir, self.backup_keep)
         self.start_session(game, from_roulette)
         self.mode = "GAMES"
-        self.force_launch(self.emu.game_command(game["path"]))
+        self.force_launch(emulator.game_command(game["path"]), emulator)
+        self.ui.hide_splash()
 
     def resume_last_game(self, instance_id):
         """Y on the player cards: straight back into the last game."""
@@ -1309,7 +1689,7 @@ class LauncherApp:
         else:
             self.force_launch()
 
-    def force_launch(self, cmd_args=None):
+    def force_launch(self, cmd_args=None, emulator=None):
         """
         Write the controller configuration and start the emulator.
 
@@ -1317,37 +1697,416 @@ class LauncherApp:
             cmd_args (list[str] | None): Command line to run. Defaults to the
                 emulator's command with this launcher's own arguments (e.g. a
                 game path from Playnite) passed straight through.
+            emulator (Emulator | None): one of self.emu.variants; the main
+                emulator when not given.
         """
+        emulator = emulator or self.emu
+        emulator.ensure_ready(self.emu)
         playing = [a for a in self.assignments if not a.get("waiting")]
         if len(playing) < len(self.assignments):
             log("WARNING", "Starting without the players whose controller is still disconnected",
                 ", ".join(f"P{i + 1}" for i, a in enumerate(self.assignments) if a.get("waiting")))
-        self.emu.write_input_config(playing, self.scan_hardware())
+        emulator.write_input_config(playing, self.scan_hardware())
 
         if cmd_args is None:
-            cmd_args = self.emu.command(sys.argv)
+            cmd_args = emulator.command(sys.argv)
         log("INFO", "Launching", str(cmd_args))
         self.root.withdraw()  # Hide launcher window
         self.returning_to_launcher = False  # Clear restart flag
+        self.ui.set_dim(False)
 
-        if os.path.exists(self.emu.exe):
+        if os.path.exists(emulator.exe):
             try:
-                self.process = launch(cmd_args, self.emu.env)
+                self.process = launch(cmd_args, emulator.env or self.emu.env)
+                self.running_emu = emulator
+                self.launched_at = time.monotonic()
                 self.sounds.suspend()
             except Exception as e:
                 log("EXCEPTION", "Launch failed", e)
                 messagebox.showerror(
                     t("error_launch_title"),
-                    t("error_launch_text", name=self.emu.display_name, error=e)
+                    t("error_launch_text", name=emulator.display_name, error=e)
                 )
                 sys.exit()
         else:
-            log("ERROR", "Executable not found", self.emu.exe)
+            log("ERROR", "Executable not found", emulator.exe)
             messagebox.showerror(
                 t("error_missing_title"),
-                t("error_missing_text", path=self.emu.exe)
+                t("error_missing_text", path=emulator.exe)
             )
             sys.exit()
+
+    # ========================================================================
+    # MENUS
+    # ========================================================================
+    def _open_menu(self, *args, **kwargs):
+        if self.mode != "MENU":
+            self._mode_before_menu = self.mode
+            self.mode = "MENU"
+            self.nav_direction = "held"             # the press that opened it must not move it
+            self.nav_next_repeat = float("inf")
+            self.update_hints()
+        self.menu.open(*args, **kwargs)
+
+    @staticmethod
+    def _value_label(value):
+        """Display text of an option's value ("auto" -> "Automatic"), the value itself if unnamed."""
+        key = f"val_{str(value).lower()}"
+        return t(key) if key in STRINGS["en"] else str(value)
+
+    def _choice_row(self, section, key, values, default, apply=None, label=None):
+        """A settings row cycling `key` of `section` through `values`, saved at once."""
+        settings = self.emu.settings
+        if tuple(values) == ("true", "false"):
+            current = "true" if settings.get_bool(section, key, default == "true") else "false"
+        else:
+            current = settings.get(section, key, default).lower()
+        if current not in values:
+            current = default
+
+        def change(delta):
+            value = values[(values.index(current) + delta) % len(values)]
+            settings.set(section, key, value)
+            if apply:
+                apply(value)
+        return {"label": label or t(f"opt_{key}"), "value": self._value_label(current), "change": change}
+
+    # ------------------------------------------------------------------
+    # Settings (LB on the player cards)
+    # ------------------------------------------------------------------
+    def open_settings(self):
+        self.sounds.play("toggle")
+        self._open_menu(lambda: t("settings_title"), self._settings_rows,
+                        subtitle=lambda: t("settings_subtitle"))
+
+    def _settings_rows(self):
+        settings, launcher = self.emu.settings, LAUNCHER_SECTION
+        on_off = ("true", "false")
+        row = self._choice_row
+
+        def language(value):
+            set_language(value)
+            self._set_tip()
+            self._set_brand()
+            self.ui.redraw()
+
+        def motion(value):
+            self.ui.motion = value == "true"
+            self.ui._backgrounds.clear()            # the backdrop is drawn larger when it drifts
+            self.ui._drift = (0, 0)
+            self.ui._apply_background()
+
+        def colors(value):
+            self.ui.dynamic_colors = value == "true"
+            self.ui.grid.reset()
+
+        def sound(_value=None):
+            self.sounds.shutdown()
+            self.sounds = Sounds(
+                enabled=settings.get_bool(launcher, "sounds", True),
+                volume=settings.get_int(launcher, "sound_volume", 70),
+                override_dir=os.path.join(base_dir(), "sounds"))
+
+        def backups(value):
+            self.backup_keep = settings.get_int(launcher, "backup_keep", 10) if value == "true" else 0
+
+        def idle(value):
+            self.idle_dim_s = int(value) * 60
+
+        def updates(value):
+            self.update.enabled = value == "true" and BUILD > 0
+            self.update.start()
+
+        volume = max(0, min(100, settings.get_int(launcher, "sound_volume", 70)))
+
+        def set_volume(delta):
+            settings.set(launcher, "sound_volume", max(0, min(100, volume + 10 * delta)))
+            sound()
+
+        def sort(delta):
+            self.sort_mode = SORT_MODES[(SORT_MODES.index(self.sort_mode) + delta) % len(SORT_MODES)]
+            settings.save_state(sort=self.sort_mode)
+            if self.games:
+                self.order_games()
+                self.shown_games = []
+
+        folders, _ = self.emu.game_folders()
+        rows = [
+            {"label": t("settings_look"), "kind": "header"},
+            row(launcher, "language", ("auto", "it", "en"), "auto", language),
+            row(launcher, "theme", THEME_NAMES, "dark", self.ui.set_theme),
+            row(launcher, "background_motion", on_off, "true", motion),
+            row(launcher, "animations", on_off, "true",
+                lambda value: setattr(self.ui, "animations", value == "true")),
+            row(launcher, "dynamic_colors", on_off, "true", colors),
+            row(launcher, "idle_dim_minutes", IDLE_DIM_CHOICES, "5", idle),
+            {"label": t("settings_sound"), "kind": "header"},
+            row(launcher, "sounds", on_off, "true", sound),
+            {"label": t("opt_sound_volume"), "value": f"{volume}%", "change": set_volume},
+            row(launcher, "rumble", on_off, "true",
+                lambda value: setattr(self, "rumble_enabled", value == "true")),
+            {"label": t("settings_games"), "kind": "header"},
+        ]
+        if not self.has_game_args and self.emu.game_picker_enabled():
+            rows.append({"label": t("opt_game_dirs"), "value": t("folders_count", n=len(folders)),
+                         "action": self.open_folders})
+            rows.append({"label": t("gm_sort"), "value": t("sort_" + self.sort_mode), "change": sort})
+        rows.append(row(launcher, "backup_saves", on_off, "true", backups))
+        if self.emu.setting_choices:
+            rows.append({"label": self.emu.display_name, "kind": "header"})
+            for key, values, default in self.emu.setting_choices:
+                rows.append(row(self.emu.settings_section, key, values, default))
+        rows += [
+            {"label": t("settings_launcher"), "kind": "header"},
+            row(launcher, "check_updates", on_off, "true", updates),
+            {"label": t("settings_version", version=self._version_text()), "kind": "info"},
+        ]
+        if self.update.newer:
+            rows.append({"label": t("settings_update", n=self.update.newer, page=DOWNLOAD_PAGE), "kind": "info"})
+        return rows
+
+    @staticmethod
+    def _version_text():
+        from .Bootstrap import version_text
+        return version_text()
+
+    # ------------------------------------------------------------------
+    # Game folders (from the settings)
+    # ------------------------------------------------------------------
+    def open_folders(self):
+        self._folders_depth = len(self.menu.stack)
+        self._folders_changed = False
+        self._open_menu(t("opt_game_dirs"), self._folders_rows, subtitle=t("folders_subtitle"),
+                        on_back=self._folders_closed)
+
+    def _folders_rows(self):
+        folders, own = self.emu.game_folders()
+        paths = [folder for folder, _ in folders]
+        rows = []
+        if not own and paths:
+            rows.append({"label": t("folders_from_emulator", name=self.emu.display_name), "kind": "header"})
+        for path in paths:
+            if own:
+                rows.append({"label": path, "value": t("folders_remove"),
+                             "action": lambda p=path: self._set_folders([f for f in paths if f != p])})
+            else:
+                rows.append({"label": path, "kind": "info"})
+        if not paths:
+            rows.append({"label": t("folders_none"), "kind": "info"})
+        rows.append({"label": t("folders_add"), "action": lambda: self._browse(None, paths)})
+        if own:
+            rows.append({"label": t("folders_reset", name=self.emu.display_name),
+                         "action": lambda: self._set_folders([])})
+        return rows
+
+    def _set_folders(self, folders):
+        self.emu.set_game_folders(folders)
+        self._folders_changed = True
+        log("INFO", "Game folders set", "; ".join(folders) or "(the emulator's own)")
+
+    def _folders_closed(self):
+        if self._folders_changed:
+            self.rescan_games()
+            self.ui.show_toast(t("toast_rescan"), COLOR["ACCENT"])
+
+    @staticmethod
+    def _roots():
+        """Where the folder browser starts: the drives on Windows, / and home elsewhere."""
+        if sys.platform == "win32":
+            return [f"{letter}:\\" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{letter}:\\")]
+        return [path for path in ("/", os.path.expanduser("~")) if os.path.isdir(path)]
+
+    def _browse(self, path, current):
+        """One level of the folder browser: pick this folder, go up, or enter a subfolder."""
+        def rows():
+            if path is None:
+                return [{"label": root, "action": lambda r=root: self._browse(r, current)} for root in self._roots()]
+            found = [{"label": "✓  " + t("folders_use"), "color": COLOR["OK"],
+                      "action": lambda: self._add_folder(path, current)}]
+            try:
+                names = sorted((n for n in os.listdir(path) if not n.startswith((".", "$"))
+                                and os.path.isdir(os.path.join(path, n))), key=str.lower)
+            except OSError:
+                names = []
+                found.append({"label": t("folders_unreadable"), "kind": "info"})
+            for name in names:
+                found.append({"label": name, "value": "›",
+                              "action": lambda n=name: self._browse(os.path.join(path, n), current)})
+            return found
+        self._open_menu(t("folders_add"), rows, subtitle=path or t("folders_pick_drive"))
+
+    def _add_folder(self, path, current):
+        path = os.path.normpath(path)
+        known = {os.path.normcase(os.path.abspath(f)) for f in current}
+        if os.path.normcase(os.path.abspath(path)) not in known:
+            self._set_folders(list(current) + [path])
+        del self.menu.stack[self._folders_depth + 1:]       # back to the list of folders
+        self.menu.refresh()
+
+    # ------------------------------------------------------------------
+    # A game's menu (START in the grid)
+    # ------------------------------------------------------------------
+    def open_game_menu(self):
+        if not self.shown_games:
+            return
+        game = self.shown_games[self.game_index]
+        self.sounds.play("toggle")
+        self._open_menu(game["title"], lambda: self._game_rows(game), game=game,
+                        info=lambda: self._game_info(game), on_back=lambda: self._game_menu_closed(game))
+
+    def _game_info(self, game):
+        lines = []
+        if game.get("players"):
+            lines.append(players_label(game["players"]))
+        if (game.get("playtime") or 0) >= 60:
+            lines.append(t("gm_played", time=playtime_label(game["playtime"])))
+        if game.get("last_played"):
+            lines.append(t("gm_last", when=last_played_label(game["last_played"])))
+        if game.get("title_id"):
+            lines.append(game["title_id"])
+        lines.append(os.path.basename(game["path"]) if os.path.basename(game["path"]).lower() != "main"
+                     else os.path.basename(os.path.dirname(os.path.dirname(game["path"]))))
+        if game.get("custom_input"):
+            lines.append("!  " + t("games_custom_input"))
+        return lines
+
+    def _state_map(self, name):
+        return dict((self.emu.settings.state or {}).get(name) or {})
+
+    def _game_rows(self, game):
+        key = self.game_key(game)
+        settings = self.emu.settings
+        state = settings.state or {}
+        def play():
+            self._regroup(game)                 # a favourite / sort change made here still counts
+            self.launch_game(game)
+        rows = [{"label": t("gm_play"), "color": COLOR["OK"], "action": play}]
+
+        def favorite(_delta):
+            favorites = list(state.get("favorites") or [])
+            favorites.remove(key) if key in favorites else favorites.append(key)
+            settings.save_state(favorites=favorites)
+            game["favorite"] = key in favorites
+            self.trophy_queue += self.achievements.favorites_changed(len(favorites))
+            self.ui.grid.forget(game)
+        rows.append({"label": t("hint_favorite"), "value": t("val_true" if game.get("favorite") else "val_false"),
+                     "change": favorite})
+
+        variants = self.emu.variants
+        if len(variants) > 1:
+            choices = [None] + [v.display_name for v in variants]
+            chosen = self._state_map("emulators").get(key)
+            chosen = chosen if chosen in choices else None
+
+            def emulator(delta):
+                picked = choices[(choices.index(chosen) + delta) % len(choices)]
+                stored = self._state_map("emulators")
+                stored.pop(key, None)
+                if picked:
+                    stored[key] = picked
+                settings.save_state(emulators=stored)
+                game["emulator_name"] = self.emulator_for(game).display_name
+            automatic = self.emu.emulator_for(game).display_name
+            rows.append({"label": t("gm_emulator"), "change": emulator,
+                         "value": chosen or t("gm_auto", what=automatic)})
+
+        mode = self._state_map("split").get(key, "auto")
+        mode = mode if mode in SPLIT_MODES else "auto"
+
+        def split(delta):
+            picked = SPLIT_MODES[(SPLIT_MODES.index(mode) + delta) % len(SPLIT_MODES)]
+            stored = self._state_map("split")
+            stored.pop(key, None)
+            if picked != "auto":
+                stored[key] = picked
+            settings.save_state(split=stored)
+        rows.append({"label": t("gm_split"), "change": split,
+                     "value": t(f"split_mode_{mode}") if mode != "auto" else
+                     t("gm_auto", what=t(f"split_mode_{split_mode(game)}"))})
+
+        backups = list_backups(game, self.backup_dir)
+        if backups:
+            rows.append({"label": t("gm_restore"), "value": t("gm_backups", n=len(backups)),
+                         "action": lambda: self._open_backups(game)})
+        else:
+            rows.append({"label": t("gm_no_backups"), "kind": "info"})
+
+        def hide():
+            hidden = list(state.get("hidden") or [])
+            hidden.remove(key) if key in hidden else hidden.append(key)
+            settings.save_state(hidden=hidden)
+            game["hidden"] = key in hidden
+            self.ui.show_toast(t("toast_hidden" if game["hidden"] else "toast_unhidden"), COLOR["ACCENT"])
+            self.menu.back()
+            self._after_menu()
+        rows.append({"label": t("gm_unhide" if game.get("hidden") else "gm_hide"), "action": hide})
+
+        rows.append({"label": t("gm_list"), "kind": "header"})
+
+        def sort(delta):
+            self.sort_mode = SORT_MODES[(SORT_MODES.index(self.sort_mode) + delta) % len(SORT_MODES)]
+            settings.save_state(sort=self.sort_mode)
+        rows.append({"label": t("gm_sort"), "value": t("sort_" + self.sort_mode), "change": sort})
+        hidden_count = sum(1 for g in self.games if g.get("hidden"))
+        if hidden_count:
+            def show_hidden(_delta):
+                self.show_hidden = not self.show_hidden
+            rows.append({"label": t("gm_show_hidden", n=hidden_count), "change": show_hidden,
+                         "value": t("val_true" if self.show_hidden else "val_false")})
+        return rows
+
+    def _regroup(self, game):
+        """Sort and filter the games again, keeping `game` selected if it is still shown."""
+        self.order_games()
+        self.shown_games = []
+        self._apply_filter()
+        if game in self.shown_games:
+            self.game_index = self.shown_games.index(game)
+
+    def _game_menu_closed(self, game):
+        """Favourite, hidden, sort order may have changed: rebuild the grid around the game."""
+        self._regroup(game)
+        joined = len(self.assignments)
+        self.ui.show_games(self.shown_games, self.game_index, players=joined,
+                           filter_players=joined if self.filter_on else 0)
+
+    # ------------------------------------------------------------------
+    # Restoring a save backup (from a game's menu)
+    # ------------------------------------------------------------------
+    def _open_backups(self, game):
+        def rows():
+            found = []
+            for backup in list_backups(game, self.backup_dir):
+                when = time.strftime("%d/%m/%Y  %H:%M", time.localtime(backup["time"]))
+                size = backup["size"] / 1024
+                found.append({"label": when, "value": f"{size / 1024:.1f} MB" if size >= 1024 else f"{size:.0f} KB",
+                              "action": lambda b=backup, w=when: self.confirm(
+                                  t("restore_title"), t("restore_text", when=w, title=game["title"]),
+                                  lambda: self._restore(game, b))})
+            return found or [{"label": t("gm_no_backups"), "kind": "info"}]
+        self._open_menu(t("gm_restore"), rows, subtitle=t("restore_subtitle", title=game["title"]), game=game)
+
+    def _restore(self, game, backup):
+        emulator = self.emulator_for(game)
+        root, folders = emulator.save_folders(game)
+        if not root:
+            self.sounds.play("error")
+            self.ui.show_toast(t("restore_failed"))
+            return
+        try:
+            # The saves about to be replaced are kept as one more backup
+            # (never at the cost of an older one)
+            backup_saves(game, root, folders, self.backup_dir,
+                         keep=len(list_backups(game, self.backup_dir)) + 1)
+            restore(backup["path"], root, folders)
+        except Exception as e:
+            log("EXCEPTION", "Restore failed", e)
+            self.sounds.play("error")
+            self.ui.show_toast(t("restore_failed"))
+            return
+        self.sounds.play("win")
+        self.ui.show_toast(t("restore_done"), COLOR["OK"])
+        self.menu.refresh()
 
 
 def _int(text, default):

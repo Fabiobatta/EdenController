@@ -9,10 +9,17 @@ Layers, bottom to top (canvas tags):
     header    title, clock, connected controllers
     footer    button hints ("[a] Play  [b] Back")
     roulette  the "tonight we play" spinner (Core/Roulette.py)
-    trophies  the achievements list
+    trophies  the achievements list, the statistics
+    menu      list menus: settings, a game's menu (Core/Menu.py)
+    splash    the "let's go" screen before a game starts
     toast     transient message
     trophy    "achievement unlocked" banner
     alert     modal dialog
+    fade      the two-step fade between screens
+    dim       idle dimming (nearly black, only the clock)
+
+Colours come from Core/Theme.py (dark, oled, light) and are read at draw
+time; set_theme() drops the cached pictures and redraws.
 
 Pictures come from Pillow (Core/Glyphs.py) and are cached per size, so a
 redraw only re-places cached images. Layout is authored for 1280x720 and
@@ -35,6 +42,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 from . import Glyphs
 from .I18n import t
 from .Paths import resource_path
+from .Theme import COLOR, THEMES, apply_theme, current_theme, player_color  # noqa: F401
 
 # ============================================================================
 # HI-DPI: physical pixels on Windows (must run before the window exists)
@@ -61,64 +69,57 @@ DRIFT = 16              # px (720p) the backdrop may wander from its place
 DRIFT_PERIODS = (97.0, 71.0)    # seconds for one horizontal / vertical swing
 DRIFT_TICK_MS = 250     # at most 4 moves a second (~2 at this speed)
 DRIFT_QUIET_S = 0.6     # no motion right after the screen changed
+POP_DISTANCE = 18       # px (720p) a card rises when its player joins
+POP_MS = 22
 
-COLOR = {
-    "BG": "#0B0D12",
-    "TEXT": "#F4F5F7",
-    "TEXT_DIM": "#A9AFBB",
-    "TEXT_FAINT": "#6B7280",
-    "ACCENT": "#F5D90A",
-    "OK": "#3FB950",
-    "BAD": "#E5534B",
-    "NEON_RED": "#FF6B61",
-    "WARN": "#F5BE28",
-}
-
-# Controller colours (Material 300 palette: bright, distinct, easy on the eyes)
-# One colour per player number, far apart on the colour wheel: the first four
-# (the usual group) are blue, red, green and yellow, never two of a kind
-PLAYER_COLORS = (
-    "#4FA3FF",  # P1 blue
-    "#FF5C5C",  # P2 red
-    "#5CD65C",  # P3 green
-    "#FFD23F",  # P4 yellow
-    "#B57BFF",  # P5 purple
-    "#FF9A3C",  # P6 orange
-    "#3DDCCB",  # P7 teal
-    "#FF6FB5",  # P8 pink
-)
-COLOR_POOL = PLAYER_COLORS
-
-
-def player_color(index):
-    """Colour of player index + 1 (P1 = 0)."""
-    return PLAYER_COLORS[index % len(PLAYER_COLORS)]
+# Colours live in Core/Theme.py (COLOR is the current theme's)
+PLAYER_COLORS = THEMES["dark"]["PLAYERS"]
 
 _TOKEN = re.compile(r"\[(\w+)\]")
 
 
 # Where each player's view goes in a local co-op split screen, by the number
-# of players: (region as x0, y0, x1, y1 fractions, I18n label key). Most
-# Switch games split two players top/bottom and four into quadrants (three
-# use three quadrants); with five or more the screen is usually shared.
+# of players: (region as x0, y0, x1, y1 fractions, I18n label key).
 SPLIT = {
     "full": ((0, 0, 1, 1), "split_full"),
     "top": ((0, 0, 1, 0.5), "split_top"),
     "bottom": ((0, 0.5, 1, 1), "split_bottom"),
+    "left": ((0, 0, 0.5, 1), "split_left"),
+    "right": ((0.5, 0, 1, 1), "split_right"),
     "tl": ((0, 0, 0.5, 0.5), "split_tl"),
     "tr": ((0.5, 0, 1, 0.5), "split_tr"),
     "bl": ((0, 0.5, 0.5, 1), "split_bl"),
     "br": ((0.5, 0.5, 1, 1), "split_br"),
 }
-SPLIT_LAYOUTS = {1: ("full",), 2: ("top", "bottom"), 3: ("tl", "tr", "bl"), 4: ("tl", "tr", "bl", "br")}
+# How a game splits the screen: most Switch games put two players one above
+# the other ("rows"), some side by side ("columns"), and many never split
+# ("shared"). Three and four players get the quadrants either way; with five
+# or more the screen is shared. "auto" is "rows".
+SPLIT_MODES = ("auto", "rows", "columns", "shared")
+_QUADRANTS = {3: ("tl", "tr", "bl"), 4: ("tl", "tr", "bl", "br")}
+SPLIT_LAYOUTS = {
+    "rows": {1: ("full",), 2: ("top", "bottom"), **_QUADRANTS},
+    "columns": {1: ("full",), 2: ("left", "right"), **_QUADRANTS},
+    "shared": {1: ("full",)},
+}
+# Games known to differ from "rows" (title ID -> mode), used while a game's
+# own setting is "auto": Mario Kart 8 Deluxe plays two players side by side
+KNOWN_SPLIT = {"0100152000022000": "columns"}
 
 
-def split_layout(players):
+def split_mode(game, chosen=None):
+    """The split mode for `game`: the user's choice, else what is known, else "rows"."""
+    if chosen in SPLIT_MODES and chosen != "auto":
+        return chosen
+    return KNOWN_SPLIT.get(((game or {}).get("title_id") or "").upper(), "rows")
+
+
+def split_layout(players, mode="rows"):
     """
-    [(region, label key)] per player for `players` players; None past four,
-    where games share one screen.
+    [(region, label key)] per player, in player order, or None when the
+    screen is shared (five players or more, or a game that never splits).
     """
-    names = SPLIT_LAYOUTS.get(max(1, players))
+    names = SPLIT_LAYOUTS.get(mode if mode in SPLIT_LAYOUTS else "rows", {}).get(max(1, players))
     return [SPLIT[name] for name in names] if names else None
 
 
@@ -143,8 +144,11 @@ def load_picture(path, limit=ART_MAX):
         return None
 
 
-def compose_background(art, width, height, shade):
-    """Screen-sized backdrop: the art blurred and shaded (default glow without art)."""
+def compose_background(art, width, height, shade, light=False):
+    """
+    Screen-sized backdrop: the art blurred and shaded (default glow without
+    art); for the light theme washed out towards white instead of darkened.
+    """
     if art is not None:
         sample = BG_SAMPLE_W
         small = Glyphs.cover_crop(art, sample, max(1, round(sample * height / width)))
@@ -154,6 +158,8 @@ def compose_background(art, width, height, shade):
         image = Image.new("RGB", (64, 36), (13, 17, 30))
         ImageDraw.Draw(image).ellipse((-10, -18, 44, 30), fill=(24, 70, 92))
         image = image.filter(ImageFilter.GaussianBlur(9)).resize((width, height), Image.BILINEAR)
+    if light:
+        return Image.blend(image, Image.new("RGB", image.size, (242, 244, 248)), 0.8)
     return ImageChops.multiply(image, shade)
 
 
@@ -219,6 +225,20 @@ class LauncherUi:
         self._trophy = None                 # (name, desc) on screen
         self._trophy_job = None
         self._trophies = None               # list screen items, None = closed
+        self._stats = None                  # statistics screen data, None = closed
+        self._splash = None                 # "let's go" screen data, None = closed
+        self.animations = True              # fades, cards popping in
+        self.brand_note = ""                # after the name in the footer ("build 21")
+        self.alert_buttons = None           # replaces an alert's default buttons
+        self.alert_lines = ()               # extra lines under an alert's text
+        self.alert_name = None
+        self._fade_job = None
+        self._fade_switch = None
+        self._hold_draw = False             # a fade is hiding the screen: content waits
+        self._pop = {}                      # player card index -> px still to travel
+        self._pop_job = None
+        self.dimmed = False
+        self.menu = None                    # Core.Menu.Menu, set by the App
 
         from .GameGrid import GameGrid
         self.grid = GameGrid(self)
@@ -257,6 +277,16 @@ class LauncherUi:
 
     def px(self, value):
         return max(1, int(round(value * self.scale)))
+
+    def set_theme(self, name):
+        """Switch colours (dark / oled / light) and redraw everything with them."""
+        apply_theme(name)
+        self.root.configure(bg=COLOR["BG"])
+        self.canvas.configure(bg=COLOR["BG"])
+        self._photos.clear()
+        self._backgrounds.clear()
+        self.grid.reset()
+        self.redraw()
 
     def font(self, size, bold=True):
         key = (self.px(size), bold)
@@ -346,10 +376,17 @@ class LauncherUi:
             self._draw_toast(*self._toast)
         if self._trophies is not None:
             self._draw_trophies()
+        if self._stats is not None:
+            self._draw_stats()
+        if self.menu is not None and self.menu.active:
+            self.menu.draw()
+        if self._splash is not None:
+            self._draw_splash()
         if self._trophy:
             self._draw_trophy(*self._trophy)
         if self.alert_mode:
             self._draw_alert(self.alert_mode)
+        self._draw_dim()
 
     def _draw_content(self):
         if self.view == "players":
@@ -360,8 +397,95 @@ class LauncherUi:
             self.grid.draw(full=True)
 
     def _raise_overlays(self):
-        for tag in ("header", "footer", "roulette", "trophies", "toast", "trophy", "alert"):
+        for tag in ("header", "footer", "roulette", "trophies", "menu", "splash", "toast", "trophy",
+                    "alert", "fade", "dim"):
             self.canvas.tag_raise(tag)
+
+    raise_overlays = _raise_overlays
+
+    # ========================================================================
+    # FADES
+    # A change of screen goes through two quick steps of darkness instead of
+    # jumping: darker, darker, (the new screen is drawn), lighter, gone -
+    # about a tenth of a second. Four cached pictures, nothing else.
+    # ========================================================================
+    FADE_STEPS = (120, 215)
+    FADE_MS = 22
+
+    def fade(self, switch):
+        """Run switch() (which redraws the screen) in the middle of a short fade."""
+        if self._fade_job or self._fade_switch:
+            self._finish_fade()                 # one already running: complete it now
+        if not self.animations or not self.width:
+            switch()
+            return
+        self._fade_switch = switch
+        self._hold_draw = True
+        self._fade_step(0)
+
+    def _fade_overlay(self, alpha):
+        shade = self.photo(("fade", self.width, self.height, alpha), lambda: Image.new(
+            "RGBA", (self.width, self.height), tuple(COLOR["FADE"]) + (alpha,)))
+        item = self.canvas.find_withtag("fade")
+        if item:
+            self.canvas.itemconfigure(item[0], image=shade)
+        else:
+            self.canvas.create_image(0, 0, image=shade, anchor="nw", tags="fade")
+        self.canvas.tag_raise("fade")
+        self.canvas.tag_raise("dim")
+
+    def _fade_step(self, step):
+        self._fade_job = None
+        down = len(self.FADE_STEPS)
+        if step < down:
+            self._fade_overlay(self.FADE_STEPS[step])
+        elif step == down:
+            switch, self._fade_switch = self._fade_switch, None
+            self._hold_draw = False
+            if switch:
+                switch()
+            self._fade_overlay(self.FADE_STEPS[-1])
+        elif step <= 2 * down - 1:
+            self._fade_overlay(self.FADE_STEPS[2 * down - 1 - step])
+        else:
+            self.canvas.delete("fade")
+            return
+        self._fade_job = self.root.after(self.FADE_MS, self._fade_step, step + 1)
+
+    def _finish_fade(self):
+        if self._fade_job:
+            self.root.after_cancel(self._fade_job)
+            self._fade_job = None
+        switch, self._fade_switch = self._fade_switch, None
+        self._hold_draw = False
+        if switch:
+            switch()
+        self.canvas.delete("fade")
+
+    # ========================================================================
+    # IDLE DIM
+    # ========================================================================
+    def set_dim(self, on):
+        """Nearly black screen with only the clock, moved now and then (idle TV)."""
+        if on == self.dimmed:
+            return
+        self.dimmed = on
+        self._draw_dim()
+
+    def _draw_dim(self):
+        c = self.canvas
+        c.delete("dim")
+        if not self.dimmed or not self.width:
+            return
+        shade = self.photo(("dim", self.width, self.height),
+                           lambda: Image.new("RGBA", (self.width, self.height), (0, 0, 0, 238)))
+        c.create_image(0, 0, image=shade, anchor="nw", tags="dim")
+        # A new place every minute, so nothing stays lit on the same pixels
+        minute = int(time.time() // 60)
+        x = self.px(160) + (minute * 197) % max(1, self.width - self.px(320))
+        y = self.px(120) + (minute * 113) % max(1, self.height - self.px(240))
+        c.create_text(x, y, text=time.strftime("%H:%M"), fill="#5A5F6B", font=self.font(40), tags="dim")
+        c.tag_raise("dim")
 
     # ========================================================================
     # BACKGROUND
@@ -410,7 +534,8 @@ class LauncherUi:
         if key in self._backgrounds:
             self._backgrounds.move_to_end(key)
             return self._backgrounds[key]
-        photo = ImageTk.PhotoImage(compose_background(self.load_art(path), *size, self._shade(*size)))
+        photo = ImageTk.PhotoImage(compose_background(self.load_art(path), *size, self._shade(*size),
+                                                      light=current_theme() == "light"))
         self._backgrounds[key] = photo
         if len(self._backgrounds) > BG_CACHE:
             self._backgrounds.popitem(last=False)
@@ -419,6 +544,9 @@ class LauncherUi:
     def _apply_background(self):
         self._bg_job = None
         if not self.width:
+            return
+        if current_theme() == "oled":           # pure black: no picture at all
+            self.canvas.delete("bg")
             return
         photo = self._background_photo(self._bg_wanted)
         m = self._margin()
@@ -445,7 +573,8 @@ class LauncherUi:
     def _drift_tick(self):
         self.root.after(DRIFT_TICK_MS, self._drift_tick)
         if not self.motion or not self.width or self.alert_mode or self.busy_overlay \
-                or self._trophies is not None:
+                or self._trophies is not None or self._stats is not None or self._splash is not None \
+                or self.dimmed or (self.menu is not None and self.menu.active):
             return
         now = time.monotonic()
         if now < self._motion_quiet_until:
@@ -472,6 +601,8 @@ class LauncherUi:
     def _tick_clock(self):
         if self.width:
             self.canvas.itemconfigure("clock", text=time.strftime("%H:%M"))
+            if self.dimmed:
+                self._draw_dim()
         self.root.after(15000, self._tick_clock)
 
     def set_pads(self, count):
@@ -506,6 +637,12 @@ class LauncherUi:
     # ========================================================================
     # FOOTER
     # ========================================================================
+    def set_brand(self, note):
+        """Text after the launcher's name in the footer: the build, a newer one."""
+        if note != self.brand_note:
+            self.brand_note = note
+            self._draw_footer()
+
     def set_hints(self, hints):
         """hints: [(button or (buttons...), label)], drawn right to left from the edge."""
         if hints != self.hints:
@@ -519,7 +656,7 @@ class LauncherUi:
             return
         band_h = self.px(FOOTER_H + 40)
         band = self.photo(("fade", self.width, band_h),
-                          lambda: Glyphs.vertical_fade(self.width, band_h, 0, 215))
+                          lambda: Glyphs.vertical_fade(self.width, band_h, 0, 215, COLOR["FADE"]))
         c.create_image(0, self.height, image=band, anchor="sw", tags="footer")
         y = self.height - self.px(FOOTER_H / 2)
         x = self.width - self.px(MARGIN)
@@ -528,7 +665,7 @@ class LauncherUi:
                 buttons = (buttons,)
             markup = "".join(f"[{b}]" for b in buttons) + " " + label
             x -= self.rich(x, y, markup, 15, COLOR["TEXT"], anchor="e", tags="footer") + self.px(30)
-        brand = f"{self.emulator_name.upper()} LAUNCHER"
+        brand = f"{self.emulator_name.upper()} LAUNCHER" + (f"  ·  {self.brand_note}" if self.brand_note else "")
         if self.px(MARGIN) + self.font(12).measure(brand) < x:     # only where the hints leave room
             c.create_text(self.px(MARGIN), y, text=brand, anchor="w",
                           fill=COLOR["TEXT_FAINT"], font=self.font(12), tags="footer")
@@ -552,10 +689,17 @@ class LauncherUi:
         if self.view == "players":
             self._draw_players()
 
-    def flash_slot(self, index, duration_ms=700):
-        """Glow a card briefly (a controller just joined, or its owner pressed a button)."""
+    def flash_slot(self, index, duration_ms=700, pop=False):
+        """
+        Glow a card briefly (a controller just joined, or its owner pressed a
+        button); with pop=True the card also rises into place.
+        """
         self.flashing.add(index)
         self._flash_until[index] = time.monotonic() + duration_ms / 1000
+        if pop and self.animations:
+            self._pop[index] = self.px(POP_DISTANCE)
+            if self._pop_job is None:
+                self._pop_job = self.root.after(POP_MS, self._pop_step)
         self.refresh(self.slots)
 
         def stop():
@@ -564,8 +708,26 @@ class LauncherUi:
                 self.refresh(self.slots)
         self.root.after(duration_ms, stop)
 
+    def _pop_step(self):
+        """Move the popping cards a little closer to their place (ease out)."""
+        self._pop_job = None
+        for index, left in list(self._pop.items()):
+            step = max(1, int(round(left * 0.45)))
+            remaining = left - step
+            if remaining <= 0:
+                step, remaining = left, 0
+                del self._pop[index]
+            else:
+                self._pop[index] = remaining
+            if self.view == "players" and not self._hold_draw:
+                self.canvas.move(f"slot{index}", 0, -step)
+        if self._pop:
+            self._pop_job = self.root.after(POP_MS, self._pop_step)
+
     def _draw_players(self):
         c = self.canvas
+        if self._hold_draw:
+            return
         c.delete("players")
         if not self.width:
             return
@@ -580,7 +742,7 @@ class LauncherUi:
             slot = self.slots[i] if i < len(self.slots) else None
             if slot is None:
                 image = self.photo(("card-empty", cw, ch), lambda: Glyphs.panel(
-                    cw, ch, radius, (255, 255, 255, 16), outline=("#3A3F4B", max(1, self.px(1.5)))))
+                    cw, ch, radius, COLOR["PANEL_EMPTY"], outline=(COLOR["LINE"], max(1, self.px(1.5)))))
                 c.create_image(x, y, image=image, anchor="nw", tags="players")
                 c.create_text(x + cw // 2, y + self.px(56), text=f"P{i + 1}", fill=COLOR["TEXT_FAINT"],
                               font=self.font(30), tags="players")
@@ -588,26 +750,29 @@ class LauncherUi:
                           anchor="center", tags="players")
                 continue
 
+            tags = ("players", f"slot{i}")
+            y += self._pop.get(i, 0)                # still rising into place
             color = slot["color"]
             glow = i in self.flashing
             pad = self.px(16) if glow else 0
             image = self.photo(("card", cw, ch, color, glow), lambda: Glyphs.panel(
-                cw, ch, radius, (10, 12, 18, 196), outline=(color, self.px(3)),
+                cw, ch, radius, COLOR["PANEL"], outline=(color, self.px(3)),
                 glow=(color, pad) if glow else None))
-            c.create_image(x - pad, y - pad, image=image, anchor="nw", tags="players")
+            c.create_image(x - pad, y - pad, image=image, anchor="nw", tags=tags)
 
             if slot["editing"]:
                 c.create_text(x + cw // 2, y + self.px(34), text=f"P{i + 1}", fill=color,
-                              font=self.font(15), tags="players")
+                              font=self.font(15), tags=tags)
                 c.create_text(x + cw // 2, y + self.px(72), text=f"◀   {slot['profile']}   ▶",
-                              fill=color, font=self.font(22), tags="players")
+                              fill=color, font=self.font(22), tags=tags)
                 self.rich(x + cw // 2, y + ch - self.px(26), t("slot_editing_hints"), 11,
-                          COLOR["TEXT_DIM"], anchor="center", tags="players")
+                          COLOR["TEXT_DIM"], anchor="center", tags=tags)
                 continue
 
             size = self.px(52)
-            disc = self.photo(("disc", i, size, color), lambda: Glyphs.disc(f"P{i + 1}", size, color))
-            c.create_image(x + self.px(18), y + self.px(18), image=disc, anchor="nw", tags="players")
+            disc = self.photo(("disc", i, size, color), lambda: Glyphs.disc(f"P{i + 1}", size, color,
+                                                                           COLOR["DISC_TEXT"]))
+            c.create_image(x + self.px(18), y + self.px(18), image=disc, anchor="nw", tags=tags)
 
             # Next to the number: the button layout and the controller
             text_x = x + self.px(84)
@@ -615,9 +780,9 @@ class LauncherUi:
             small = self.font(12, False)
             c.create_text(text_x, y + self.px(33), anchor="w", fill=COLOR["TEXT"], font=small,
                           text=self.truncate(t("slot_profile", name=slot["profile"]), small, text_w),
-                          tags="players")
+                          tags=tags)
             c.create_text(text_x, y + self.px(54), anchor="w", fill=COLOR["TEXT_FAINT"], font=small,
-                          text=self.truncate(slot["name"], small, text_w), tags="players")
+                          text=self.truncate(slot["name"], small, text_w), tags=tags)
 
             # Where this player plays: a small split-screen picture and its name
             sw, sh = self.px(56), self.px(32)
@@ -625,14 +790,14 @@ class LauncherUi:
             screen = self.photo(("split", sw, sh, regions, i if layout else 0, color),
                                 lambda: Glyphs.split_screen(sw, sh, regions, i if layout else 0, color))
             row_y = y + self.px(91)
-            c.create_image(x + self.px(18), row_y, image=screen, anchor="w", tags="players")
+            c.create_image(x + self.px(18), row_y, image=screen, anchor="w", tags=tags)
             where = t(layout[i][1]) if layout else t("split_shared")
             where_font = self.font(14)
             where_x = x + self.px(18) + sw + self.px(10)
             c.create_text(where_x, row_y, anchor="w", fill=color, font=where_font,
-                          text=self.truncate(where, where_font, x + cw - self.px(14) - where_x), tags="players")
+                          text=self.truncate(where, where_font, x + cw - self.px(14) - where_x), tags=tags)
             self.rich(x + self.px(18), y + ch - self.px(26), t("slot_hints"), 11, COLOR["TEXT_DIM"],
-                      tags="players")
+                      tags=tags)
 
         if self.tip:
             self.rich(self.width // 2, top + 2 * ch + gap + self.px(58), self.tip, 14,
@@ -648,8 +813,8 @@ class LauncherUi:
         self.view = "games"
         self.grid.set(games, index, players, filter_players)
         if entering:
-            self.redraw()
-        else:
+            self.fade(self.redraw)
+        elif not self._hold_draw:
             self.grid.draw()
             self._raise_overlays()
 
@@ -663,7 +828,7 @@ class LauncherUi:
         if self.view == "players":
             return
         self.view = "players"
-        self.redraw()
+        self.fade(self.redraw)
 
     def games_columns(self):
         return self.grid.columns
@@ -676,7 +841,7 @@ class LauncherUi:
         for key in ("cover", "image", "background"):
             self.forget_art(game.get(key))
         self.grid.forget(game)
-        if self.view == "games":
+        if self.view == "games" and not self._hold_draw:
             self.grid.draw()
             self._raise_overlays()
         if game is self._bg_owner:
@@ -710,7 +875,7 @@ class LauncherUi:
         w, h = self.px(580), self.px(92)
         x, y = self.width // 2, self.px(22) + h // 2
         box = self.photo(("trophy-box", w, h), lambda: Glyphs.panel(
-            w, h, self.px(18), (18, 16, 8, 245), outline=(COLOR["ACCENT"], self.px(2)),
+            w, h, self.px(18), COLOR["TROPHY"], outline=(COLOR["ACCENT"], self.px(2)),
             glow=(COLOR["ACCENT"], self.px(14))))
         c.create_image(x, y, image=box, tags="trophy")
         icon_h = self.px(52)
@@ -748,7 +913,7 @@ class LauncherUi:
             return
         items, count_text = self._trophies
         shade = self.photo(("trophies-overlay", self.width, self.height),
-                           lambda: Image.new("RGBA", (self.width, self.height), (8, 9, 13, 248)))
+                           lambda: Image.new("RGBA", (self.width, self.height), COLOR["SCREEN"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="trophies")
         left = self.px(MARGIN)
         c.create_text(left, self.px(46), text=t("trophies_title"), anchor="w", fill=COLOR["TEXT"],
@@ -766,10 +931,10 @@ class LauncherUi:
         for i, (name, desc, unlocked, detail) in enumerate(items):
             x = left + (i // rows) * (card_w + gap)
             y = top + (i % rows) * (card_h + gap)
-            color = COLOR["ACCENT"] if unlocked else "#4B5060"
+            color = COLOR["ACCENT"] if unlocked else COLOR["LOCKED"]
             card = self.photo(("trophy-card", card_w, card_h, unlocked), lambda: Glyphs.panel(
-                card_w, card_h, self.px(12), (255, 214, 10, 22) if unlocked else (255, 255, 255, 10),
-                outline=(COLOR["ACCENT"] if unlocked else "#2E323B", max(1, self.px(1.5)))))
+                card_w, card_h, self.px(12), COLOR["TROPHY_ROW"] if unlocked else COLOR["ROW"],
+                outline=(COLOR["ACCENT"] if unlocked else COLOR["LINE_FAINT"], max(1, self.px(1.5)))))
             c.create_image(x, y, image=card, anchor="nw", tags="trophies")
             icon = self.photo(("trophy", icon_h, color), lambda: Glyphs.trophy(icon_h, color))
             c.create_image(x + self.px(14), y + card_h // 2, image=icon, anchor="w", tags="trophies")
@@ -787,6 +952,182 @@ class LauncherUi:
                               fill=COLOR["TEXT_DIM"], font=self.font(12, False), tags="trophies")
         self.rich(self.width - left, self.height - self.px(FOOTER_H / 2), t("trophies_close"), 15,
                   COLOR["TEXT"], anchor="e", tags="trophies")
+        self._raise_overlays()
+
+    # ========================================================================
+    # STATISTICS
+    # ========================================================================
+    def show_stats(self, data):
+        """
+        The statistics screen over the current one.
+
+        Args:
+            data (dict): {"tiles": [(label, value, detail)],        up to 4
+                          "days":  [(label, seconds)],              oldest first
+                          "games": [(title, seconds)]}              most played first
+        """
+        self._stats = data
+        self._draw_stats()
+
+    def hide_stats(self):
+        self._stats = None
+        self.canvas.delete("stats")
+
+    def _draw_stats(self):
+        from .I18n import playtime_label
+        c = self.canvas
+        c.delete("stats")
+        if not self.width or self._stats is None:
+            return
+        data = self._stats
+        tags = ("stats", "trophies")            # same layer as the achievements list
+        shade = self.photo(("trophies-overlay", self.width, self.height),
+                           lambda: Image.new("RGBA", (self.width, self.height), COLOR["SCREEN"]))
+        c.create_image(0, 0, image=shade, anchor="nw", tags=tags)
+        left = self.px(MARGIN)
+        c.create_text(left, self.px(46), text=t("stats_title"), anchor="w", fill=COLOR["TEXT"],
+                      font=self.font(32), tags=tags)
+        c.create_text(left, self.px(86), text=t("stats_subtitle"), anchor="w", fill=COLOR["TEXT_DIM"],
+                      font=self.font(15, False), tags=tags)
+
+        gap = self.px(14)
+        width = self.width - 2 * left
+        tiles = data.get("tiles") or []
+        tile_w, tile_h = (width - gap * 3) // 4, self.px(104)
+        top = self.px(120)
+        for i, (label, value, detail) in enumerate(tiles[:4]):
+            x = left + i * (tile_w + gap)
+            box = self.photo(("stat-tile", tile_w, tile_h), lambda: Glyphs.panel(
+                tile_w, tile_h, self.px(14), COLOR["ROW"], outline=(COLOR["LINE_FAINT"], max(1, self.px(1.5)))))
+            c.create_image(x, top, image=box, anchor="nw", tags=tags)
+            inner = tile_w - self.px(36)
+            c.create_text(x + self.px(18), top + self.px(22), text=label.upper(), anchor="w",
+                          fill=COLOR["TEXT_FAINT"], font=self.font(11), tags=tags)
+            c.create_text(x + self.px(18), top + self.px(54), anchor="w", fill=COLOR["ACCENT"],
+                          text=self.truncate(value, self.font(24), inner), font=self.font(24), tags=tags)
+            c.create_text(x + self.px(18), top + self.px(84), anchor="w", fill=COLOR["TEXT_DIM"],
+                          text=self.truncate(detail, self.font(12, False), inner), font=self.font(12, False),
+                          tags=tags)
+
+        # Two panels: the last days as bars, the most played games
+        panel_top = top + tile_h + gap
+        panel_h = self.height - panel_top - self.px(FOOTER_H + 12)
+        panel_w = (width - gap) // 2
+        for n, caption in enumerate((t("stats_days"), t("stats_games"))):
+            x = left + n * (panel_w + gap)
+            box = self.photo(("stat-panel", panel_w, panel_h), lambda: Glyphs.panel(
+                panel_w, panel_h, self.px(14), COLOR["ROW"], outline=(COLOR["LINE_FAINT"], max(1, self.px(1.5)))))
+            c.create_image(x, panel_top, image=box, anchor="nw", tags=tags)
+            c.create_text(x + self.px(18), panel_top + self.px(24), text=caption.upper(), anchor="w",
+                          fill=COLOR["TEXT_FAINT"], font=self.font(11), tags=tags)
+
+        days = data.get("days") or []
+        if days:
+            peak = max(seconds for _, seconds in days) or 1
+            area_top, area_bottom = panel_top + self.px(64), panel_top + panel_h - self.px(40)
+            slot_w = (panel_w - self.px(36)) / len(days)
+            bar_w = int(min(self.px(46), slot_w * 0.6))
+            for i, (label, seconds) in enumerate(days):
+                cx = left + self.px(18) + int(slot_w * (i + 0.5))
+                height = int((area_bottom - area_top) * seconds / peak)
+                if seconds:
+                    c.create_rectangle(cx - bar_w // 2, area_bottom - max(self.px(3), height), cx + bar_w // 2,
+                                       area_bottom, fill=COLOR["ACCENT"], width=0, tags=tags)
+                    c.create_text(cx, area_bottom - max(self.px(3), height) - self.px(12),
+                                  text=playtime_label(seconds), fill=COLOR["TEXT_DIM"],
+                                  font=self.font(10, False), tags=tags)
+                else:
+                    c.create_rectangle(cx - bar_w // 2, area_bottom - self.px(2), cx + bar_w // 2, area_bottom,
+                                       fill=COLOR["LINE"], width=0, tags=tags)
+                c.create_text(cx, area_bottom + self.px(18), text=label, fill=COLOR["TEXT_DIM"],
+                              font=self.font(12), tags=tags)
+
+        games = (data.get("games") or [])[:6]
+        x = left + panel_w + gap + self.px(18)
+        inner = panel_w - self.px(36)
+        if not games:
+            c.create_text(x, panel_top + self.px(70), text=t("stats_empty"), anchor="w", fill=COLOR["TEXT_DIM"],
+                          font=self.font(14, False), tags=tags)
+        else:
+            peak = games[0][1] or 1
+            row_h = min(self.px(56), (panel_h - self.px(60)) // len(games))
+            for i, (title, seconds) in enumerate(games):
+                y = panel_top + self.px(54) + i * row_h
+                time_text = playtime_label(seconds)
+                time_w = self.font(13).measure(time_text)
+                c.create_text(x, y, anchor="w", fill=COLOR["TEXT"], font=self.font(14),
+                              text=self.truncate(title, self.font(14), inner - time_w - self.px(16)), tags=tags)
+                c.create_text(x + inner, y, anchor="e", fill=COLOR["TEXT_DIM"], font=self.font(13),
+                              text=time_text, tags=tags)
+                c.create_rectangle(x, y + self.px(14), x + inner, y + self.px(19), fill=COLOR["LINE_FAINT"],
+                                   width=0, tags=tags)
+                c.create_rectangle(x, y + self.px(14), x + max(self.px(4), int(inner * seconds / peak)),
+                                   y + self.px(19), fill=player_color(i), width=0, tags=tags)
+        self.rich(self.width - left, self.height - self.px(FOOTER_H / 2), t("stats_close"), 15,
+                  COLOR["TEXT"], anchor="e", tags=tags)
+        self._raise_overlays()
+
+    # ========================================================================
+    # "LET'S GO" SCREEN
+    # ========================================================================
+    def show_splash(self, game, players, layout, emulator=None):
+        """
+        The moment between choosing a game and the emulator appearing: the
+        cover, the title, and who plays where on the split screen.
+
+        Args:
+            players (list[str]): the players' colours, in player order.
+            layout  (list | None): split_layout() for them (None = shared screen).
+        """
+        self._splash = (game, tuple(players), layout, emulator)
+        self._draw_splash()
+
+    def hide_splash(self):
+        self._splash = None
+        self.canvas.delete("splash")
+
+    def _draw_splash(self):
+        from .I18n import players_label
+        c = self.canvas
+        c.delete("splash")
+        if not self.width or self._splash is None:
+            return
+        game, players, layout, emulator = self._splash
+        shade = self.photo(("splash-overlay", self.width, self.height),
+                           lambda: Image.new("RGBA", (self.width, self.height), COLOR["SPIN"]))
+        c.create_image(0, 0, image=shade, anchor="nw", tags="splash")
+        cx, cy = self.width // 2, self.height // 2
+        cover_w, cover_h = self.px(220), self.px(330)
+        block_w = cover_w + self.px(56) + self.px(430)
+        x = cx - block_w // 2
+        halo = self.grid.halo(game, cover_w, cover_h)
+        c.create_image(x + cover_w // 2, cy, image=halo, tags="splash")
+        c.create_image(x + cover_w // 2, cy, image=self.grid.tile(game, cover_w, cover_h, False), tags="splash")
+
+        tx = x + cover_w + self.px(56)
+        width = self.px(430)
+        y = cy - cover_h // 2 + self.px(10)
+        c.create_text(tx, y, text=t("splash_title").upper(), anchor="w", fill=self.grid.accent(game),
+                      font=self.font(13), tags="splash")
+        title_font = self.font(30)
+        c.create_text(tx, y + self.px(40), text=self.truncate(game["title"], title_font, width), anchor="w",
+                      fill=COLOR["TEXT"], font=title_font, tags="splash")
+        details = [text for text in (players_label(game["players"]) if game.get("players") else "", emulator) if text]
+        c.create_text(tx, y + self.px(78), text="  ·  ".join(details), anchor="w", fill=COLOR["TEXT_DIM"],
+                      font=self.font(15, False), tags="splash")
+
+        if players:
+            map_w, map_h = self.px(300), self.px(169)
+            regions = tuple(region for region, _ in layout) if layout else None
+            picture = self.photo(("split-map", map_w, map_h, regions, players, COLOR["DISC_TEXT"]),
+                                 lambda: Glyphs.split_map(map_w, map_h, regions, players, COLOR["DISC_TEXT"]))
+            map_y = y + self.px(112)
+            c.create_image(tx, map_y, image=picture, anchor="nw", tags="splash")
+            caption = t("split_shared") if not layout else t("splash_split")
+            c.create_text(tx, map_y + map_h + self.px(20), text=caption, anchor="w", fill=COLOR["TEXT_DIM"],
+                          font=self.font(13, False), tags="splash")
+        self.rich(cx, self.height - self.px(FOOTER_H / 2), t("splash_hints"), 15, COLOR["TEXT_DIM"],
+                  anchor="center", tags="splash")
         self._raise_overlays()
 
     # ========================================================================
@@ -814,7 +1155,7 @@ class LauncherUi:
         w, h = font.measure(message) + self.px(56), self.px(46)
         x, y = self.width // 2, self.height - self.px(FOOTER_H + 44)
         pill = self.photo(("toast", w, h, color), lambda: Glyphs.panel(
-            w, h, h // 2, (14, 16, 22, 235), outline=(color, self.px(2))))
+            w, h, h // 2, COLOR["PILL"], outline=(color, self.px(2))))
         c.create_image(x, y, image=pill, tags="toast")
         c.create_text(x, y, text=message, fill=color, font=font, tags="toast")
         self._raise_overlays()
@@ -829,17 +1170,36 @@ class LauncherUi:
                  (("a", "alert_yes"), ("b", "alert_no"))),
         "KILL_CONFIRM": ("alert_kill_title", "alert_kill_text", "TEXT",
                          (("a", "alert_kill_launcher"), ("y", "alert_kill_desktop"), ("b", "alert_kill_cancel"))),
+        "GAME_FAILED": ("alert_failed_title", "alert_failed_text", "WARN", (("a", "alert_ok"),)),
+        "CONFIRM": ("alert_confirm_title", "alert_confirm_text", "TEXT",
+                    (("a", "alert_yes"), ("b", "alert_no"))),
     }
 
-    def show_alert(self, mode):
-        """Modal dialog: "LAUNCH", "EXIT", or "KILL_CONFIRM"."""
+    def show_alert(self, mode, buttons=None, lines=(), name=None, title=None, text=None):
+        """
+        Modal dialog: "LAUNCH", "EXIT", "KILL_CONFIRM", "GAME_FAILED" or "CONFIRM".
+
+        Args:
+            buttons (tuple | None): ((glyph, label key), ...) instead of the mode's own.
+            lines   (list[str]):    extra lines under the text (an emulator's errors).
+            name    (str | None):   the emulator named in the text, when not the main one.
+            title, text (str):      ready-made texts instead of the mode's own.
+        """
         self.alert_mode = mode
+        self.alert_buttons = buttons
+        self.alert_lines = tuple(lines)
+        self.alert_name = name
+        self.alert_texts = (title, text)
         self.alert_since = time.monotonic()
         self._draw_alert(mode)
 
     def close_alert(self):
         self.alert_mode = None
         self.alert_detail = None
+        self.alert_buttons = None
+        self.alert_lines = ()
+        self.alert_name = None
+        self.alert_texts = (None, None)
         self.canvas.delete("alert")
 
     def set_alert_detail(self, rows):
@@ -861,35 +1221,48 @@ class LauncherUi:
         if not self.width:
             return
         title, text, color, buttons = self.ALERTS[mode]
+        buttons = self.alert_buttons or buttons
+        own_title, own_text = getattr(self, "alert_texts", (None, None))
+        name = self.alert_name or self.display_name
         shade = self.photo(("overlay", self.width, self.height),
-                           lambda: Image.new("RGBA", (self.width, self.height), (0, 0, 0, 175)))
+                           lambda: Image.new("RGBA", (self.width, self.height), COLOR["OVERLAY"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="alert")
         detail = self.alert_detail if mode == "KILL_CONFIRM" else None
         per_row = 4
         rows = (len(detail) + per_row - 1) // per_row if detail else 0
-        w = self.px(760 if rows else 600)
-        h = self.px(270) + (self.px(48 + 36 * rows) if rows else 0)
+        lines = self.alert_lines
+        w = self.px(760 if rows or lines or len(buttons) > 3 else 600)
+        line_h = self.px(24)
+        extra = len(lines) * line_h + (self.px(16) if lines else 0)
+        h = self.px(270) + extra + (self.px(48 + 36 * rows) if rows else 0)
         cx, cy = self.width // 2, self.height // 2
         top = cy - h // 2
         box = self.photo(("dialog", w, h), lambda: Glyphs.panel(
-            w, h, self.px(20), (22, 24, 31, 248), outline=("#3A3F4B", max(1, self.px(1.5)))))
+            w, h, self.px(20), COLOR["DIALOG"], outline=(COLOR["LINE"], max(1, self.px(1.5)))))
         c.create_image(cx, cy, image=box, tags="alert")
-        c.create_text(cx, top + self.px(63), text=t(title), fill=COLOR[color], font=self.font(26),
-                      tags="alert")
-        c.create_text(cx, top + self.px(115), text=t(text, name=self.display_name), fill=COLOR["TEXT_DIM"],
+        c.create_text(cx, top + self.px(63), text=own_title or t(title, name=name), fill=COLOR[color],
+                      font=self.font(26), tags="alert")
+        c.create_text(cx, top + self.px(115), text=own_text or t(text, name=name), fill=COLOR["TEXT_DIM"],
                       font=self.font(16, False), width=w - self.px(80), justify="center", tags="alert")
+        small = self.font(13, False)
+        for n, line in enumerate(lines):
+            c.create_text(cx, top + self.px(168) + n * line_h, text=self.truncate(line, small, w - self.px(70)),
+                          fill=COLOR["TEXT"], font=small, tags="alert")
         markup = "      ".join(f"[{b}] {t(label)}" for b, label in buttons)
-        self.rich(cx, top + self.px(205), markup, 18, COLOR["TEXT"], anchor="center", tags="alert")
+        self.rich(cx, top + self.px(205) + extra, markup, 18 if len(buttons) <= 3 else 16, COLOR["TEXT"],
+                  anchor="center", tags="alert")
         if rows:
-            self._draw_held(detail, cx - w // 2, top + self.px(262), w, per_row)
+            self._draw_held(detail, cx - w // 2, top + self.px(262) + extra, w, per_row)
         c.tag_raise("alert")
+        c.tag_raise("fade")
+        c.tag_raise("dim")
 
     def _draw_held(self, detail, left, y, width, per_row):
         """The held-buttons report: a caption, then "P1 [a] [lb]" cells, four per line."""
         c = self.canvas
         pad = self.px(40)
         c.create_line(left + pad, y - self.px(18), left + width - pad, y - self.px(18),
-                      fill="#3A3F4B", width=max(1, self.px(1)), tags="alert")
+                      fill=COLOR["LINE"], width=max(1, self.px(1)), tags="alert")
         c.create_text(left + pad, y, text=t("held_title"), anchor="w", fill=COLOR["TEXT_FAINT"],
                       font=self.font(12, False), tags="alert")
         cell = (width - 2 * pad) // per_row

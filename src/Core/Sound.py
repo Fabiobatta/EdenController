@@ -237,6 +237,11 @@ class _WaveOut:
     def wake(self):
         self._wake.set()
 
+    def shutdown(self):
+        """Stop the thread and release the device (the settings screen replaces the mixer)."""
+        self._closed = True
+        self._wake.set()
+
     def _run(self):
         ctypes = self.ctypes
         last_sound = time.monotonic()
@@ -272,6 +277,10 @@ class _WaveOut:
                 self._wake.clear()
                 continue
             time.sleep(0.005)
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 def _player_command():
@@ -291,6 +300,8 @@ class Sounds:
         self.folder = folder or os.path.join(tempfile.gettempdir(), "EdenLauncherSounds")
         self.files = {}
         self.pcm = {}
+        self._ready = False
+        self._pending = None            # asked for before the files were ready: played once they are
         self._command = None
         self._mixer = None
         self._output = None
@@ -335,6 +346,10 @@ class Sounds:
                 self.files[name] = path
         except Exception as e:
             log("WARNING", "Could not prepare sounds", e)
+        self._ready = True
+        pending, self._pending = self._pending, None
+        if pending:
+            self.play(pending)
 
     def play(self, name, player=None):
         """Play `name` ("join" + player 2 -> "join2") without waiting."""
@@ -347,6 +362,8 @@ class Sounds:
             return
         path = self.files.get(key)
         if not path:
+            if not self._ready:
+                self._pending = key
             return
         try:
             if sys.platform == "win32":
@@ -369,3 +386,9 @@ class Sounds:
         if self._output:
             self._output.keep_open = True
             self._output.wake()
+
+    def shutdown(self):
+        """This object is being replaced (sound settings changed): stop its output."""
+        self.enabled = False
+        if self._output:
+            self._output.shutdown()

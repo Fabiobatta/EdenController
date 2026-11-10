@@ -3,8 +3,9 @@ Core/Settings.py
 The launcher's own settings file, "<Name>Launcher.ini" next to the launcher.
 
 The file is created with commented defaults the first time the launcher runs,
-so users can discover every option. It is only ever read afterwards: user
-edits and comments are never overwritten.
+so users can discover every option. Afterwards only single values change,
+when an option is set from the launcher's settings screen (Settings.set):
+the rest of the file - user edits, comments - is never rewritten.
 
     [Launcher]              generic options, read by Core
     [<Emulator>]            emulator options, text supplied by the adapter
@@ -59,6 +60,14 @@ background_motion = true
 ; The selected game's border and glow take the colour of its cover
 ; (false = always yellow)
 dynamic_colors = true
+; Colours: dark, oled (pure black, no background picture) or light
+theme = dark
+; Screen fades, cards popping in, the "let's go" screen before a game
+animations = true
+; Dim the screen after this many minutes without input (0 = never)
+idle_dim_minutes = 5
+; Tell when a newer build is on GitHub (checked once a day): true / false
+check_updates = true
 
 ; Buttons to hold together during a game to close the emulator.
 ; Buttons: a b x y back start lb rb ls rs up down left right, joined by '+'
@@ -116,6 +125,14 @@ background_motion = true
 ; Il bordo e il bagliore del gioco selezionato prendono il colore della sua
 ; copertina (false = sempre giallo)
 dynamic_colors = true
+; Colori: dark (scuro), oled (nero puro, senza immagine di sfondo) o light (chiaro)
+theme = dark
+; Dissolvenze, schede che entrano, schermata "si parte" prima del gioco
+animations = true
+; Oscura lo schermo dopo questi minuti senza input (0 = mai)
+idle_dim_minutes = 5
+; Avvisa quando su GitHub c'e' una build piu' nuova (una volta al giorno): true / false
+check_updates = true
 
 ; Combinazione da tenere premuta durante il gioco per chiudere l'emulatore.
 ; Tasti: a b x y back start lb rb ls rs up down left right, uniti da '+'
@@ -206,8 +223,41 @@ def _parse(text):
     return sections
 
 
+def set_in_text(text, section, key, value):
+    """
+    `text` of an INI file with `key` of `section` set to `value`, every other
+    line untouched: the key's line is replaced, or added at the end of its
+    section, or the section is added at the end of the file.
+    """
+    newline = "\r\n" if "\r\n" in text else "\n"
+    lines = text.splitlines()
+    wanted, current = section.strip().lower(), ""
+    section_end = None                  # index after the section's last non-blank line
+    for i, raw in enumerate(lines):
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            current = line[1:-1].strip().lower()
+            if current == wanted:
+                section_end = i + 1
+            continue
+        if current != wanted or not line:
+            continue
+        section_end = i + 1
+        if line[0] in ";#" or "=" not in line:
+            continue
+        if line.split("=", 1)[0].strip().lower() == key.lower():
+            lines[i] = f"{raw.split('=', 1)[0].rstrip()} = {value}".rstrip()
+            return newline.join(lines) + newline
+    entry = f"{key} = {value}".rstrip()
+    if section_end is None:
+        lines += ([""] if lines and lines[-1].strip() else []) + [f"[{section}]", entry]
+    else:
+        lines.insert(section_end, entry)
+    return newline.join(lines) + newline
+
+
 class Settings:
-    """Read-only view of the settings file, plus the persistent state."""
+    """The settings file (read, and single values set), plus the persistent state."""
 
     def __init__(self, sections=None, path=None):
         self.sections = sections or {}
@@ -231,6 +281,36 @@ class Settings:
 
     def get_list(self, section, key, separator=";"):
         return [item.strip() for item in self.get(section, key, "").split(separator) if item.strip()]
+
+    def get_int(self, section, key, default=0):
+        try:
+            return int(str(self.get(section, key, default)).strip())
+        except ValueError:
+            return default
+
+    def set(self, section, key, value):
+        """
+        Change one option, in memory and in the settings file (only that
+        line of the file changes). A file that cannot be written is logged;
+        the new value still applies until the launcher closes.
+        """
+        value = str(value)
+        self.sections.setdefault(section.lower(), {})[key.lower()] = value
+        if not self.path:
+            return
+        try:
+            try:
+                # newline="": the file keeps its own line endings
+                with open(self.path, "r", encoding="utf-8-sig", newline="") as f:
+                    text = f.read()
+            except OSError:
+                text = ""
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8", newline="") as f:
+                f.write(set_in_text(text, section, key, value))
+            os.replace(tmp, self.path)
+        except Exception as e:
+            log("WARNING", "Could not save the setting", f"{section}.{key}: {e}")
 
     # ------------------------------------------------------------------
     # State (last game, ...) - best effort

@@ -19,20 +19,24 @@ Eden stores each player's controller as a GUID plus a *connection order*. When y
 3. Press **Start**: pick a game from the grid (or it launches the game passed by your streaming app).
 4. The launcher rewrites only the controller part of Eden's config, turns on docked (TV) mode for 2+ players, and starts Eden.
 
-Nothing else in your Eden setup is touched. The interface is in English or Italian (follows Windows).
+Besides the players, the launcher sets three Eden options, each of which can be left alone in the settings: docked mode, the games' mouse-only "controllers" window (skipped), and the "are you sure you want to close?" question (off, so the launcher can close Eden cleanly). Nothing else in your Eden setup is touched. The interface is in English or Italian (follows Windows).
 
 ## Features
 
 - **Xbox button layout**: the A button (bottom) is Switch A, so you accelerate in Mario Kart with the button labelled A. A Nintendo (positional) layout and your own Eden profiles are available per player.
-- **Game grid**: Playnite-style covers over a slowly drifting, blurred background. Updates and DLC are hidden (title IDs are read from the files).
+- **Game grid**: Playnite-style covers over a slowly drifting, blurred background. Updates and DLC are hidden (title IDs are read from the files). **LT / RT** jump to the next letter.
 - **Player count on every cover**: green if the game supports everyone who joined, red if not. **Y** shows only games that fit your group.
 - **Roulette** (**X**): a spinning strip that picks a random game, only among games that support all joined players.
-- **Play time, recent and favourites**: sort by recent / A–Z / most played; **Y** on the player screen resumes your last game.
+- **A menu for every game** (**Start**): favourite, hide, sort order, split-screen layout, which emulator starts it, and **restore a save backup** without leaving the couch.
+- **Settings on screen** (**LB** on the player screen): language, theme (dark / OLED black / light), sounds, rumble, game folders, docked mode… no file to edit.
+- **Several emulators, one list**: Eden, Eglantine, Lichii and other forks together. Switch 2 games start with the emulator that runs them, the rest with your main one.
+- **"Here we go" screen**: before a game starts, who plays in which part of the split screen.
+- **Play time, statistics, achievements**: recent / A–Z / most played order, last 7 days, most played games, 14 small rewards ("Party of four", "Night owl"…), shown with **RB**.
 - **Save backups**: your Eden saves are zipped before each launch (last 10 kept per game, skipped if unchanged).
-- **Achievements**: 14 small rewards ("Party of four", "Marathon", "Night owl"…), shown with **RB**.
-- **Close a frozen game**: hold **Back + LB + RB** on any controller.
+- **Close a game from the controller**: hold **Back + LB + RB**. Eden is asked to close properly (and killed only if it does not answer), then you pick: change players, another game, or the desktop.
+- **Tells you when a game did not start**: if Eden closes right after a launch, the last errors of its log are on screen.
 - **Controller dropped mid-game?** Its player slot waits for it and goes back to it when it reconnects.
-- Rumble, interface sounds, and a selection colour taken from each game's cover.
+- Rumble, interface sounds, a selection colour taken from each game's cover, idle dimming for the TV, a note when a newer build is out.
 
 ## Controls
 
@@ -41,13 +45,14 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 | Players | **A** / **B** | Join / leave |
 | Players | **X** | Change your button layout |
 | Players | **Y** | Resume the last game |
-| Players | **RB** | Achievements |
+| Players | **LB** / **RB** | Settings / achievements and statistics |
 | Players | **Start** | Choose a game |
 | Game grid | **A** / **B** | Play / back |
 | Game grid | **X** | Roulette |
 | Game grid | **Y** | Only games for all players |
-| Game grid | **Start** / **Back** | Sort / favourite |
-| In game | **Back + LB + RB** | Close menu (back to launcher, desktop, or resume) |
+| Game grid | **Start** / **Back** | The game's menu / favourite |
+| Game grid | **LB RB** / **LT RT** | Page / next letter |
+| In game | **Back + LB + RB** | Close menu (change players, another game, desktop, or resume) |
 
 ## Setup
 
@@ -65,12 +70,15 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 - **Eglantine** keeps Eden's data folder (`%APPDATA%\eden`): installed normally, both share config and saves. Make Eglantine portable (an empty `user` folder next to `eglantine.exe`) to keep them apart. The game grid lists Switch 2 games both as `.nup` files (with their own name and icon) and as extracted dump folders (`<game>/exefs/main`, `<game>/base/...`, `<game>/updates/<version>/...`), even when Eglantine's own list misses them because "Scan subfolders" is off for that folder. They have no player count yet: add them under `[Players]` (e.g. `Mario Kart World = 4`) so the roulette can pick them.
 - **Per-game input profiles** set in Eden (custom game config) override the launcher. Keep game controls on the global config.
 - **A button stuck in game?** Open the close menu (**Back + LB + RB**) and let go of the controllers: it lists what each player's controller is holding right now. If something shows up there, the stuck input comes from the streaming client/host, not from Eden or the game.
-- **Logs**: `%APPDATA%\eden\log\EdenLauncher_*.log`, or `<Eden>\user\log` for portable Eden.
+- **More emulators**: other Eden-family emulators in the launcher's own folder are found by themselves; for one in another folder add a line under `[Emulators]` in `EdenLauncher.ini`, e.g. `Eglantine = D:\Emulators\Eglantine`. Each game's menu can override which one starts it.
+- **Split-screen layout**: the launcher assumes two players play one above the other; set "side by side" or "shared screen" in a game's menu (Mario Kart 8 Deluxe is already known).
+- **A game with its own controls in Eden** (per-game configuration with an input profile) ignores the launcher's players: it is marked with a **!** in the grid.
+- **Logs**: `%APPDATA%\eden\log\EdenLauncher_*.log`, or `<Eden>\user\log` for portable Eden. If the launcher itself fails to start, the reason is in `EdenLauncher.crash.log` next to the exe.
 - **Your original Eden settings**: the first time the launcher changes `qt-config.ini` it keeps a copy next to it, `qt-config.ini.before-EdenLauncher`. Rename it back to `qt-config.ini` to undo everything the launcher did.
 
 ## Settings
 
-`EdenLauncher.ini` is created next to the exe on first run. The main options:
+Most options are on the settings screen (**LB**). They live in `EdenLauncher.ini`, created next to the exe on first run; the main ones:
 
 | Option | Default | What it does |
 | :--- | :--- | :--- |
@@ -83,11 +91,15 @@ Nothing else in your Eden setup is touched. The interface is in English or Itali
 | `kill_combo` | `back+lb+rb` | Buttons that open the close menu in game |
 | `backup_saves` / `backup_dir` / `backup_keep` | `true` / `saves_backup` / `10` | Save backups |
 | `sounds` / `rumble` | `true` | Interface sounds and rumble |
+| `theme` | `dark` | `dark`, `oled` (pure black) or `light` |
+| `animations` / `idle_dim_minutes` | `true` / `5` | Screen fades; dim the screen when idle (`0` = never) |
+| `confirm_close` | `off` | `off` turns off Eden's "are you sure?" on closing, `keep` leaves it |
+| `check_updates` | `true` | Say when a newer build is on GitHub (once a day, nothing is downloaded) |
 | `steamgriddb_api_key` | *(empty)* | Free key to auto-download missing covers from SteamGridDB |
 
 Custom covers go in `covers\<Title ID or game name>.png` (portrait 2:3). Wrong player count? Add `[Players]` with `Game name = 4`.
 
-**Restoring a save backup**: close Eden, open the zip from `saves_backup` and extract its `0000000000000000` folder into `%APPDATA%\eden\nand\user\save\` (portable Eden: `<Eden>\user\nand\user\save\`).
+**Restoring a save backup**: in the game grid press **Start** on the game, then "Restore a save…" (the current save is backed up first). By hand: close Eden, open the zip from `saves_backup` and extract its `0000000000000000` folder into `%APPDATA%\eden\nand\user\save\` (portable Eden: `<Eden>\user\nand\user\save\`).
 
 ## Building from source
 

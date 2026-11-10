@@ -9,10 +9,14 @@ Each zip holds the save folders relative to the emulator's save root
 newest `keep` zips per game are kept, and nothing is written when the saves
 have not changed since the newest zip: a fingerprint of every file (path,
 size, modification time) is stored as the zip comment.
+
+list_backups() and restore() are what a game's menu uses to put a backup
+back from the launcher itself.
 """
 
 import hashlib
 import os
+import shutil
 import time
 import zipfile
 
@@ -49,6 +53,69 @@ def _existing(folder):
         return []
 
 
+def backup_folder(game, backup_dir):
+    """The folder holding the backups of `game`."""
+    name = safe_name(game["title"])
+    if game.get("title_id"):
+        name += f" [{game['title_id']}]"
+    return os.path.join(backup_dir, name)
+
+
+def list_backups(game, backup_dir):
+    """
+    The backups of `game`, newest first.
+
+    Returns:
+        list[dict]: {"path", "time" (epoch, from the file name), "size" (bytes)}.
+    """
+    folder = backup_folder(game, backup_dir)
+    backups = []
+    for name in reversed(_existing(folder)):
+        path = os.path.join(folder, name)
+        try:
+            when = time.mktime(time.strptime(name[:19], "%Y-%m-%d_%H-%M-%S"))
+        except ValueError:
+            when = os.path.getmtime(path)
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            continue
+        backups.append({"path": path, "time": when, "size": size})
+    return backups
+
+
+def restore(zip_path, root, folders):
+    """
+    Put a backup back: the game's current save folders are removed and the
+    zip is extracted into `root` (take a backup of the current saves first).
+
+    Args:
+        zip_path (str):  a zip made by backup_saves().
+        root     (str):  the emulator's save root (Emulator.save_folders).
+        folders  (list): the game's current save folders, deleted first.
+
+    Returns:
+        int: files restored. Raises ValueError for a zip that would write
+             outside root, OSError / zipfile.BadZipFile when it cannot be read.
+    """
+    base = os.path.abspath(root)
+    with zipfile.ZipFile(zip_path) as archive:
+        members = [m for m in archive.infolist() if not m.is_dir()]
+        if not members:
+            raise ValueError("empty backup")
+        for member in members:
+            target = os.path.abspath(os.path.join(base, member.filename))
+            if os.path.isabs(member.filename) or os.path.commonpath([base, target]) != base:
+                raise ValueError(f"unsafe path in backup: {member.filename}")
+        for folder in folders:
+            if os.path.commonpath([base, os.path.abspath(folder)]) == base and os.path.isdir(folder):
+                shutil.rmtree(folder)
+        for member in members:
+            archive.extract(member, base)
+    log("INFO", "Saves restored", f"{zip_path} -> {base} ({len(members)} files)")
+    return len(members)
+
+
 def backup_saves(game, root, folders, backup_dir, keep=10, now=None):
     """
     Zip the save folders of `game` unless the newest backup already matches.
@@ -73,10 +140,7 @@ def backup_saves(game, root, folders, backup_dir, keep=10, now=None):
             return None
         stamp = fingerprint(files)
 
-        name = safe_name(game["title"])
-        if game.get("title_id"):
-            name += f" [{game['title_id']}]"
-        folder = os.path.join(backup_dir, name)
+        folder = backup_folder(game, backup_dir)
         zips = _existing(folder)
         if zips:
             try:

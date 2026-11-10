@@ -457,6 +457,56 @@ def controller_applet_values(disabled):
     }
 
 
+# Settings::ConfirmStop (common/settings_enums.h): Ask_Always = 0,
+# Ask_Based_On_Game = 1, Ask_Never = 2
+CONFIRM_STOP_NEVER = "2"
+
+
+def confirm_stop_values():
+    """
+    [UI] keys for UISettings::confirm_before_stopping ("confirmStop", default
+    Ask_Always) set to Ask_Never: closing the emulator's window then stops
+    the game and exits instead of opening an "Are you sure?" dialog that a
+    gamepad cannot answer - which is what lets the launcher close it cleanly.
+    """
+    return {
+        "confirmStop\\default": "false",
+        "confirmStop": CONFIRM_STOP_NEVER,
+    }
+
+
+def custom_input_titles(config_dir):
+    """
+    Title IDs of the games whose per-game configuration (config/custom/
+    <TITLEID>.ini) carries its own input profile: Config::ReadPlayerValues
+    uses the global players - the ones the launcher writes - only while
+    player_N_profile_name is empty, so for these games the launcher's
+    assignment is ignored.
+
+    Returns:
+        set[str]: upper-case title IDs.
+    """
+    folder = os.path.join(config_dir, "custom")
+    titles = set()
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return titles
+    for name in names:
+        stem, extension = os.path.splitext(name)
+        if extension.lower() != ".ini" or len(stem) != 16:
+            continue
+        try:
+            items = IniFile.load(os.path.join(folder, name)).items(SECTION)
+        except Exception:
+            continue
+        for key, value in items.items():
+            if key.endswith("_profile_name") and "\\" not in key and unquote(value).strip():
+                titles.add(stem.upper())
+                break
+    return titles
+
+
 ORIGINAL_SUFFIX = ".before-EdenLauncher"
 
 
@@ -501,7 +551,7 @@ def controller_applet_mode_values(disabled, current):
 
 
 def write_input(config_file, assignments, hardware, profiles, force_docked=False,
-                disable_controller_applet=None, applet_scheme=APPLET_UI):
+                disable_controller_applet=None, applet_scheme=APPLET_UI, never_confirm_stop=False):
     """
     Rewrite the player_N_* keys of qt-config.ini for this launch.
 
@@ -515,6 +565,8 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
                              applet" option; None leaves it untouched.
         applet_scheme (str): APPLET_UI or APPLET_MODE - which setting this
                              build reads (Eden.applet_scheme() finds out).
+        never_confirm_stop (bool): Also turn off the "are you sure you want
+                             to close?" dialog (confirm_stop_values).
     """
     if not assignments:
         log("INFO", "No controllers assigned - leaving qt-config.ini untouched")
@@ -552,6 +604,8 @@ def write_input(config_file, assignments, hardware, profiles, force_docked=False
             ini.set_many(UI_SECTION, controller_applet_values(disable_controller_applet))
         log("INFO", "Controller applet", ("disabled" if disable_controller_applet else "enabled")
             + f" ({applet_scheme})")
+    if never_confirm_stop:
+        ini.set_many(UI_SECTION, confirm_stop_values())
     keep_original(config_file)
     try:
         os.makedirs(os.path.dirname(config_file), exist_ok=True)

@@ -75,6 +75,43 @@ jobs:
         cmake --build build --parallel
         sudo cmake --install build
 
+    # The exe knows which release it is (footer, settings screen, update check)
+    - name: Stamp the build number
+      shell: python
+      env:
+        BUILD_NUMBER: ${{ github.run_number }}
+      run: |
+        import os, re
+        path = os.path.join("src", "Core", "Build.py")
+        text = open(path, encoding="utf-8").read()
+        text, count = re.subn(r"^BUILD = \d+$", "BUILD = " + os.environ["BUILD_NUMBER"], text, flags=re.M)
+        assert count == 1, "BUILD line not found"
+        open(path, "w", encoding="utf-8").write(text)
+        print(text)
+
+    # Asking a program to close the way the launcher asks the emulator: a
+    # small Tk window in a child process must go away by itself. A warning
+    # only - a runner without a desktop cannot show the window at all.
+    - name: Smoke-test closing a window (Windows)
+      if: runner.os == 'Windows'
+      shell: python
+      run: |
+        import subprocess, sys, time
+        sys.path.insert(0, "src")
+        from Core.Process import request_close
+        child = subprocess.Popen([sys.executable, "-c",
+            "import tkinter as tk, os; r = tk.Tk(); r.after(20000, lambda: os._exit(7)); r.mainloop()"])
+        time.sleep(4)
+        delivered = request_close(child)
+        try:
+            code = child.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            code = "still running"
+        print("request_close delivered:", delivered, "- child exit:", code)
+        if not delivered or code != 0:
+            print("::warning::request_close did not close the test window (delivered=%s, exit=%s)" % (delivered, code))
+
     # The runner usually has no sound card: this proves the winmm calls are
     # well formed (a bad ctypes argument raises TypeError/ArgumentError, a
     # missing device only an OSError the launcher falls back from)
@@ -106,6 +143,22 @@ jobs:
       run: |
         call .\build.bat Eden
         if errorlevel 1 exit /b 1
+
+    # The built exe must at least start: every module bundled, Tk and the
+    # SDL library loading (Core/Bootstrap.selftest). Nothing is shown.
+    - name: Self-test the built exe (Windows)
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: |
+        set EDEN_LAUNCHER_SELFTEST=1
+        start /wait "" dist\EdenLauncher.exe
+        if exist dist\EdenLauncher.crash.log type dist\EdenLauncher.crash.log
+        if not exist dist\EdenLauncher.selftest.ok (
+          echo Self-test failed: the exe did not start
+          exit /b 1
+        )
+        type dist\EdenLauncher.selftest.ok
+        del dist\EdenLauncher.selftest.ok
 
     - name: Build with build.sh (Linux)
       if: runner.os != 'Windows'

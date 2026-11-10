@@ -58,6 +58,7 @@ class Emulator:
         self.env = None
         self.profiles = {}
         self.settings = None    # Core.Settings.Settings, set by Bootstrap
+        self.variants = [self]  # every emulator this launcher can start, the main one first
 
     # ------------------------------------------------------------------
     # 1. Where everything lives
@@ -185,3 +186,33 @@ class Emulator:
                                    when there is nothing to back up.
         """
         return None, []
+
+    # ------------------------------------------------------------------
+    # 8. More than one emulator, diagnostics, settings screen (optional)
+    # ------------------------------------------------------------------
+    def emulator_for(self, game, choice=None):
+        """
+        The emulator (one of self.variants) that starts `game`; `choice` is
+        the display name the user picked for that game, if any.
+        """
+        return self
+
+    def ensure_ready(self, main):
+        """Called on the emulator about to start a game (profiles, environment)."""
+
+    def last_errors(self, limit=3):
+        """The last error lines of the emulator's own log, newest last."""
+        return []
+
+    def game_folders(self):
+        """((folder, deep scan) pairs, True if they come from the launcher's settings)."""
+        return [], False
+
+    # The emulator's own options offered on the settings screen:
+    # (settings key, (values...), default), labelled by the I18n strings
+    # "opt_<key>" and "val_<value>". The section is settings_section.
+    settings_section = None
+    setting_choices = ()
+
+    def set_game_folders(self, folders):
+        """Store the launcher's own list of game folders (empty: the emulator's)."""

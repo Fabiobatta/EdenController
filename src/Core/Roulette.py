@@ -19,6 +19,7 @@ import time
 from PIL import Image
 
 from . import Glyphs
+from .Theme import COLOR
 from .I18n import players_label, t
 
 STRIP_GAMES = 12            # different games shown on the strip
@@ -28,9 +29,6 @@ FRAME_MS = 33
 VISIBLE = 7
 TILE_W, TILE_H = 170, 255   # 720p baseline
 GAP = 26
-ACCENT = "#F5D90A"
-TEXT = "#F4F5F7"
-TEXT_DIM = "#A9AFBB"
 
 
 def pick_candidates(games, joined):
@@ -105,23 +103,23 @@ class Roulette:
     def _draw_frame_static(self):
         ui, c = self.ui, self.ui.canvas
         shade = ui.photo(("roulette-overlay", ui.width, ui.height),
-                         lambda: Image.new("RGBA", (ui.width, ui.height), (6, 7, 10, 222)))
+                         lambda: Image.new("RGBA", (ui.width, ui.height), COLOR["SPIN"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="roulette")
         cx, cy = ui.width // 2, ui.height // 2
-        c.create_text(cx, cy - self.tile_h // 2 - ui.px(78), text=t("roulette_title"), fill=TEXT,
+        c.create_text(cx, cy - self.tile_h // 2 - ui.px(78), text=t("roulette_title"), fill=COLOR["TEXT"],
                       font=ui.font(34), tags="roulette")
-        c.create_text(cx, cy - self.tile_h // 2 - ui.px(38), text=self.subtitle, fill=TEXT_DIM,
+        c.create_text(cx, cy - self.tile_h // 2 - ui.px(38), text=self.subtitle, fill=COLOR["TEXT_DIM"],
                       font=ui.font(15, False), tags=("roulette", "roulette-subtitle"))
         # Marker: glowing frame around the centre slot, triangles above and below
         w, h = int(self.tile_w * 1.08), int(self.tile_h * 1.08)
         glow = ui.px(20)
         frame = ui.photo(("roulette-frame", w, h), lambda: Glyphs.panel(
-            w, h, ui.px(12), (0, 0, 0, 0), outline=(ACCENT, ui.px(4)), glow=(ACCENT, glow)))
+            w, h, ui.px(12), (0, 0, 0, 0), outline=(COLOR["ACCENT"], ui.px(4)), glow=(COLOR["ACCENT"], glow)))
         c.create_image(cx, cy, image=frame, tags=("roulette", "roulette-marker"))
         a = ui.px(14)
         top, bottom = cy - h // 2 - ui.px(10), cy + h // 2 + ui.px(10)
-        c.create_polygon(cx - a, top - a, cx + a, top - a, cx, top, fill=ACCENT, tags=("roulette", "roulette-marker"))
-        c.create_polygon(cx - a, bottom + a, cx + a, bottom + a, cx, bottom, fill=ACCENT,
+        c.create_polygon(cx - a, top - a, cx + a, top - a, cx, top, fill=COLOR["ACCENT"], tags=("roulette", "roulette-marker"))
+        c.create_polygon(cx - a, bottom + a, cx + a, bottom + a, cx, bottom, fill=COLOR["ACCENT"],
                          tags=("roulette", "roulette-marker"))
 
     def _frame(self):
@@ -162,12 +160,12 @@ class Roulette:
         c.delete("roulette-subtitle")
         title_font = ui.font(26)
         y = cy + h // 2 + ui.px(46)
-        c.create_text(cx, y, text=ui.truncate(game["title"], title_font, ui.width - ui.px(160)), fill=TEXT,
+        c.create_text(cx, y, text=ui.truncate(game["title"], title_font, ui.width - ui.px(160)), fill=COLOR["TEXT"],
                       font=title_font, tags="roulette")
         if game.get("players"):
-            c.create_text(cx, y + ui.px(34), text=players_label(game["players"]), fill=TEXT_DIM,
+            c.create_text(cx, y + ui.px(34), text=players_label(game["players"]), fill=COLOR["TEXT_DIM"],
                           font=ui.font(15, False), tags="roulette")
-        ui.rich(cx, y + ui.px(78), t("roulette_hints"), 17, TEXT, anchor="center", tags="roulette")
+        ui.rich(cx, y + ui.px(78), t("roulette_hints"), 17, COLOR["TEXT"], anchor="center", tags="roulette")
         if self.on_done:
             self.on_done(game)
 

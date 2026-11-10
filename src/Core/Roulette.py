@@ -27,7 +27,7 @@ SPIN_TILES = 38             # tiles that pass before the chosen one stops
 SPIN_SECONDS = 4.2
 FRAME_MS = 33
 VISIBLE = 7
-TILE_W, TILE_H = 170, 255   # 720p baseline
+TILE_W, TILE_H = 190, 190   # 720p baseline
 GAP = 26
 
 
@@ -113,8 +113,8 @@ class Roulette:
         # Marker: glowing frame around the centre slot, triangles above and below
         w, h = int(self.tile_w * 1.08), int(self.tile_h * 1.08)
         glow = ui.px(20)
-        frame = ui.photo(("roulette-frame", w, h), lambda: Glyphs.panel(
-            w, h, ui.px(12), (0, 0, 0, 0), outline=(COLOR["ACCENT"], ui.px(4)), glow=(COLOR["ACCENT"], glow)))
+        frame = ui.photo(("roulette-frame", w, h, COLOR["ACCENT"]), lambda: Glyphs.focus_ring(
+            w, h, ui.px(18), COLOR["ACCENT"], 1.0, line=max(2, ui.px(3)), pad=glow))
         c.create_image(cx, cy, image=frame, tags=("roulette", "roulette-marker"))
         a = ui.px(14)
         top, bottom = cy - h // 2 - ui.px(10), cy + h // 2 + ui.px(10)

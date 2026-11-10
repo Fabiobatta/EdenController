@@ -4,7 +4,8 @@ Pictures for the game grid and the backgrounds.
 
 Per game (keys of the game dict), best source first:
 
-    cover       portrait art for the tile
+    cover       the user's own art for the tile (square fits best; a
+                portrait cover is used when the game has no square icon)
                     covers/<id or title>.<png|jpg|jpeg|webp>   (user files)
                     SteamGridDB, if steamgriddb_api_key is set  (downloaded)
     background  landscape art, blurred behind the UI

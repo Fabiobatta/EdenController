@@ -54,7 +54,7 @@ from .Process import launch, request_close
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
-from .Theme import THEME_NAMES, apply_theme
+from .Theme import ACCENT_NAMES, THEME_NAMES, apply_theme
 from .Ui import COLOR, SPLIT_MODES, LauncherUi, player_color, split_layout, split_mode
 from .Update import DOWNLOAD_PAGE, UpdateCheck
 
@@ -166,7 +166,8 @@ class LauncherApp:
         self._scan_result = None            # handed over by the scan thread
         self.waiting_for_games = False      # START pressed while still scanning
 
-        apply_theme(settings.get(LAUNCHER_SECTION, "theme", "dark").lower())
+        apply_theme(settings.get(LAUNCHER_SECTION, "theme", "dark").lower(),
+                    settings.get(LAUNCHER_SECTION, "accent", "violet").lower())
         self.ui = LauncherUi(root, emulator.name, emulator.display_name)
 
         # Launcher options
@@ -190,6 +191,7 @@ class LauncherApp:
         self.ui.motion = settings.get_bool(LAUNCHER_SECTION, "background_motion", True)
         self.ui.dynamic_colors = settings.get_bool(LAUNCHER_SECTION, "dynamic_colors", True)
         self.ui.animations = settings.get_bool(LAUNCHER_SECTION, "animations", True)
+        self.ui.splash_ms = SPLASH_MS
         self.idle_dim_s = max(0, settings.get_int(LAUNCHER_SECTION, "idle_dim_minutes", 5)) * 60
         self.last_input = time.monotonic()
         self.menu = Menu(self.ui, sound=lambda name: self.sounds.play(name))
@@ -1057,16 +1059,18 @@ class LauncherApp:
         } for a in self.assignments])
 
     def update_hints(self):
-        """Footer button hints for the current screen."""
+        """The hint dock, the shortcuts next to the clock and the "continue" card for the current screen."""
+        quick, resume = [], None
         if self.mode in ("ROULETTE", "TROPHIES", "STATS", "MENU", "SPLASH"):
-            hints = []                          # they draw their own
+            self.ui.set_hints([])               # they draw their own, over the screen below
+            return
         elif self.mode == "GAMES":
-            hints = [(("lt", "rt"), t("hint_letter")), ("x", t("hint_surprise"))]
+            hints = [("a", t("hint_play")), ("x", t("hint_surprise"))]
             joined = len(self.assignments)
             if joined >= 2:
                 hints.append(("y", t("hint_filter_off") if self.filter_on else t("hint_filter_on", n=joined)))
-            hints += [("back", t("hint_favorite")), ("start", t("hint_menu")),
-                      ("a", t("hint_play")), ("b", t("hint_back"))]
+            hints += [("start", t("hint_menu")), ("back", t("hint_favorite")),
+                      (("lt", "rt"), t("hint_letter")), ("b", t("hint_back"))]
         else:
             if self.has_game_args:
                 start = t("hint_launch_game")
@@ -1075,12 +1079,13 @@ class LauncherApp:
             else:
                 start = t("hint_launch", name=self.emu.display_name)
             hints = [("a", t("hint_join"))]
-            last = self._last_game() if self.picker else None
-            if last:
-                title = last["title"] if len(last["title"]) <= 20 else last["title"][:19].rstrip() + "…"
-                hints.append(("y", t("hint_resume", title=title)))
-            hints += [("lb", t("hint_settings")), ("rb", t("hint_trophies")), ("start", start),
-                      ("back", t("hint_quit"))]
+            if self.assignments:
+                hints += [("x", t("hint_layout")), ("b", t("hint_leave"))]
+            hints += [("start", start), ("back", t("hint_quit"))]
+            quick = [("lb", t("hint_settings")), ("rb", t("hint_trophies"))]
+            resume = self._last_game() if self.picker else None
+        self.ui.set_quick(quick)
+        self.ui.set_resume(resume)
         self.ui.set_hints(hints)
 
     # ========================================================================
@@ -1222,7 +1227,7 @@ class LauncherApp:
         self.emu.settings.save_state(favorites=favorites)
         self.trophy_queue += self.achievements.favorites_changed(len(favorites))
         self.sounds.play("toggle")
-        self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["ACCENT"])
+        self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["GOLD"])
         self._reorder_keeping(game)
 
     def _reorder_keeping(self, game):
@@ -1375,10 +1380,15 @@ class LauncherApp:
             self.ui.show_games_loading()
         else:
             self._apply_filter()
-            joined = len(self.assignments)
-            self.ui.show_games(self.shown_games, self.game_index, players=joined,
-                               filter_players=joined if self.filter_on else 0)
+            self._show_grid()
         self.update_hints()
+
+    def _show_grid(self):
+        """Hand the games on screen, the selection and what the header says to the UI."""
+        joined = len(self.assignments)
+        self.ui.show_games(self.shown_games, self.game_index, players=joined,
+                           filter_players=joined if self.filter_on else 0,
+                           sort_label=t("sort_" + self.sort_mode))
 
     def show_players(self):
         self.mode = "PLAYERS"
@@ -1400,28 +1410,21 @@ class LauncherApp:
 
     def move_game_selection(self, action):
         """
-        Move the highlight in the grid.
+        Move the focus along the shelf.
 
         Args:
-            action (str): "left"/"right" (one game, wrapping), "up"/"down"
-                          (one row), "page_up"/"page_down" (one screen).
+            action (str): "left"/"right" (one game, wrapping), "page_up"/
+                          "page_down" (as many as fit on screen). "up" and
+                          "down" do nothing: there is one row.
         """
         if self.mode != "GAMES" or not self.shown_games or self.ui.alert_mode or self.process:
             return
         count = len(self.shown_games)
-        columns = self.ui.games_columns()
         index = self.game_index
         if action == "left":
             index = (index - 1) % count
         elif action == "right":
             index = (index + 1) % count
-        elif action == "up":
-            index = index - columns if index - columns >= 0 else index
-        elif action == "down":
-            if index + columns < count:
-                index += columns
-            elif index // columns < (count - 1) // columns:
-                index = count - 1          # partial last row: go to its last game
         elif action == "page_up":
             index = max(0, index - self.ui.games_page())
         elif action == "page_down":
@@ -1429,9 +1432,7 @@ class LauncherApp:
         if index != self.game_index:
             self.game_index = index
             self.sounds.play("move")
-            joined = len(self.assignments)
-            self.ui.show_games(self.shown_games, index, players=joined,
-                               filter_players=joined if self.filter_on else 0)
+            self._show_grid()
 
     def poll_navigation(self):
         """
@@ -1549,8 +1550,7 @@ class LauncherApp:
             index = group_start(start - 1) if start > 0 else group_start(count - 1)
         self.game_index = index
         self.sounds.play("move")
-        joined = len(self.assignments)
-        self.ui.show_games(games, index, players=joined, filter_players=joined if self.filter_on else 0)
+        self._show_grid()
         self.ui.grid.flash_letter(letter(games[index]))
 
     def launch_selected_game(self):
@@ -1834,7 +1834,8 @@ class LauncherApp:
         rows = [
             {"label": t("settings_look"), "kind": "header"},
             row(launcher, "language", ("auto", "it", "en"), "auto", language),
-            row(launcher, "theme", THEME_NAMES, "dark", self.ui.set_theme),
+            row(launcher, "theme", THEME_NAMES, "dark", lambda value: self.ui.set_theme(name=value)),
+            row(launcher, "accent", ACCENT_NAMES, "violet", lambda value: self.ui.set_theme(accent=value)),
             row(launcher, "background_motion", on_off, "true", motion),
             row(launcher, "animations", on_off, "true",
                 lambda value: setattr(self.ui, "animations", value == "true")),
@@ -1851,6 +1852,8 @@ class LauncherApp:
             rows.append({"label": t("opt_game_dirs"), "value": t("folders_count", n=len(folders)),
                          "action": self.open_folders})
             rows.append({"label": t("gm_sort"), "value": t("sort_" + self.sort_mode), "change": sort})
+            rows.append({"label": t("settings_emulators"), "value": str(len(self.emu.variants)),
+                         "action": self.open_emulators})
         rows.append(row(launcher, "backup_saves", on_off, "true", backups))
         if self.emu.setting_choices:
             rows.append({"label": self.emu.display_name, "kind": "header"})
@@ -1915,6 +1918,77 @@ class LauncherApp:
         if sys.platform == "win32":
             return [f"{letter}:\\" for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ" if os.path.isdir(f"{letter}:\\")]
         return [path for path in ("/", os.path.expanduser("~")) if os.path.isdir(path)]
+
+    # ------------------------------------------------------------------
+    # Emulators (from the settings)
+    # ------------------------------------------------------------------
+    def open_emulators(self):
+        self._emulators_depth = len(self.menu.stack)
+        self._emulators_changed = False
+        self._open_menu(t("settings_emulators"), self._emulator_rows, subtitle=t("emulators_subtitle"),
+                        on_back=self._emulators_closed)
+
+    def _emulator_rows(self):
+        rows = []
+        for i, emulator in enumerate(self.emu.variants):
+            facts = [text for text in (t("emulators_main") if i == 0 else "",
+                                       t("emulators_nx2") if emulator.supports_nx2() else "") if text]
+            row = {"label": emulator.display_name, "value": "  ·  ".join(facts) or None}
+            if getattr(emulator, "settings_key", None):
+                row["action"] = lambda e=emulator: self.confirm(
+                    t("emulators_remove") + f" {e.display_name}?", e.exe, lambda: self._remove_emulator(e))
+            else:
+                row["kind"] = "info"
+                row["label"] = emulator.display_name + (f"   ·   {row['value']}" if row["value"] else "")
+            rows.append(row)
+            rows.append({"label": emulator.exe, "kind": "info"})
+        rows.append({"label": t("emulators_add"), "action": lambda: self._browse_exe(None)})
+        return rows
+
+    def _remove_emulator(self, emulator):
+        if self.emu.remove_variant(emulator):
+            self._emulators_changed = True
+        self.menu.refresh()
+
+    def _emulators_closed(self):
+        if self._emulators_changed:
+            self.rescan_games()             # other game folders, other emulators for the games
+            self.ui.show_toast(t("toast_rescan"), COLOR["ACCENT"])
+
+    def _browse_exe(self, path):
+        """One level of the file browser: enter a folder or pick an emulator's executable."""
+        windows = sys.platform == "win32"
+
+        def rows():
+            if path is None:
+                return [{"label": root, "value": "›", "action": lambda r=root: self._browse_exe(r)}
+                        for root in self._roots()]
+            try:
+                names = sorted((n for n in os.listdir(path) if not n.startswith((".", "$"))), key=str.lower)
+            except OSError:
+                return [{"label": t("folders_unreadable"), "kind": "info"}]
+            found = []
+            for name in names:                  # executables first: that is what is being looked for
+                full = os.path.join(path, name)
+                if os.path.isfile(full) and (name.lower().endswith(".exe") if windows else os.access(full, os.X_OK)):
+                    found.append({"label": name, "color": COLOR["OK"], "action": lambda f=full: self._add_emulator(f)})
+            for name in names:
+                if os.path.isdir(os.path.join(path, name)):
+                    found.append({"label": name, "value": "›",
+                                  "action": lambda n=name: self._browse_exe(os.path.join(path, n))})
+            return found or [{"label": t("folders_none"), "kind": "info"}]
+        self._open_menu(t("emulators_pick"), rows, subtitle=path or t("folders_pick_drive"))
+
+    def _add_emulator(self, path):
+        emulator = self.emu.add_variant(path)
+        if emulator is None:
+            self.sounds.play("error")
+            self.ui.show_toast(t("emulators_not_one"))
+            return
+        self._emulators_changed = True
+        self.ui.show_toast(t("emulators_added", name=emulator.display_name), COLOR["OK"])
+        del self.menu.stack[self._emulators_depth + 1:]      # back to the list of emulators
+        self.menu.refresh()
 
     def _browse(self, path, current):
         """One level of the folder browser: pick this folder, go up, or enter a subfolder."""
@@ -2066,9 +2140,7 @@ class LauncherApp:
     def _game_menu_closed(self, game):
         """Favourite, hidden, sort order may have changed: rebuild the grid around the game."""
         self._regroup(game)
-        joined = len(self.assignments)
-        self.ui.show_games(self.shown_games, self.game_index, players=joined,
-                           filter_players=joined if self.filter_on else 0)
+        self._show_grid()
 
     # ------------------------------------------------------------------
     # Restoring a save backup (from a game's menu)

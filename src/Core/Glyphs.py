@@ -300,33 +300,41 @@ def split_map(width, height, regions, colors, text_color="#111111"):
     """
     A TV showing every player's part of the screen: `regions` (fractions, one
     per player) filled with that player's colour and labelled P1, P2...; with
-    regions=None the screen is shared and the players are discs in a row.
+    regions=None the screen is shared and the players are discs in a row
+    (no players: just the empty screen).
     """
     w, h = max(16, int(width)), max(9, int(height))
     s = 2
     W, H = w * s, h * s
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    border = max(2, int(s * 2))
-    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=H * 0.07, fill=(18, 20, 27, 255),
-                        outline=(120, 126, 140, 255), width=border)
-    inset = border + s * 2
+    border = max(2, int(s * 1.5))
+    corner = H * 0.085
+    d.rounded_rectangle((0, 0, W - 1, H - 1), radius=corner, fill=(9, 10, 15, 236))
+    rim = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(rim).rounded_rectangle((0, 0, W - 1, H - 1), radius=corner, outline=(255, 255, 255, 56),
+                                          width=border)
+    img = Image.alpha_composite(img, rim)
+    d = ImageDraw.Draw(img)
+    inset = border + int(H * 0.035)
     inner = (W - 2 * inset, H - 2 * inset)
+    gap = max(s, int(H * 0.012))
+    radius = corner * 0.62
     if regions:
         for i, (x0, y0, x1, y1) in enumerate(regions[:len(colors)]):
-            gap = s * 2
             box = (inset + x0 * inner[0] + gap, inset + y0 * inner[1] + gap,
                    inset + x1 * inner[0] - gap, inset + y1 * inner[1] - gap)
-            d.rounded_rectangle(box, radius=s * 5, fill=_rgb(colors[i]) + (255,))
+            rgb = _rgb(colors[i])
+            d.rounded_rectangle(box, radius=radius, fill=rgb + (255,))
             d.text(((box[0] + box[2]) / 2, (box[1] + box[3]) / 2), f"P{i + 1}",
-                   font=font(min(box[3] - box[1], box[2] - box[0]) * 0.34), fill=_rgb(text_color), anchor="mm")
-    else:
-        d.rounded_rectangle((inset + s * 2, inset + s * 2, W - inset - s * 2, H - inset - s * 2),
-                            radius=s * 5, fill=(255, 255, 255, 30))
+                   font=font(min(box[3] - box[1], box[2] - box[0]) * 0.3), fill=_rgb(text_color), anchor="mm")
+    elif colors:
+        d.rounded_rectangle((inset + gap, inset + gap, W - inset - gap, H - inset - gap),
+                            radius=radius, fill=(255, 255, 255, 20))
         count = len(colors)
         per_row = 4 if count > 4 else count
         rows = (count + per_row - 1) // per_row
-        size = int(min(inner[0] / (per_row * 1.25), inner[1] / (rows * 1.3)))
+        size = int(min(inner[0] / (per_row * 1.3), inner[1] / (rows * 1.4)))
         for i, color in enumerate(colors):
             in_row = min(per_row, count - (i // per_row) * per_row)
             cx = W / 2 + ((i % per_row) - (in_row - 1) / 2) * size * 1.2
@@ -385,8 +393,67 @@ def panel(width, height, radius, fill, outline=None, glow=None):
     d.rounded_rectangle(box, radius=radius * s, fill=tuple(fill))
     if outline:
         color, line = outline
-        d.rounded_rectangle(box, radius=radius * s, outline=_rgb(color) + (255,), width=int(line * s))
+        rgba = tuple(color) if not isinstance(color, str) and len(color) == 4 else _rgb(color) + (255,)
+        if rgba[3] < 255:
+            # A translucent rim: drawn on its own layer so it blends over the fill
+            rim = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            ImageDraw.Draw(rim).rounded_rectangle(box, radius=radius * s, outline=rgba, width=max(1, int(line * s)))
+            img = Image.alpha_composite(img, rim)
+        else:
+            d.rounded_rectangle(box, radius=radius * s, outline=rgba, width=max(1, int(line * s)))
     return _finish(img, (width + 2 * pad, height + 2 * pad))
+
+
+@lru_cache(maxsize=96)
+def focus_ring(width, height, radius, color, strength=1.0, line=3, pad=24):
+    """
+    The frame around the focused item: a white rim hugging a width x height
+    rounded box and a soft glow of `color` around it, `strength` (0..1)
+    strong. The picture is `pad` larger on every side and empty inside.
+    """
+    from PIL import ImageFilter
+
+    width, height, pad = max(4, int(width)), max(4, int(height)), int(pad)
+    s = 2
+    size = ((width + 2 * pad) * s, (height + 2 * pad) * s)
+    box = (pad * s, pad * s, (pad + width) * s - 1, (pad + height) * s - 1)
+    grow = int(line * s * 1.5)
+    outer = (box[0] - grow, box[1] - grow, box[2] + grow, box[3] + grow)
+    mask = Image.new("L", size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(outer, radius=radius * s + grow, fill=int(255 * max(0.0, min(1.0, strength))))
+    mask = mask.filter(ImageFilter.GaussianBlur(pad * s * 0.34))
+    # Nothing shines through the tile itself
+    ImageDraw.Draw(mask).rounded_rectangle(box, radius=radius * s, fill=0)
+    img = Image.new("RGBA", size, _rgb(color) + (0,))
+    img.putalpha(mask)
+    ImageDraw.Draw(img).rounded_rectangle(outer, radius=radius * s + grow, outline=(255, 255, 255, 255),
+                                          width=max(2, int(line * s)))
+    return _finish(img, (width + 2 * pad, height + 2 * pad))
+
+
+@lru_cache(maxsize=8)
+def hero_mask(width, height):
+    """
+    Alpha for the large picture behind a game's title: solid on the right,
+    fading out to the left (where the text is) and to the bottom.
+    """
+    width, height = max(2, int(width)), max(2, int(height))
+    ramp = Image.linear_gradient("L")                       # 256x256, black at the top
+    across = ramp.rotate(90, expand=True).resize((width, height))       # black on the left
+    across = across.point(lambda v: 0 if v < 26 else min(255, int((v - 26) * 2.3)))
+    down = ramp.transpose(Image.FLIP_TOP_BOTTOM).resize((width, height))
+    down = down.point(lambda v: min(255, int(v * 2.6)))
+    from PIL import ImageChops
+    return ImageChops.multiply(across, down)
+
+
+def rounded(image, radius):
+    """`image` as RGBA with rounded corners."""
+    image = image.convert("RGBA")
+    mask = Image.new("L", (image.width * 2, image.height * 2), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, mask.width - 1, mask.height - 1), radius=radius * 2, fill=255)
+    image.putalpha(mask.resize(image.size, Image.LANCZOS))
+    return image
 
 
 @lru_cache(maxsize=64)

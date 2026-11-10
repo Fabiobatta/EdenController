@@ -60,8 +60,10 @@ background_motion = true
 ; The selected game's border and glow take the colour of its cover
 ; (false = always yellow)
 dynamic_colors = true
-; Colours: dark, oled (pure black, no background picture) or light
+; Colours: dark, or oled (pure black, no background picture)
 theme = dark
+; Accent colour: violet, azure, mint, amber or rose
+accent = violet
 ; Screen fades, cards popping in, the "let's go" screen before a game
 animations = true
 ; Dim the screen after this many minutes without input (0 = never)
@@ -125,8 +127,10 @@ background_motion = true
 ; Il bordo e il bagliore del gioco selezionato prendono il colore della sua
 ; copertina (false = sempre giallo)
 dynamic_colors = true
-; Colori: dark (scuro), oled (nero puro, senza immagine di sfondo) o light (chiaro)
+; Colori: dark (scuro) oppure oled (nero puro, senza immagine di sfondo)
 theme = dark
+; Colore d'accento: violet (viola), azure (azzurro), mint (menta), amber (ambra) o rose (rosa)
+accent = violet
 ; Dissolvenze, schede che entrano, schermata "si parte" prima del gioco
 animations = true
 ; Oscura lo schermo dopo questi minuti senza input (0 = mai)
@@ -227,7 +231,8 @@ def set_in_text(text, section, key, value):
     """
     `text` of an INI file with `key` of `section` set to `value`, every other
     line untouched: the key's line is replaced, or added at the end of its
-    section, or the section is added at the end of the file.
+    section, or the section is added at the end of the file. value=None
+    removes the key's line instead.
     """
     newline = "\r\n" if "\r\n" in text else "\n"
     lines = text.splitlines()
@@ -246,8 +251,13 @@ def set_in_text(text, section, key, value):
         if line[0] in ";#" or "=" not in line:
             continue
         if line.split("=", 1)[0].strip().lower() == key.lower():
-            lines[i] = f"{raw.split('=', 1)[0].rstrip()} = {value}".rstrip()
+            if value is None:
+                del lines[i]
+            else:
+                lines[i] = f"{raw.split('=', 1)[0].rstrip()} = {value}".rstrip()
             return newline.join(lines) + newline
+    if value is None:
+        return text
     entry = f"{key} = {value}".rstrip()
     if section_end is None:
         lines += ([""] if lines and lines[-1].strip() else []) + [f"[{section}]", entry]
@@ -290,12 +300,16 @@ class Settings:
 
     def set(self, section, key, value):
         """
-        Change one option, in memory and in the settings file (only that
-        line of the file changes). A file that cannot be written is logged;
-        the new value still applies until the launcher closes.
+        Change one option (value=None: remove it), in memory and in the
+        settings file (only that line of the file changes). A file that
+        cannot be written is logged; the new value still applies until the
+        launcher closes.
         """
-        value = str(value)
-        self.sections.setdefault(section.lower(), {})[key.lower()] = value
+        if value is None:               # remove the option
+            self.sections.get(section.lower(), {}).pop(key.lower(), None)
+        else:
+            value = str(value)
+            self.sections.setdefault(section.lower(), {})[key.lower()] = value
         if not self.path:
             return
         try:

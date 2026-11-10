@@ -2,10 +2,12 @@
 Core/Theme.py
 The colours of the interface, switchable at runtime.
 
-    dark    the default: light text over the game's blurred, darkened art
+    dark    the default: glass panels over the game's blurred, darkened art
     oled    pure black: no background picture at all (nothing to burn in,
             and the lightest to draw)
-    light   dark text over the art washed out towards white
+
+plus an accent colour (the focus glow of games without art, selected
+menu rows, values, bars), one of ACCENTS.
 
 COLOR is one dict that every drawing module reads at draw time, so
 apply_theme() changes all of them at once; the UI then throws away its
@@ -15,34 +17,47 @@ Besides plain colours ("#RRGGBB") a theme has translucent fills as RGBA
 tuples (panels, dialogs, overlays) and one colour per player number.
 """
 
+ACCENTS = {
+    "violet": "#8E7BFF",
+    "azure": "#4CC2FF",
+    "mint": "#3DDCB4",
+    "amber": "#FFB648",
+    "rose": "#FF6FA8",
+}
+ACCENT_NAMES = tuple(ACCENTS)
+
 THEMES = {
     "dark": {
-        "BG": "#0B0D12",
-        "TEXT": "#F4F5F7",
-        "TEXT_DIM": "#A9AFBB",
-        "TEXT_FAINT": "#6B7280",
-        "ACCENT": "#F5D90A",
-        "OK": "#3FB950",
-        "BAD": "#E5534B",
+        "BG": "#07080C",
+        "TEXT": "#F5F6F8",
+        "TEXT_DIM": "#A6AEBD",
+        "TEXT_FAINT": "#646C7B",
+        "ACCENT": ACCENTS["violet"],
+        "GOLD": "#F6C445",                      # favourites, achievements
+        "OK": "#3DDC84",
+        "BAD": "#FF5D5D",
         "NEON_RED": "#FF6B61",
-        "WARN": "#F5BE28",
-        "LINE": "#3A3F4B",
-        "LINE_FAINT": "#2E323B",
+        "WARN": "#FFB84D",
+        "LINE": "#2C303C",
+        "LINE_FAINT": "#20232D",
         "LOCKED": "#4B5060",
-        "DISC_TEXT": "#111111",
-        "PANEL": (10, 12, 18, 196),             # player cards
-        "PANEL_EMPTY": (255, 255, 255, 16),
-        "DIALOG": (22, 24, 31, 248),
-        "PILL": (14, 16, 22, 235),              # toasts, chips
-        "CHIP": (0, 0, 0, 140),
-        "ROW": (255, 255, 255, 12),             # menu rows, stat tiles
-        "ROW_SELECTED": (255, 214, 10, 34),
-        "TROPHY": (18, 16, 8, 245),
-        "TROPHY_ROW": (255, 214, 10, 22),
-        "OVERLAY": (0, 0, 0, 175),              # behind dialogs
-        "SCREEN": (8, 9, 13, 255),              # full-screen lists over the content
-        "SPIN": (6, 7, 10, 222),                # behind the roulette
-        "FADE": (0, 0, 0),                      # footer band, screen fades
+        "DISC_TEXT": "#0B0C10",
+        "EDGE": (255, 255, 255, 34),            # the light rim of glass panels
+        "EDGE_STRONG": (255, 255, 255, 80),
+        "PANEL": (20, 23, 32, 208),             # cards
+        "PANEL_EMPTY": (255, 255, 255, 9),
+        "DIALOG": (17, 19, 27, 255),
+        "DRAWER": (13, 15, 22, 250),            # side menus
+        "PILL": (18, 20, 28, 232),              # toasts, the hint dock
+        "CHIP": (255, 255, 255, 22),
+        "ROW": (255, 255, 255, 13),             # menu rows, stat tiles
+        "ROW_SELECTED": (142, 123, 255, 60),    # follows the accent (apply_theme)
+        "TROPHY": (22, 19, 10, 246),
+        "TROPHY_ROW": (246, 196, 69, 24),
+        "OVERLAY": (3, 4, 7, 178),              # behind dialogs and drawers
+        "SCREEN": (8, 9, 14, 255),              # full-screen lists over the content
+        "SPIN": (4, 5, 9, 246),                 # behind the roulette
+        "FADE": (0, 0, 0),                      # screen fades
         "PLAYERS": ("#4FA3FF", "#FF5C5C", "#5CD65C", "#FFD23F",
                     "#B57BFF", "#FF9A3C", "#3DDCCB", "#FF6FB5"),
     },
@@ -50,62 +65,51 @@ THEMES = {
 THEMES["oled"] = {
     **THEMES["dark"],
     "BG": "#000000",
-    "PANEL": (0, 0, 0, 255),
-    "PANEL_EMPTY": (255, 255, 255, 10),
-    "DIALOG": (10, 10, 12, 255),
-    "PILL": (0, 0, 0, 255),
+    "PANEL": (10, 11, 15, 255),
+    "PANEL_EMPTY": (255, 255, 255, 8),
+    "DIALOG": (8, 9, 12, 255),
+    "DRAWER": (5, 6, 9, 255),
+    "PILL": (8, 9, 12, 255),
     "SCREEN": (0, 0, 0, 255),
-    "SPIN": (0, 0, 0, 240),
-    "OVERLAY": (0, 0, 0, 200),
+    "SPIN": (0, 0, 0, 242),
+    "OVERLAY": (0, 0, 0, 205),
 }
-THEMES["light"] = {
-    **THEMES["dark"],
-    "BG": "#EEF0F4",
-    "TEXT": "#14161B",
-    "TEXT_DIM": "#4A5060",
-    "TEXT_FAINT": "#858B9A",
-    "ACCENT": "#B87400",
-    "OK": "#1F8A34",
-    "BAD": "#CC3A32",
-    "NEON_RED": "#D8362C",
-    "WARN": "#B87400",
-    "LINE": "#B9BFCB",
-    "LINE_FAINT": "#D2D6DE",
-    "LOCKED": "#A3A9B6",
-    "DISC_TEXT": "#FFFFFF",
-    "PANEL": (255, 255, 255, 214),
-    "PANEL_EMPTY": (255, 255, 255, 96),
-    "DIALOG": (250, 251, 253, 252),
-    "PILL": (255, 255, 255, 244),
-    "CHIP": (255, 255, 255, 190),
-    "ROW": (0, 0, 0, 14),
-    "ROW_SELECTED": (184, 116, 0, 40),
-    "TROPHY": (255, 250, 235, 250),
-    "TROPHY_ROW": (184, 116, 0, 30),
-    "OVERLAY": (30, 34, 44, 120),
-    "SCREEN": (240, 242, 246, 255),
-    "SPIN": (240, 242, 246, 232),
-    "FADE": (238, 240, 244),
-    "PLAYERS": ("#1F6FE0", "#D93A3A", "#22943A", "#B98A00",
-                "#8544D6", "#D96A0A", "#0E9E8E", "#D6408C"),
-}
-THEME_NAMES = ("dark", "oled", "light")
+THEME_NAMES = ("dark", "oled")
 
 COLOR = dict(THEMES["dark"])
 _current = "dark"
+_accent = "violet"
 
 
-def apply_theme(name):
-    """Switch every colour to theme `name` (unknown names: dark). Returns the name applied."""
-    global _current
-    _current = name if name in THEMES else "dark"
+def _rgb(color):
+    color = color.lstrip("#")
+    return tuple(int(color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def apply_theme(name=None, accent=None):
+    """
+    Switch every colour to theme `name` and accent `accent` (None keeps the
+    current one; unknown names fall back to dark / violet). Returns the
+    theme name applied.
+    """
+    global _current, _accent
+    if name is not None:
+        _current = name if name in THEMES else "dark"
+    if accent is not None:
+        _accent = accent if accent in ACCENTS else "violet"
     COLOR.clear()
     COLOR.update(THEMES[_current])
+    COLOR["ACCENT"] = ACCENTS[_accent]
+    COLOR["ROW_SELECTED"] = _rgb(ACCENTS[_accent]) + (60,)
     return _current
 
 
 def current_theme():
     return _current
+
+
+def current_accent():
+    return _accent
 
 
 def player_color(index):

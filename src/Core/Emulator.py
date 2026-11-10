@@ -197,6 +197,18 @@ class Emulator:
         """
         return self
 
+    def supports_nx2(self):
+        """True if this emulator runs Switch 2 games."""
+        return False
+
+    def add_variant(self, path):
+        """Add the emulator whose executable is `path`; None if this launcher cannot (or it is not one)."""
+        return None
+
+    def remove_variant(self, variant):
+        """Remove an emulator added with add_variant(); False if it cannot be removed."""
+        return False
+
     def ensure_ready(self, main):
         """Called on the emulator about to start a game (profiles, environment)."""
 

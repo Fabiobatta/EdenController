@@ -1,7 +1,8 @@
 """
 Core/Menu.py
-A list menu drawn over the current screen (canvas tag "menu"): the settings
-screen, a game's own menu, the list of save backups, the folder browser.
+A list menu in a drawer that slides in from the right edge over the dimmed
+screen (canvas tag "menu"): the settings, a game's own menu, the list of
+save backups, the folder browser.
 
     menu = Menu(ui, sound=sounds.play)
     menu.open(title, build, subtitle="", game=None, info=None)
@@ -25,13 +26,14 @@ from PIL import Image
 from . import Glyphs
 from .Theme import COLOR
 
+DRAWER_W = 580              # 720p baseline
 ROW_H = 44
 ROW_GAP = 6
-TOP = 124
-BOTTOM = 84
-SIDE = 64
-LIST_W = 800                # width of the list without a game picture
-ART_W, ART_H = 190, 285
+TOP = 132                   # first row (lower when a game's picture heads the drawer)
+BOTTOM = 76
+SIDE = 36
+ART = 92                    # the game's tile next to the title
+SLIDE_MS = 170
 
 
 def selectable(row):
@@ -70,7 +72,7 @@ class Menu:
                            "info": info, "hints": hints, "on_back": on_back,
                            "rows": [], "index": 0, "first": 0})
         self._rebuild(reset=True)
-        self.draw()
+        self.draw(slide=len(self.stack) == 1)
 
     def _rebuild(self, reset=False):
         frame = self.frame
@@ -157,38 +159,50 @@ class Menu:
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
-    def draw(self):
+    def draw(self, slide=False):
+        """
+        The visible menu as a drawer on the right edge, over the dimmed
+        screen. slide=True (a menu just opened) brings it in from the edge.
+        """
         ui, c = self.ui, self.ui.canvas
         c.delete("menu")
         frame = self.frame
         if not frame or not ui.width:
             return
         shade = ui.photo(("menu-overlay", ui.width, ui.height),
-                         lambda: Image.new("RGBA", (ui.width, ui.height), COLOR["SCREEN"]))
+                         lambda: Image.new("RGBA", (ui.width, ui.height), COLOR["OVERLAY"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="menu")
-        left = ui.px(SIDE)
-        title = frame["title"]() if callable(frame["title"]) else frame["title"]
-        c.create_text(left, ui.px(46), text=ui.truncate(title, ui.font(32), ui.width - 2 * left),
-                      anchor="w", fill=COLOR["TEXT"], font=ui.font(32), tags="menu")
-        subtitle = frame["subtitle"]() if callable(frame["subtitle"]) else frame["subtitle"]
-        if subtitle:
-            c.create_text(left, ui.px(88), text=ui.truncate(subtitle, ui.font(15, False), ui.width - 2 * left),
-                          anchor="w", fill=COLOR["TEXT_DIM"], font=ui.font(15, False), tags="menu")
+        tags = ("menu", "menu-drawer")
+        width = min(ui.width, ui.px(DRAWER_W))
+        x0 = ui.width - width
+        radius = ui.px(26)
+        # Rounded on the left only: the panel runs off the right edge
+        panel = ui.photo(("drawer", width, ui.height), lambda: Glyphs.panel(
+            width + radius, ui.height, radius, COLOR["DRAWER"], outline=(COLOR["EDGE"], max(1, ui.px(1.2)))))
+        c.create_image(x0, 0, image=panel, anchor="nw", tags=tags)
 
-        top = ui.px(TOP)
-        list_x, list_w = left, min(ui.width - 2 * left, ui.px(LIST_W))
+        left = x0 + ui.px(SIDE)
+        inner = width - 2 * ui.px(SIDE)
+        title = frame["title"]() if callable(frame["title"]) else frame["title"]
+        subtitle = frame["subtitle"]() if callable(frame["subtitle"]) else frame["subtitle"]
+        title_font, sub_font = ui.font(26, "semibold"), ui.font(14, False)
+        text_x, text_w, top = left, inner, ui.px(TOP)
         if frame["game"]:
-            art_w, art_h = ui.px(ART_W), ui.px(ART_H)
-            c.create_image(left, top, image=ui.grid.tile(frame["game"], art_w, art_h, False),
-                           anchor="nw", tags="menu")
-            y = top + art_h + ui.px(22)
-            small = ui.font(13, False)
-            for line in (frame["info"]() if frame["info"] else []):
-                c.create_text(left, y, text=ui.truncate(line, small, art_w + ui.px(40)), anchor="w",
-                              fill=COLOR["TEXT_DIM"], font=small, tags="menu")
-                y += ui.px(22)
-            list_x = left + art_w + ui.px(56)
-            list_w = min(ui.width - list_x - left, ui.px(LIST_W))
+            art = ui.px(ART)
+            c.create_image(left, ui.px(40), image=ui.grid.tile(frame["game"], art, art), anchor="nw", tags=tags)
+            text_x, text_w = left + art + ui.px(20), inner - art - ui.px(20)
+        c.create_text(text_x, ui.px(62), text=ui.truncate(title, title_font, text_w), anchor="w",
+                      fill=COLOR["TEXT"], font=title_font, tags=tags)
+        lines = ([subtitle] if subtitle else []) + (list(frame["info"]()) if frame["info"] else [])
+        if frame["game"]:
+            # Facts about the game: two per line under the title
+            lines = ["   ·   ".join(lines[n:n + 2]) for n in range(0, len(lines), 2)][:3]
+            top = ui.px(40) + ui.px(ART) + ui.px(30)
+        y = ui.px(96)
+        for line in lines[:3 if frame["game"] else 1]:
+            c.create_text(text_x, y, text=ui.truncate(line, sub_font, text_w), anchor="w",
+                          fill=COLOR["TEXT_DIM"], font=sub_font, tags=tags)
+            y += ui.px(22)
 
         rows = frame["rows"]
         row_h, gap = ui.px(ROW_H), ui.px(ROW_GAP)
@@ -201,45 +215,57 @@ class Menu:
             first = frame["index"] - visible + 1
         first = frame["first"] = max(0, min(first, max(0, len(rows) - visible)))
 
-        label_font, value_font, caption_font = ui.font(17), ui.font(17, False), ui.font(12)
+        label_font, value_font, caption_font = ui.font(16), ui.font(15, False), ui.font(11)
         for slot, row in enumerate(rows[first:first + visible]):
             index = first + slot
             y = top + slot * (row_h + gap)
             middle = y + row_h // 2
             kind = row.get("kind")
             if kind == "header":
-                c.create_text(list_x + ui.px(4), y + row_h - ui.px(12), text=row["label"].upper(), anchor="w",
-                              fill=COLOR["TEXT_FAINT"], font=caption_font, tags="menu")
+                c.create_text(left + ui.px(4), y + row_h - ui.px(12), text=row["label"].upper(), anchor="w",
+                              fill=COLOR["TEXT_FAINT"], font=caption_font, tags=tags)
                 continue
             if kind == "info":
-                c.create_text(list_x + ui.px(18), middle, text=ui.truncate(row["label"], value_font,
-                              list_w - ui.px(36)), anchor="w", fill=COLOR["TEXT_DIM"], font=value_font, tags="menu")
+                c.create_text(left + ui.px(16), middle, text=ui.truncate(row["label"], value_font,
+                              inner - ui.px(32)), anchor="w", fill=COLOR["TEXT_DIM"], font=value_font, tags=tags)
                 continue
             chosen = index == frame["index"]
-            box = ui.photo(("menu-row", list_w, row_h, chosen), lambda: Glyphs.panel(
-                list_w, row_h, ui.px(10), COLOR["ROW_SELECTED"] if chosen else COLOR["ROW"],
+            box = ui.photo(("menu-row", inner, row_h, chosen, COLOR["ACCENT"]), lambda: Glyphs.panel(
+                inner, row_h, ui.px(14), COLOR["ROW_SELECTED"] if chosen else COLOR["ROW"],
                 outline=(COLOR["ACCENT"], ui.px(2)) if chosen else None))
-            c.create_image(list_x, y, image=box, anchor="nw", tags="menu")
+            c.create_image(left, y, image=box, anchor="nw", tags=tags)
             value = row.get("value")
             value_text = "" if value is None else str(value)
             if chosen and row.get("change") and value_text:
                 value_text = f"◀  {value_text}  ▶"
-            value_w = value_font.measure(value_text) + ui.px(30) if value_text else 0
-            c.create_text(list_x + ui.px(18), middle, anchor="w", font=label_font,
-                          text=ui.truncate(row["label"], label_font, list_w - ui.px(36) - value_w),
-                          fill=row.get("color") or COLOR["TEXT"], tags="menu")
+            value_w = value_font.measure(value_text) + ui.px(28) if value_text else 0
+            c.create_text(left + ui.px(16), middle, anchor="w", font=label_font,
+                          text=ui.truncate(row["label"], label_font, inner - ui.px(32) - value_w),
+                          fill=row.get("color") or COLOR["TEXT"], tags=tags)
             if value_text:
-                c.create_text(list_x + list_w - ui.px(18), middle, anchor="e", font=value_font, text=value_text,
-                              fill=COLOR["ACCENT"] if chosen else COLOR["TEXT_DIM"], tags="menu")
-        arrow_font = ui.font(13)
+                c.create_text(left + inner - ui.px(16), middle, anchor="e", font=value_font, text=value_text,
+                              fill=COLOR["TEXT"] if chosen else COLOR["TEXT_DIM"], tags=tags)
+        arrow_font = ui.font(12)
         if first > 0:
-            c.create_text(list_x + list_w // 2, top - ui.px(12), text="▲", fill=COLOR["TEXT_DIM"],
-                          font=arrow_font, tags="menu")
+            c.create_text(left + inner // 2, top - ui.px(10), text="▲", fill=COLOR["TEXT_DIM"],
+                          font=arrow_font, tags=tags)
         if first + visible < len(rows):
-            c.create_text(list_x + list_w // 2, top + visible * (row_h + gap), text="▼",
-                          fill=COLOR["TEXT_DIM"], font=arrow_font, tags="menu")
+            c.create_text(left + inner // 2, top + visible * (row_h + gap) + ui.px(2), text="▼",
+                          fill=COLOR["TEXT_DIM"], font=arrow_font, tags=tags)
 
         from .I18n import t
-        ui.rich(ui.width - left, ui.height - ui.px(32), frame["hints"] or t("menu_hints"), 15,
-                COLOR["TEXT"], anchor="e", tags="menu")
+        hints = frame["hints"] or t("menu_hints")
+        size = 14 if ui.rich_width(hints, 14) <= inner else 12
+        ui.rich(left, ui.height - ui.px(36), hints, size, COLOR["TEXT_DIM"], tags=tags)
         ui.raise_overlays()
+
+        if slide and ui.animations:
+            c.move("menu-drawer", width, 0)
+            offset = [1.0]
+
+            def step(progress):
+                c.move("menu-drawer", width * (1.0 - progress - offset[0]), 0)
+                offset[0] = 1.0 - progress
+            ui.animator.run("drawer", SLIDE_MS, step)
+        else:
+            ui.animator.finish("drawer")

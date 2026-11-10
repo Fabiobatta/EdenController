@@ -1735,13 +1735,99 @@ class SplitModeTests(unittest.TestCase):
         for name, theme in THEMES.items():
             self.assertEqual(set(theme), set(THEMES["dark"]), name)
             self.assertEqual(len(set(theme["PLAYERS"])), 8, name)
+        from Core.Theme import ACCENTS
         try:
-            self.assertEqual(apply_theme("light"), "light")
-            self.assertEqual(player_color(0), THEMES["light"]["PLAYERS"][0])
-            self.assertEqual(apply_theme("nope"), "dark")
+            self.assertEqual(apply_theme("oled", "mint"), "oled")
+            self.assertEqual(COLOR["BG"], "#000000")
+            self.assertEqual(COLOR["ACCENT"], ACCENTS["mint"])
+            self.assertEqual(player_color(0), THEMES["oled"]["PLAYERS"][0])
+            self.assertEqual(apply_theme("light"), "dark")              # no light theme: falls back
+            self.assertEqual(COLOR["ACCENT"], ACCENTS["mint"])          # the accent is kept
+            self.assertEqual(apply_theme(accent="nope"), "dark")
         finally:
-            apply_theme("dark")
+            apply_theme("dark", "violet")
         self.assertEqual(COLOR["BG"], THEMES["dark"]["BG"])
+        self.assertEqual(COLOR["ACCENT"], ACCENTS["violet"])
+
+
+class ShelfTests(unittest.TestCase):
+    """Where the tiles of the game shelf stand (Core/GameGrid.shelf_positions)."""
+    TILE, FOCUS, GAP, FOCUS_X, WIDTH, MARGIN = 100, 140, 10, 134, 1000, 64
+
+    def _x(self, count, index):
+        from Core.GameGrid import shelf_positions
+        return shelf_positions(count, index, self.TILE, self.FOCUS, self.GAP, self.FOCUS_X, self.WIDTH, self.MARGIN)
+
+    def test_long_row_scrolls_under_a_fixed_focus(self):
+        x = self._x(40, 10)
+        self.assertEqual(x(10), self.FOCUS_X)
+        self.assertEqual(x(11) - x(10), self.FOCUS / 2 + self.GAP + self.TILE / 2)     # next to the larger tile
+        self.assertEqual(x(12) - x(11), self.TILE + self.GAP)
+        self.assertEqual(x(10) - x(9), self.FOCUS / 2 + self.GAP + self.TILE / 2)
+        self.assertEqual(self._x(40, 11)(11), self.FOCUS_X)                            # the row moved, not the focus
+
+    def test_first_tile_starts_at_the_margin(self):
+        x = self._x(40, 0)
+        self.assertEqual(x(0) - self.FOCUS / 2, self.MARGIN)
+
+    def test_end_of_the_row_stops_at_the_right_margin(self):
+        last = 39
+        x = self._x(40, last)
+        self.assertEqual(x(last) + self.FOCUS / 2, self.WIDTH - self.MARGIN)           # the focus travelled right
+        x = self._x(40, last - 1)
+        self.assertEqual(x(last) + self.TILE / 2, self.WIDTH - self.MARGIN)
+
+    def test_short_row_never_scrolls(self):
+        first = self._x(4, 0)(0)
+        for index in range(4):
+            x = self._x(4, index)
+            self.assertEqual(x(0) - (self.FOCUS if index == 0 else self.TILE) / 2, self.MARGIN)
+        self.assertEqual(first, self.MARGIN + self.FOCUS / 2)
+
+
+class EmulatorListTests(VariantTests):
+    """Adding and removing emulators from the settings screen."""
+
+    def _with_file(self):
+        from Core.Settings import load_settings
+        from Eden import Eden
+        emu = Eden()
+        emu.settings = load_settings(self.tmp.name, "EdenLauncher", emu.default_settings, language="en")
+        emu.locate(self.dir)
+        return emu
+
+    def test_add_and_remove(self):
+        from Core.Settings import load_settings
+        emu = self._with_file()
+        other = os.path.join(self.tmp.name, "forks")
+        os.makedirs(other)
+        exe = os.path.join(other, "lichii")
+        with open(exe, "wb") as f:
+            f.write(b"... qt-config.ini ...")
+        not_one = os.path.join(other, "notes.txt")
+        with open(not_one, "wb") as f:
+            f.write(b"just text")
+        self.assertIsNone(emu.add_variant(not_one))
+        self.assertIsNone(emu.add_variant(os.path.join(other, "missing")))
+
+        added = emu.add_variant(exe)
+        self.assertEqual(added.display_name, "Lichii")
+        self.assertEqual([v.display_name for v in emu.variants], ["Eden", "Eglantine", "Lichii"])
+        self.assertIs(emu.add_variant(exe), added)                              # twice: the same one
+        again = load_settings(self.tmp.name, "EdenLauncher", emu.default_settings, language="en")
+        self.assertEqual(again.sections["emulators"], {"lichii": exe})          # written to the file
+
+        self.assertFalse(emu.remove_variant(emu.variants[1]))                   # found next to Eden: not removable
+        self.assertTrue(emu.remove_variant(added))
+        self.assertEqual([v.display_name for v in emu.variants], ["Eden", "Eglantine"])
+        again = load_settings(self.tmp.name, "EdenLauncher", emu.default_settings, language="en")
+        self.assertEqual(again.sections.get("emulators"), {})
+
+    def test_removing_a_setting_keeps_the_rest(self):
+        from Core.Settings import set_in_text
+        text = "[A]\nx = 1\ny = 2\n[B]\nx = 3\n"
+        self.assertEqual(set_in_text(text, "A", "x", None), "[A]\ny = 2\n[B]\nx = 3\n")
+        self.assertEqual(set_in_text(text, "A", "missing", None), text)
 
 
 class CrashReportTests(unittest.TestCase):

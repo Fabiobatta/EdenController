@@ -320,6 +320,7 @@ class Eden(Emulator):
         self.config_dir = None
         self.variants = [self]              # every emulator found, this one first
         self.is_variant = False
+        self.settings_key = None            # its name under [Emulators], when it comes from there
         self._profiles_loaded = False
         self._facts = {}                    # _binary_fact() answers of this run
 
@@ -442,16 +443,18 @@ class Eden(Emulator):
         if self.is_appimage or self.settings is None:
             return []
         extension = ".exe" if platform == "win32" else ""
-        paths = [os.path.join(self.dir, stem + extension) for _, stem in BINARIES]
-        for value in (self.settings.sections.get(EMULATORS_SECTION) or {}).values():
+        paths = [(None, os.path.join(self.dir, stem + extension)) for _, stem in BINARIES]
+        for name, value in (self.settings.sections.get(EMULATORS_SECTION) or {}).items():
             path = os.path.expandvars(os.path.expanduser(value.strip().strip('"')))
+            if not path:
+                continue
             if os.path.isdir(path):
                 _, found = _pick_binary([(n, os.path.join(path, stem + extension)) for n, stem in BINARIES])
                 path = found if os.path.isfile(found) else (_find_fork(path, extension or ".exe") or found)
-            paths.append(path)
+            paths.append((name, path))
 
         variants, seen = [], {os.path.normcase(os.path.abspath(self.exe))}
-        for path in paths:
+        for settings_key, path in paths:
             key = os.path.normcase(os.path.abspath(path))
             if key in seen or not os.path.isfile(path):
                 continue
@@ -459,6 +462,7 @@ class Eden(Emulator):
             variant = Eden()
             variant.settings = self.settings
             variant.is_variant = True
+            variant.settings_key = settings_key      # set for the ones listed in the settings
             variant.dir, variant.exe = os.path.dirname(os.path.abspath(path)), path
             variant.display_name = fork_name(path)
             if platform == "win32":
@@ -472,6 +476,44 @@ class Eden(Emulator):
             variants.append(variant)
             log("INFO", "Also available", f"{variant.display_name}: {path} | {variant.config_path}")
         return variants
+
+    def add_variant(self, path):
+        """
+        Add the emulator at `path` (an exe of the Eden family) to the
+        settings and to self.variants.
+
+        Returns:
+            Eden | None: the emulator, None when the file is not one.
+        """
+        try:
+            if not os.path.isfile(path) or not probe_binary(path, [FORK_MARKER]):
+                return None
+        except OSError:
+            return None
+        wanted = os.path.normcase(os.path.abspath(path))
+        find = lambda: next((v for v in self.variants                           # noqa: E731
+                             if os.path.normcase(os.path.abspath(v.exe)) == wanted), None)
+        existing = find()
+        if existing:
+            return existing
+        taken = self.settings.sections.get(EMULATORS_SECTION) or {}
+        name, n = fork_name(path), 2
+        while name.lower() in taken:
+            name, n = f"{fork_name(path)}{n}", n + 1
+        self.settings.set("Emulators", name, path)
+        self.variants = [self] + self._find_variants(_platform())
+        log("INFO", "Emulator added", path)
+        return find()
+
+    def remove_variant(self, variant):
+        """Take an emulator added through the settings off the list again."""
+        key = getattr(variant, "settings_key", None)
+        if not key or variant not in self.variants:
+            return False
+        self.settings.set("Emulators", key, None)
+        self.variants = [self] + self._find_variants(_platform())
+        log("INFO", "Emulator removed", variant.exe)
+        return True
 
     def emulator_for(self, game, choice=None):
         """

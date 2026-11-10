@@ -78,6 +78,9 @@ INSTRUMENTS = {
 SOUNDS = {
     "move":   {"notes": [(0.0, "C6", 0.07, 1.0, "wood")], "level": 0.2, "room": False},
     "tick":   {"notes": [(0.0, "E6", 0.06, 1.0, "wood")], "level": 0.18, "room": False},
+    "edge":   {"notes": [(0.0, "G4", 0.06, 1.0, "wood")], "level": 0.22, "room": False},
+    "star":   {"notes": [(0.0, "E6", 0.18, 0.6, "bell"), (0.05, "G6", 0.18, 0.6, "bell"),
+                         (0.1, "C7", 0.5, 0.7, "chime")], "level": 0.26},
     "select": {"notes": [(0.0, "E5", 0.3, 0.8, "bell"), (0.05, "B5", 0.45, 1.0, "bell")], "level": 0.4},
     "back":   {"notes": [(0.0, "B5", 0.28, 0.8, "bell"), (0.05, "E5", 0.4, 0.9, "bell")], "level": 0.32},
     "toggle": {"notes": [(0.0, "G5", 0.25, 0.8, "bell"), (0.04, "C6", 0.35, 1.0, "bell")], "level": 0.32},

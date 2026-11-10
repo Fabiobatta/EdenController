@@ -55,7 +55,7 @@ from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
 from .Theme import ACCENT_NAMES, THEME_NAMES, apply_theme
-from .Ui import COLOR, SPLIT_MODES, LauncherUi, player_color, split_layout, split_mode
+from .Ui import COLOR, SPLASH_EXIT_MS, SPLIT_MODES, LauncherUi, player_color, split_layout, split_mode
 from .Update import DOWNLOAD_PAGE, UpdateCheck
 
 MAX_PLAYERS = 8
@@ -78,7 +78,7 @@ WIN_RUMBLE = (0.8, 450)
 SORT_MODES = ("recent", "az", "most")
 ALERT_GUARD_S = 0.6         # dialogs ignore buttons this long after they open
 MIN_SESSION_S = 10          # shorter runs (crash at boot...) are not play time
-SPLASH_MS = 1500            # the "let's go" screen before a game starts
+SPLASH_MS = 1700            # the "let's go" screen before a game starts (its last part: the exit)
 CLOSE_TIMEOUT_S = 5.0       # the emulator gets this long to close by itself
 QUICK_EXIT_S = 20           # an emulator gone this soon after a launch...
 INSTANT_EXIT_S = 5          # ...is reported if it failed, or closed sooner than this
@@ -209,6 +209,7 @@ class LauncherApp:
         self.running_emu = None             # the emulator of self.process
         self.launched_at = 0.0
         self._splash_job = None
+        self._exit_job = None
         self._mode_before_splash = "GAMES"
         self._loop_errors = 0
         self._trigger_held = {}             # {instance id: (LT, RT)} for the letter jump
@@ -975,6 +976,7 @@ class LauncherApp:
         log("INFO", f"Assigned {pad['name']} -> Player {player} | Profile: {profile_key}")
         self.refresh_grid()
         self.ui.flash_slot(player - 1, pop=True)
+        self.ui.hop(player - 1, delay_ms=160)
         self.update_hints()
         self.confirm_player_number(instance_id, player)
 
@@ -1082,6 +1084,7 @@ class LauncherApp:
         self.emu.settings.save_state(avatars=chosen)
         self.sounds.play("move")
         self.refresh_grid()
+        self.ui.hop(slot_idx)
 
     def poll_batteries(self):
         """Read the battery of every connected controller (None: wired or unknown)."""
@@ -1364,9 +1367,12 @@ class LauncherApp:
             favorites.append(key)
         self.emu.settings.save_state(favorites=favorites)
         self.trophy_queue += self.achievements.favorites_changed(len(favorites))
-        self.sounds.play("toggle")
-        self.ui.show_toast(t("toast_favorite_on" if key in favorites else "toast_favorite_off"), COLOR["GOLD"])
+        added = key in favorites
+        self.sounds.play("star" if added else "toggle")
+        self.ui.show_toast(t("toast_favorite_on" if added else "toast_favorite_off"), COLOR["GOLD"])
         self._reorder_keeping(game)
+        if added:
+            self.ui.grid.burst()
 
     def _reorder_keeping(self, game):
         """Re-sort the grid, keeping `game` selected."""
@@ -1537,6 +1543,11 @@ class LauncherApp:
             to = tabs[(current + delta) % len(tabs)]
         if to not in tabs or to == self.tab:
             return
+        if delta:
+            slide = 1 if delta > 0 else -1
+        else:
+            slide = 1 if self.tab not in tabs or tabs.index(to) > tabs.index(self.tab) else -1
+        self.ui.grid.tab_slide = slide
         selected = self.shown_games[self.game_index] if self.shown_games else None
         self.tab = to
         self.emu.settings.save_state(tab=to)
@@ -1603,6 +1614,8 @@ class LauncherApp:
             self.game_index = index
             self.sounds.play("move")
             self._show_grid()
+        elif self.ui.grid.bump(action):
+            self.sounds.play("edge")
 
     def poll_navigation(self):
         """
@@ -1753,12 +1766,20 @@ class LauncherApp:
                             emulator.display_name if len(self.emu.variants) > 1 else None,
                             icons=icons, starting=emulator.display_name)
         self._splash_job = self.root.after(SPLASH_MS, self._launch_now, game, from_roulette)
+        self._exit_job = self.root.after(SPLASH_MS - SPLASH_EXIT_MS, self._splash_exit)
+
+    def _splash_exit(self):
+        self._exit_job = None
+        self.ui.splash_exit()
 
     def cancel_splash(self):
         """B on the "let's go" screen: do not start after all."""
         if self._splash_job:
             self.root.after_cancel(self._splash_job)
             self._splash_job = None
+        if self._exit_job:
+            self.root.after_cancel(self._exit_job)
+            self._exit_job = None
         self.ui.hide_splash()
         self.sounds.play("back")
         if self._mode_before_splash == "PLAYERS":

@@ -1997,6 +1997,7 @@ class AvatarChoiceTests(unittest.TestCase):
         app.emu = types.SimpleNamespace(settings=types.SimpleNamespace(state=state, save_state=save_state))
         app.sounds = types.SimpleNamespace(play=lambda *a: None)
         app.refresh_grid = lambda: None
+        app.ui = types.SimpleNamespace(hop=lambda *a, **k: None)
         app.pads = {i: {"path": f"XInput#{i}"} for i in range(3)}
         app.assignments = [{"path": f"XInput#{i}"} for i in range(3)]
         return app, saved
@@ -2019,6 +2020,26 @@ class AvatarChoiceTests(unittest.TestCase):
         app, _ = self._app(avatars=["nope", "moon"])
         self.assertEqual(app.avatar_of(1), "moon")
         self.assertIn(app.avatar_of(0), __import__("Core.Glyphs", fromlist=["AVATARS"]).AVATARS)
+
+
+class MotionTests(unittest.TestCase):
+    """Small animation helpers (Core/Ui)."""
+
+    def test_hop_lands_and_rests(self):
+        from Core.Ui import hop_pose
+        self.assertEqual(hop_pose(0.0, 10), (0.0, False))
+        lift, squashed = hop_pose(0.2, 10)
+        self.assertAlmostEqual(lift, -10, places=3)          # the top of the jump
+        self.assertTrue(hop_pose(0.45, 10)[1])                # squashed on landing
+        self.assertGreater(hop_pose(0.67, 10)[0], -10 * 0.31)  # a smaller second bounce
+        self.assertEqual(hop_pose(1.0, 10), (0.0, False))
+
+    def test_rounded_points_fit_the_box(self):
+        from Core.Ui import rounded_points
+        points = rounded_points(10, 20, 50, 40, 30)           # radius larger than half the height
+        xs, ys = points[0::2], points[1::2]
+        self.assertEqual((min(xs), max(xs), min(ys), max(ys)), (10, 50, 20, 40))
+        self.assertEqual(len(rounded_points(0, 0, 0, 0, 5)), 24)  # a collapsed box still has its points
 
 
 if __name__ == "__main__":

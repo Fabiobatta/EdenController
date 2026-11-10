@@ -26,6 +26,7 @@ area matters more than the number of items):
 Tiles are composed once per game (a master at the focused size) and cached.
 """
 
+import math
 import time
 from collections import OrderedDict
 
@@ -59,6 +60,13 @@ PRELOAD_MS = 40
 SHINE_DELAY_MS = 420            # the selection rests this long before the light sweeps over it
 SHINE_MS = 620
 SHINE_FRAMES = 18
+TAB_SLIDE = 54                  # px the grid slides in from, sideways, on a new tab
+BUMP_MS = 190                   # the little knock at the edge of the grid
+BUMP = 8
+BUMP_REST_S = 0.45
+BURST_MS = 560                  # the star bursting when a game becomes a favourite
+BURST_SPARKS = 8
+COUNT_MS = 420                  # the play time counting up when a game is selected
 SHINE_ALPHA = 105               # brightest point of the sweep (0-255)
 SQUARE_MIN = 0.9                # width / height from which a tile counts as square
 
@@ -236,6 +244,10 @@ class GameGrid:
         self._letter_job = None
         self._shine_job = None
         self._shone = None              # the game the light last swept over
+        self._bumped = 0.0              # when the last knock at an edge was
+        self.tab_slide = 0              # -1 / 1: the next draw slides the grid in from that side
+        self._counted = None            # the game whose play time last counted up
+        self._chip_text = None          # canvas text of the last chip drawn
         self._pulse_tick()
 
     # ------------------------------------------------------------------
@@ -533,8 +545,11 @@ class GameGrid:
             self._slide(metrics, distance)
         else:
             self._build(metrics)
-            if full or shown is None or shown[0] != layout:
+            if self.tab_slide and ui.animations:
+                self._enter(metrics, dx=self.tab_slide * ui.px(TAB_SLIDE), dy=0)
+            elif full or shown is None or shown[0] != layout:
                 self._enter(metrics)
+        self.tab_slide = 0
         self._shown = (layout, self.index)
         self._draw_header(selected, count)
         self._draw_scrollbar(metrics, count)
@@ -619,22 +634,93 @@ class GameGrid:
             offset[0] = 1.0 - progress
         ui.animator.run("grid", SCROLL_MS, step)
 
-    def _enter(self, metrics):
-        """The grid appears: the tiles rise a little into place."""
+    def _enter(self, metrics, dx=0, dy=None):
+        """The grid appears: the tiles rise a little into place (or slide in sideways: a new tab)."""
         ui, c = self.ui, self.ui.canvas
         if not ui.animations:
             return
-        distance = ui.px(22)
+        dy = ui.px(22) if dy is None else dy
         for tag in ("tiles", "games-ring", "games-nav"):
-            c.move(tag, 0, distance)
+            c.move(tag, dx, dy)
         offset = [1.0]
 
         def step(progress):
-            delta = distance * (1.0 - progress - offset[0])
+            rest = 1.0 - progress - offset[0]
             for tag in ("tiles", "games-ring", "games-nav"):
-                c.move(tag, 0, delta)
+                c.move(tag, dx * rest, dy * rest)
             offset[0] = 1.0 - progress
-        ui.animator.run("grid", ENTER_MS, step)
+        ui.animator.run("grid", ENTER_MS + (60 if dx else 0), step)
+
+    # ------------------------------------------------------------------
+    # Small reactions: the knock at an edge, the favourite's burst
+    # ------------------------------------------------------------------
+    def bump(self, action):
+        """Up from the first row / down from the last: the selected tile knocks against the edge."""
+        ui, c = self.ui, self.ui.canvas
+        now = time.monotonic()
+        if not ui.animations or self.index not in self._items or now - self._bumped < BUMP_REST_S:
+            return False                        # held against the edge: one knock, not a rattle
+        self._bumped = now
+        ux, uy = {"up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0)}.get(action, (0, 0))
+        tags = ("games-ring", "games-nav", "games-shine")
+        item = self._items[self.index]
+        distance = ui.px(BUMP)
+        started, moved = time.monotonic(), [0.0]
+
+        def place(offset):
+            delta = offset - moved[0]
+            moved[0] = offset
+            c.move(item, ux * delta, uy * delta)
+            for tag in tags:
+                c.move(tag, ux * delta, uy * delta)
+
+        def step(_progress):                    # out fast, back with a small overshoot
+            p = min(1.0, (time.monotonic() - started) * 1000 / BUMP_MS)
+            if p < 0.3:
+                offset = distance * (p / 0.3)
+            else:
+                q = (p - 0.3) / 0.7
+                offset = distance * (1 - q) - distance * 0.25 * math.sin(math.pi * q) * (1 - q)
+            place(offset)
+        ui.animator.run("bump", BUMP_MS, step, lambda: place(0.0))
+        return True
+
+    def burst(self):
+        """The selected game just became a favourite: its star pops and throws golden sparks."""
+        ui, c = self.ui, self.ui.canvas
+        if not ui.animations or self.index not in self._items:
+            return
+        size = self._grown()
+        d = max(14, int(size * 0.2))
+        margin = max(3, int(size * 0.06))
+        x, y = c.coords(self._items[self.index])
+        sx, sy = x + size / 2 - margin - d / 2, y - size / 2 + margin + d / 2
+        c.delete("games-burst")
+        tags = ("games", "games-burst")
+        gold = COLOR["GOLD"]
+        sparks = [c.create_oval(sx, sy, sx, sy, fill=gold, width=0, tags=tags) for _ in range(BURST_SPARKS)]
+        star = c.create_image(sx, sy, tags=tags)
+        reach = ui.px(46)
+        base = int(d * 0.64)
+        started, shown = time.monotonic(), [None]
+
+        def step(_progress):
+            p = min(1.0, (time.monotonic() - started) * 1000 / BURST_MS)
+            out = 1 - (1 - p) ** 3
+            for n, spark in enumerate(sparks):
+                angle = 2 * math.pi * n / BURST_SPARKS - math.pi / 2 + (0.2 if n % 2 else 0)
+                r = reach * out * (1.0 if n % 2 == 0 else 0.72)
+                dot = ui.px(4.5) * (1 - p) + 0.5
+                px_, py_ = sx + r * math.cos(angle), sy + r * math.sin(angle)
+                c.coords(spark, px_ - dot, py_ - dot, px_ + dot, py_ + dot)
+            # the star: up to 2.2x, then back down to its place on the tile
+            scale = 1 + 1.2 * math.sin(math.pi * min(1.0, p / 0.7))
+            h = max(6, int(base * scale) // 2 * 2)
+            if h != shown[0]:
+                shown[0] = h
+                c.itemconfigure(star, image=ui.photo(("star", h, gold), lambda: Glyphs.star(h, gold)))
+        c.tag_raise("games-burst")
+        ui.animator.run("burst", BURST_MS, step, lambda: c.delete("games-burst"))
 
     def _preload(self):
         """
@@ -822,6 +908,7 @@ class GameGrid:
             if selected.get("last_played"):
                 text += "  ·  " + last_played_label(selected["last_played"])
             x += self._chip(x, y, text, COLOR["TEXT_DIM"], tags, icon) + ui.px(10)
+            self._count_up(selected, seconds, text[len(playtime_label(seconds)):])
         if selected.get("emulator_name"):
             x += self._chip(x, y, selected["emulator_name"], COLOR["TEXT_DIM"], tags) + ui.px(10)
         if selected.get("custom_input"):
@@ -894,8 +981,27 @@ class GameGrid:
         c.create_image(x, y, image=pill, anchor="w", tags=tags)
         if icon:
             c.create_image(x + ui.px(13), y, image=icon, anchor="w", tags=tags)
-        c.create_text(x + ui.px(13) + icon_w, y, text=text, anchor="w", fill=color, font=font, tags=tags)
+        self._chip_text = c.create_text(x + ui.px(13) + icon_w, y, text=text, anchor="w", fill=color, font=font,
+                                        tags=tags)
         return w
+
+    def _count_up(self, selected, seconds, suffix):
+        """A newly selected game: its play time counts up from zero in the chip just drawn."""
+        ui, c = self.ui, self.ui.canvas
+        item = self._chip_text
+        if not ui.animations or selected is self._counted or seconds < 120:
+            if selected is not self._counted:
+                ui.animator.finish("count")
+            self._counted = selected
+            return
+        self._counted = selected
+        started = time.monotonic()
+
+        def step(_progress):
+            p = 1.0 if _progress >= 1.0 else min(1.0, (time.monotonic() - started) * 1000 / COUNT_MS)
+            p = 1 - (1 - p) ** 3
+            c.itemconfigure(item, text=playtime_label(seconds * p) + suffix)
+        ui.animator.run("count", COUNT_MS, step)
 
     # ------------------------------------------------------------------
     # Banners (the launch screen shows the game's banner)

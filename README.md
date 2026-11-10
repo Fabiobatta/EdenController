@@ -28,7 +28,8 @@ Besides the players, the launcher sets three Eden options, each of which can be 
 - **Continue playing**: the games of the last 30 days sit in their own row at the top of the grid.
 - **Player icons**: each player picks an icon (star, heart, leaf, bolt, mushroom…) with the **D-pad** on the player screen; it shows on their card, on the split-screen map and on the tile they are browsing.
 - **Controller batteries**: next to the clock and on each player's card, for the controllers that report one (wired and virtual pads usually do not).
-- **Launch screen**: the cover, who plays where and "Starting Eden…" for a moment before the game opens.
+- **Launch screen**: the cover, who plays where and "Starting Eden…" for a moment; then the cover grows into a dark screen as the game opens.
+- **Small animations** (off with `animations = false`): the grid slides sideways on a new tab, knocks against its edges, a new favourite's star bursts into sparks, the play time counts up, a joining player's icon hops and the split-screen map divides anew.
 - **Instant start**: the list of the last scan shows up at once, while the folders are checked again in the background.
 - **Player count on every cover**: green if the game supports everyone who joined, red if not. **Y** shows only games that fit your group.
 - **Roulette** (**X**): a spinning strip that picks a random game, only among games that support all joined players.

@@ -80,6 +80,11 @@ BG_FADE = (0.5,)
 BG_FADE_MS = 60
 POP_DISTANCE = 46       # px (720p) a player's row slides in from the right when joining
 POP_MS = 240
+HOP_MS = 560            # a player's icon jumping when they join or pick another one
+HOP_HEIGHT = 13
+TV_MORPH_MS = 300       # the split-screen map dividing anew when a player joins or leaves
+SPLASH_EXIT_MS = 460    # the cover growing into a dark screen as the game opens
+EXIT_FRAMES = 12
 
 # Colours live in Core/Theme.py (COLOR is the current theme's)
 PLAYER_COLORS = THEMES["dark"]["PLAYERS"]
@@ -175,6 +180,34 @@ def compose_background(sample, width, height, shade):
 def ease_out(x):
     """Fast start, soft landing (cubic)."""
     return 1 - (1 - x) ** 3
+
+
+def smoothstep(x):
+    """Slow start, slow end."""
+    x = max(0.0, min(1.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def hop_pose(progress, height):
+    """
+    A joining player's icon at `progress` (0-1) of its hop: (lift in px, squashed).
+    One jump, a squash on landing, a small second bounce.
+    """
+    import math
+    if progress < 0.4:
+        return -height * math.sin(math.pi * progress / 0.4), False
+    if progress < 0.52:
+        return 0.0, True
+    if progress < 0.82:
+        return -height * 0.3 * math.sin(math.pi * (progress - 0.52) / 0.3), False
+    return 0.0, False
+
+
+def rounded_points(x0, y0, x1, y1, r):
+    """Polygon points of a rounded rectangle (draw with smooth=True)."""
+    r = max(0.0, min(r, (x1 - x0) / 2, (y1 - y0) / 2))
+    return (x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1, x0 + r, y1,
+            x0, y1, x0, y1 - r, x0, y0 + r, x0, y0)
 
 
 class Animator:
@@ -310,6 +343,7 @@ class LauncherUi:
         self._trophies = None               # list screen items, None = closed
         self._stats = None                  # statistics screen data, None = closed
         self._splash = None                 # "let's go" screen data, None = closed
+        self._splash_cover = None           # (left, top, size) of the cover on the launch screen
         self.animations = True              # fades, cards popping in
         self.brand_note = ""                # after the name in the footer ("build 21")
         self.alert_buttons = None           # replaces an alert's default buttons
@@ -319,6 +353,9 @@ class LauncherUi:
         self._fade_switch = None
         self._hold_draw = False             # a fade is hiding the screen: content waits
         self._pop = {}                      # player card index -> px still to travel
+        self._hop = {}                      # player card index -> (lift, squashed) of its icon
+        self._discs = {}                    # player card index -> (canvas item, resting y, avatar, size, colour)
+        self._tv_shown = None               # (regions, colours) the split-screen map last showed
         self._pop_job = None
         self.dimmed = False
         self.menu = None                    # Core.Menu.Menu, set by the App
@@ -534,7 +571,8 @@ class LauncherUi:
             self.grid.clear()
             self._draw_players()
         else:
-            self.canvas.delete("players")
+            self.animator.finish("tv")
+            self.canvas.delete("players", "tv-morph")
             self.grid.draw(full=True)
 
     def _raise_overlays(self):
@@ -985,6 +1023,91 @@ class LauncherUi:
                 self.refresh(self.slots)
         self.root.after(duration_ms, stop)
 
+    def hop(self, index, delay_ms=0):
+        """Player index + 1's icon jumps (they joined, or picked another icon)."""
+        if not self.animations:
+            return
+
+        def start():
+            started = time.monotonic()
+
+            def step(progress):
+                p = 1.0 if progress >= 1.0 else min(1.0, (time.monotonic() - started) * 1000 / HOP_MS)
+                self._hop[index] = hop_pose(p, self.px(HOP_HEIGHT))
+                self._place_disc(index)
+
+            def done():
+                self._hop.pop(index, None)
+                self._place_disc(index)
+            self.animator.run(f"hop{index}", HOP_MS, step, done)
+        if delay_ms:
+            self.root.after(delay_ms, start)
+        else:
+            start()
+
+    def _place_disc(self, index):
+        entry = self._discs.get(index)
+        if not entry or self.view != "players":
+            return
+        item, middle, avatar, size, color = entry
+        lift, squashed = self._hop.get(index, (0.0, False))
+        c = self.canvas
+        if not c.type(item):
+            return
+        if squashed:
+            image = self.photo(("disc-squash", avatar, size, color), lambda: Glyphs.avatar_disc(
+                avatar, size, color, COLOR["DISC_TEXT"]).resize((int(size * 1.2), int(size * 0.8)), Image.LANCZOS))
+            y = middle + size * 0.1
+        else:
+            image = self.photo(("disc", avatar, size, color), lambda: Glyphs.avatar_disc(avatar, size, color,
+                                                                                       COLOR["DISC_TEXT"]))
+            y = middle + lift
+        c.itemconfigure(item, image=image)
+        c.coords(item, c.coords(item)[0], y)
+
+    def _morph_tv(self, left, top, width, height, before, after):
+        """The split-screen map divides anew: each player's part glides from its old place to its new one."""
+        c = self.canvas
+        c.delete("tv-morph")
+        self.animator.finish("tv")
+        tags = ("tv-morph",)
+        empty = self.photo(("tv-empty", width, height), lambda: Glyphs.split_map(width, height, None, ()))
+        c.create_image(left, top, image=empty, anchor="nw", tags=tags)
+        # The map's geometry, as Glyphs.split_map draws it
+        inset = (max(2, 3) + int(2 * height * 0.035)) / 2
+        inner_w, inner_h = width - 2 * inset, height - 2 * inset
+        gap = max(2, int(2 * height * 0.012)) / 2
+        radius = height * 0.085 * 0.62
+
+        def box(region):
+            x0, y0, x1, y1 = region
+            return (left + inset + x0 * inner_w + gap, top + inset + y0 * inner_h + gap,
+                    left + inset + x1 * inner_w - gap, top + inset + y1 * inner_h - gap)
+
+        def collapsed(rect):
+            cx, cy = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+            return (cx, cy, cx, cy)
+        old_regions, old_colors = before
+        new_regions, new_colors = after
+        parts = []
+        for i in range(max(len(old_regions), len(new_regions))):
+            start = box(old_regions[i]) if i < len(old_regions) else None
+            end = box(new_regions[i]) if i < len(new_regions) else None
+            start = start or collapsed(end)
+            end = end or collapsed(start)
+            color = new_colors[i] if i < len(new_colors) else old_colors[i] if i < len(old_colors) else "#888888"
+            item = c.create_polygon(rounded_points(*start, radius), smooth=True, fill=color, outline="", tags=tags)
+            parts.append((item, start, end))
+        c.tag_raise("tv-morph")
+        started = time.monotonic()
+
+        def step(progress):
+            p = 1.0 if progress >= 1.0 else smoothstep((time.monotonic() - started) * 1000 / TV_MORPH_MS)
+            for item, (a0, b0, a1, b1), (c0, d0, c1, d1) in parts:
+                rect = (a0 + (c0 - a0) * p, b0 + (d0 - b0) * p, a1 + (c1 - a1) * p, b1 + (d1 - b1) * p)
+                c.coords(item, *rounded_points(*rect, radius))
+        self.animator.run("tv", TV_MORPH_MS, step, lambda: c.delete("tv-morph"))
+
     def _draw_players(self):
         """
         Left: a TV showing who plays in which part of the screen, the
@@ -1010,6 +1133,9 @@ class LauncherUi:
         screen = self.photo(("tv", tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"], icons),
                             lambda: Glyphs.split_map(tv_w, tv_h, regions, colors, COLOR["DISC_TEXT"], icons))
         c.create_image(left, top, image=screen, anchor="nw", tags="players")
+        shown, self._tv_shown = self._tv_shown, (regions, colors)
+        if shown and shown[0] and regions and shown[0] != regions and self.animations:
+            self._morph_tv(left, top, tv_w, tv_h, shown, (regions, colors))
         if not count:
             self.rich(left + tv_w // 2, top + tv_h // 2, t("slot_join"), 17, COLOR["TEXT_DIM"],
                       anchor="center", tags="players")
@@ -1072,7 +1198,10 @@ class LauncherUi:
             avatar = slot.get("avatar") or f"P{i + 1}"
             disc = self.photo(("disc", avatar, size, color), lambda: Glyphs.avatar_disc(avatar, size, color,
                                                                                        COLOR["DISC_TEXT"]))
-            c.create_image(x + self.px(14), middle, image=disc, anchor="w", tags=tags)
+            item = c.create_image(x + self.px(14) + size // 2, middle, image=disc, tags=tags)
+            self._discs[i] = (item, middle, avatar, size, color)
+            if i in self._hop:
+                self._place_disc(i)
 
             # Right: where this player plays, then the button layout
             right = x + row_w - self.px(14)
@@ -1118,6 +1247,7 @@ class LauncherUi:
                     sub_x += small.measure(label) + self.px(10)
                 c.create_text(sub_x, middle + self.px(12), anchor="w", fill=COLOR["TEXT_FAINT"], font=small,
                               text=self.truncate(slot["name"], small, max(self.px(40), right - sub_x)), tags=tags)
+        c.tag_raise("tv-morph")
         self._raise_overlays()
 
     # ========================================================================
@@ -1411,7 +1541,7 @@ class LauncherUi:
 
     def hide_splash(self):
         self._splash = None
-        for key in ("splash", "splash-in", "splash-shine"):
+        for key in ("splash", "splash-in", "splash-shine", "splash-exit"):
             self.animator.finish(key)
         self.canvas.delete("splash")
 
@@ -1439,6 +1569,7 @@ class LauncherUi:
         block_h = tile + (self.px(64) + map_h if players else 0) + self.px(70)
         top = max(self.px(40), (self.height - block_h) // 2 - self.px(16))
         accent = self.grid.accent(game)
+        self._splash_cover = (left, top, tile)
         cover = ("splash", "splash-cover")
         words = ("splash", "splash-words")
         lower = ("splash", "splash-lower")
@@ -1481,10 +1612,11 @@ class LauncherUi:
         if not (self.animations and self.splash_ms):
             return
         started = time.monotonic()
+        bar_ms = max(1, self.splash_ms - SPLASH_EXIT_MS)    # full when the cover starts growing
 
         def step(_progress):                    # linear: the bar is a clock, not a gesture
             elapsed = time.monotonic() - started
-            done = min(1.0, elapsed * 1000 / self.splash_ms)
+            done = min(1.0, elapsed * 1000 / bar_ms)
             c.coords(bar, left, bar_y, left + int(bar_w * done), bar_y + line)
             if status:
                 c.itemconfigure(status_item, text=status + "." * (1 + int(elapsed * 4) % 3))
@@ -1508,6 +1640,55 @@ class LauncherUi:
                 enter(1.0)
                 self._splash_shine(left + tile // 2, top + tile // 2, tile, shine_frame, SHINE_FRAMES)
             self.animator.run("splash-in", 380, enter, settle)
+
+    def splash_exit(self):
+        """
+        The game is about to open: the cover glides to the middle, a dark
+        screen grows out of it over everything, and the cover sinks into it.
+        """
+        if self._splash is None or not self.animations or not self.width:
+            return
+        c = self.canvas
+        for key in ("splash-in", "splash-shine"):
+            self.animator.finish(key)
+        game = self._splash[0]
+        left, top, tile = self._splash_cover
+        _, master = self.grid._master(game)
+        tags = ("splash", "splash-exit")
+        screen = COLOR["SCREEN"]
+        dark = screen if isinstance(screen, str) else "#%02X%02X%02X" % tuple(screen[:3])
+        veil = c.create_rectangle(left, top, left + tile, top + tile, fill=dark, width=0, tags=tags)
+        cover = c.create_image(left + tile / 2, top + tile / 2, tags=tags)
+        c.tag_raise("splash-exit")
+
+        def frame(n):
+            def make():
+                from PIL import ImageEnhance
+                scale = 1 + 0.55 * n / (EXIT_FRAMES - 1)
+                light = 1 - max(0.0, (n / (EXIT_FRAMES - 1) - 0.35) / 0.65)
+                size = int(tile * scale)
+                image = master.resize((size, size), Image.BILINEAR)
+                rgb = ImageEnhance.Brightness(image.convert("RGB")).enhance(light)
+                rgb.putalpha(image.getchannel("A"))
+                return rgb
+            return self.photo(("splash-exit", game["path"], tile, n), make)
+        start_x, start_y = left + tile / 2, top + tile / 2
+        end_x, end_y = self.width / 2, self.height / 2
+        started, shown = time.monotonic(), [None]
+
+        def step(progress):
+            p = 1.0 if progress >= 1.0 else min(1.0, (time.monotonic() - started) * 1000 / SPLASH_EXIT_MS)
+            grow = smoothstep(p / 0.75)
+            c.coords(veil, left * (1 - grow), top * (1 - grow), left + tile + (self.width - left - tile) * grow,
+                     top + tile + (self.height - top - tile) * grow)
+            glide = smoothstep(p / 0.8)
+            c.coords(cover, start_x + (end_x - start_x) * glide, start_y + (end_y - start_y) * glide)
+            n = min(EXIT_FRAMES - 1, int(p * EXIT_FRAMES))
+            if n != shown[0]:
+                shown[0] = n
+                c.itemconfigure(cover, image=frame(n))
+        step(0.0)
+        self.animator.run("splash-exit", SPLASH_EXIT_MS, step)
 
     def _splash_shine(self, x, y, size, frame, count):
         """The light sweeps once over the cover, as on the selected tile in the grid."""

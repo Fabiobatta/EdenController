@@ -141,6 +141,7 @@ class GameGrid:
         self._shown = None              # (games id, count, index, layout) the items are for
         self._ring = None
         self._ring_key = None
+        self._sliding = False           # the running "shelf" animation moves the focus frame too
         self._pulse = 0
         self._pulse_job = None
         self._hero_job = None
@@ -455,6 +456,7 @@ class GameGrid:
         ui, c = self.ui, self.ui.canvas
         c.delete("tiles")
         self._items = {}
+        self._sliding = False
         place, visible = self._layout(self.index, metrics)
         for i in visible:
             x, y, size = place(i)
@@ -478,6 +480,7 @@ class GameGrid:
         """
         ui, c = self.ui, self.ui.canvas
         games, index = self.games, self.index
+        self._sliding = True
         before, _ = self._layout(old_index, metrics)
         place, visible = self._layout(index, metrics)
         wanted = set(visible)
@@ -518,7 +521,8 @@ class GameGrid:
         focus = metrics[1]
         place, _ = self._layout(self.index, metrics)
         x, y = place(self.index)[0], metrics[4] - focus / 2
-        sliding = ui.animator.active("shelf") and self._ring and c.type(self._ring)
+        # Only a slide carries the frame along; after a rebuild it is placed here
+        sliding = self._sliding and ui.animator.active("shelf") and self._ring and c.type(self._ring)
         self._ring_key = (focus, self.accent(selected))
         image = self._frame(focus, focus, self._ring_key[1], self._pulse if ui.animations else len(PULSE) - 1)
         if self._ring and c.type(self._ring):

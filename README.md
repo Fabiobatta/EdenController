@@ -99,7 +99,7 @@ Most options are on the settings screen (**LB**). They live in `EdenLauncher.ini
 | `check_updates` | `true` | Say when a newer build is on GitHub (once a day, nothing is downloaded) |
 | `steamgriddb_api_key` | *(empty)* | Free key to auto-download missing covers from SteamGridDB |
 
-Custom pictures: a square icon in `covers\<Title ID or game name>.png` for the shelf, a wide banner in `covers\backgrounds\` for the top of the screen. Wrong player count? Add `[Players]` with `Game name = 4`.
+Custom pictures: a square icon in `covers\<Title ID or game name>.png` for the grid, a wide banner in `covers\backgrounds\` for the background and the launch screen. Wrong player count? Add `[Players]` with `Game name = 4`.
 
 **Restoring a save backup**: in the game grid press **Start** on the game, then "Restore a save…" (the current save is backed up first). By hand: close Eden, open the zip from `saves_backup` and extract its `0000000000000000` folder into `%APPDATA%\eden\nand\user\save\` (portable Eden: `<Eden>\user\nand\user\save\`).
 

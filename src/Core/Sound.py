@@ -45,9 +45,9 @@ MAX_VOICES = 8
 
 # ============================================================================
 # THE SOUNDS
-# Soft bells and a wooden tick, in the spirit of a console's menus: short,
-# bright on the attack, mellowing as they ring, with a little room around
-# them. Every melody here is original - short arpeggios on major and
+# Soft, round bells and a light wooden tap, in the spirit of a console's
+# menus: gentle attacks, few overtones, quiet, short, with a little room
+# around them. Every melody here is original - short arpeggios on major and
 # lydian chords, nothing taken from any game.
 # ============================================================================
 def _hz(name):
@@ -60,54 +60,52 @@ def _hz(name):
 
 # Each player has their own note (C major pentatonic, rising), so the join
 # chime tells the number without looking
-_PLAYER_NOTES = ("C6", "D6", "E6", "G6", "A6", "C7", "D7", "E7")
+_PLAYER_NOTES = ("C5", "D5", "E5", "G5", "A5", "C6", "D6", "E6")
 
 # Instruments: (modulator ratio, index at the attack, index after it, index
 # decay s, amplitude decay s, attack s, sparkle gain). FM synthesis: a sine
 # whose frequency is wobbled by another sine; the wobble (index) dies
 # away faster than the note, which is what makes a bell ring "mellow".
+# Low indexes and soft attacks: round tones, close to a sine, no edge.
 INSTRUMENTS = {
-    "bell": (2.0, 1.9, 0.25, 0.07, 0.30, 0.003, 0.10),     # the main voice: celesta-like
-    "chime": (3.5, 1.2, 0.15, 0.05, 0.55, 0.004, 0.06),    # long, glassy: the end of a fanfare
-    "wood": (4.0, 1.4, 0.0, 0.012, 0.035, 0.0015, 0.0),    # a soft wooden tick: moving around
-    "soft": (1.0, 1.0, 0.2, 0.05, 0.16, 0.006, 0.0),       # round and low: a gentle "no"
+    "bell": (2.0, 0.85, 0.08, 0.045, 0.20, 0.007, 0.0),    # the main voice: a soft, round bell
+    "chime": (2.0, 0.55, 0.05, 0.06, 0.40, 0.012, 0.0),    # longer and gentler: the end of a jingle
+    "wood": (2.0, 0.7, 0.0, 0.010, 0.022, 0.003, 0.0),     # a light wooden tap: moving around
+    "soft": (1.0, 0.45, 0.1, 0.05, 0.14, 0.010, 0.0),      # round and low: a gentle "no"
 }
 
 # name -> {"notes": [(start s, note, ring s, gain, instrument)], "level": peak, "room": reverb}
 SOUNDS = {
-    "move":   {"notes": [(0.0, "E6", 0.09, 1.0, "wood")], "level": 0.34, "room": False},
-    "tick":   {"notes": [(0.0, "A6", 0.07, 1.0, "wood")], "level": 0.30, "room": False},
-    "select": {"notes": [(0.0, "G5", 0.5, 0.8, "bell"), (0.055, "D6", 0.7, 1.0, "bell")], "level": 0.62},
-    "back":   {"notes": [(0.0, "D6", 0.4, 0.8, "bell"), (0.055, "A5", 0.55, 0.9, "bell")], "level": 0.5},
-    "toggle": {"notes": [(0.0, "B5", 0.35, 0.8, "bell"), (0.045, "E6", 0.5, 1.0, "bell")], "level": 0.52},
-    "leave":  {"notes": [(0.0, "E6", 0.35, 0.9, "bell"), (0.07, "C6", 0.35, 0.9, "bell"),
-                         (0.14, "G5", 0.7, 1.0, "bell")], "level": 0.55},
-    "error":  {"notes": [(0.0, "D4", 0.35, 1.0, "soft"), (0.1, "A3", 0.5, 1.0, "soft")], "level": 0.6},
-    "launch": {"notes": [(0.0, "C5", 0.4, 0.7, "bell"), (0.06, "E5", 0.4, 0.75, "bell"),
-                         (0.12, "G5", 0.4, 0.8, "bell"), (0.18, "B5", 0.4, 0.85, "bell"),
-                         (0.24, "D6", 0.5, 0.9, "bell"), (0.32, "G6", 1.4, 0.8, "chime"),
-                         (0.32, "D6", 1.4, 0.5, "chime")], "level": 0.75},
-    "win":    {"notes": [(0.0, "G5", 0.35, 0.8, "bell"), (0.07, "B5", 0.35, 0.8, "bell"),
-                         (0.14, "D6", 0.35, 0.85, "bell"), (0.21, "F#6", 0.35, 0.85, "bell"),
-                         (0.30, "A6", 0.35, 0.9, "bell"), (0.40, "G6", 1.6, 0.9, "chime"),
-                         (0.40, "D6", 1.6, 0.55, "chime"), (0.40, "B6", 1.6, 0.4, "chime")], "level": 0.75},
-    "trophy": {"notes": [(0.0, "F5", 0.4, 0.75, "bell"), (0.06, "A5", 0.4, 0.8, "bell"),
-                         (0.12, "C6", 0.4, 0.85, "bell"), (0.18, "E6", 0.4, 0.85, "bell"),
-                         (0.26, "B6", 0.5, 0.7, "bell"), (0.34, "G6", 1.8, 0.9, "chime"),
-                         (0.34, "C7", 1.8, 0.45, "chime"), (0.34, "E6", 1.8, 0.5, "chime")], "level": 0.78},
+    "move":   {"notes": [(0.0, "C6", 0.07, 1.0, "wood")], "level": 0.2, "room": False},
+    "tick":   {"notes": [(0.0, "E6", 0.06, 1.0, "wood")], "level": 0.18, "room": False},
+    "select": {"notes": [(0.0, "E5", 0.3, 0.8, "bell"), (0.05, "B5", 0.45, 1.0, "bell")], "level": 0.4},
+    "back":   {"notes": [(0.0, "B5", 0.28, 0.8, "bell"), (0.05, "E5", 0.4, 0.9, "bell")], "level": 0.32},
+    "toggle": {"notes": [(0.0, "G5", 0.25, 0.8, "bell"), (0.04, "C6", 0.35, 1.0, "bell")], "level": 0.32},
+    "leave":  {"notes": [(0.0, "C6", 0.25, 0.9, "bell"), (0.07, "A5", 0.25, 0.9, "bell"),
+                         (0.14, "E5", 0.45, 1.0, "bell")], "level": 0.34},
+    "error":  {"notes": [(0.0, "A4", 0.25, 1.0, "soft"), (0.09, "E4", 0.35, 1.0, "soft")], "level": 0.38},
+    "launch": {"notes": [(0.0, "C5", 0.3, 0.75, "bell"), (0.07, "E5", 0.3, 0.8, "bell"),
+                         (0.14, "G5", 0.3, 0.85, "bell"), (0.22, "C6", 1.0, 0.9, "chime"),
+                         (0.22, "G5", 1.0, 0.45, "chime")], "level": 0.48},
+    "win":    {"notes": [(0.0, "G4", 0.3, 0.8, "bell"), (0.07, "B4", 0.3, 0.8, "bell"),
+                         (0.14, "D5", 0.3, 0.85, "bell"), (0.22, "G5", 1.1, 0.9, "chime"),
+                         (0.22, "D5", 1.1, 0.45, "chime")], "level": 0.5},
+    "trophy": {"notes": [(0.0, "F4", 0.3, 0.75, "bell"), (0.07, "A4", 0.3, 0.8, "bell"),
+                         (0.14, "C5", 0.3, 0.85, "bell"), (0.21, "E5", 0.3, 0.85, "bell"),
+                         (0.29, "C6", 1.2, 0.85, "chime"), (0.29, "G5", 1.2, 0.5, "chime")], "level": 0.5},
 }
 # Joining: one blip per pulse of the confirmation rumble, on the player's own
 # note, then a small rising chime that ends on it an octave up
 for _player, _name in enumerate(_PLAYER_NOTES, start=1):
     _octave_up = _name[0] + str(int(_name[1:]) + 1)
-    SOUNDS[f"blip{_player}"] = {"notes": [(0.0, _name, 0.4, 1.0, "bell")], "level": 0.5}
-    SOUNDS[f"join{_player}"] = {"notes": [(0.0, _name, 0.4, 0.8, "bell"),
-                                          (0.065, _hz(_name) * 1.5, 0.45, 0.8, "bell"),
-                                          (0.13, _octave_up, 0.9, 0.9, "chime")], "level": 0.62}
+    SOUNDS[f"blip{_player}"] = {"notes": [(0.0, _name, 0.3, 1.0, "bell")], "level": 0.3}
+    SOUNDS[f"join{_player}"] = {"notes": [(0.0, _name, 0.3, 0.8, "bell"),
+                                          (0.06, _hz(_name) * 1.5, 0.3, 0.8, "bell"),
+                                          (0.12, _octave_up, 0.7, 0.85, "chime")], "level": 0.38}
 
-ROOM = ((0.071, 0.26), (0.113, 0.18), (0.157, 0.11))    # (delay s, gain): a small, soft room
-LOWPASS = 0.42                                          # one-pole smoothing: takes the edge off the top
-BRIGHT_LIMIT = 8500.0                                   # Hz: no partial above this (RATE / 2 is 11025)
+ROOM = ((0.067, 0.16), (0.109, 0.10), (0.151, 0.06))    # (delay s, gain): a small, soft room
+LOWPASS = 0.3                                           # one-pole smoothing: takes the edge off the top
+BRIGHT_LIMIT = 6000.0                                   # Hz: no partial above this (RATE / 2 is 11025)
 
 
 def _render_note(samples, first, frequency, ring, gain, instrument):
@@ -405,7 +403,7 @@ class Sounds:
         """Write every sound once (background thread); play() skips sounds not ready yet."""
         try:
             os.makedirs(self.folder, exist_ok=True)
-            tag = f"v3_{int(self.volume * 100)}"
+            tag = f"v4_{int(self.volume * 100)}"
             for name, notes in SOUNDS.items():
                 custom = os.path.join(self.override_dir or "", name + ".wav")
                 if self.override_dir and os.path.isfile(custom):

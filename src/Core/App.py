@@ -797,6 +797,7 @@ class LauncherApp:
     def _woke(self):
         """Note an input; True when it only woke the dimmed screen (and must do nothing else)."""
         self.last_input = time.monotonic()
+        self.ui.hold_motion()                   # the backdrop never drifts while someone is using the launcher
         if self.ui.dimmed:
             self.ui.set_dim(False)
             return True
@@ -1410,21 +1411,28 @@ class LauncherApp:
 
     def move_game_selection(self, action):
         """
-        Move the focus along the shelf.
+        Move the highlight in the grid.
 
         Args:
-            action (str): "left"/"right" (one game, wrapping), "page_up"/
-                          "page_down" (as many as fit on screen). "up" and
-                          "down" do nothing: there is one row.
+            action (str): "left"/"right" (one game, wrapping), "up"/"down"
+                          (one row), "page_up"/"page_down" (one screen).
         """
         if self.mode != "GAMES" or not self.shown_games or self.ui.alert_mode or self.process:
             return
         count = len(self.shown_games)
+        columns = self.ui.games_columns()
         index = self.game_index
         if action == "left":
             index = (index - 1) % count
         elif action == "right":
             index = (index + 1) % count
+        elif action == "up":
+            index = index - columns if index - columns >= 0 else index
+        elif action == "down":
+            if index + columns < count:
+                index += columns
+            elif index // columns < (count - 1) // columns:
+                index = count - 1          # partial last row: go to its last game
         elif action == "page_up":
             index = max(0, index - self.ui.games_page())
         elif action == "page_down":

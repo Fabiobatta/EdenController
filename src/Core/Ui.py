@@ -71,14 +71,14 @@ BG_BLUR = 2.2           # ...blurred, and stretched back to the screen
 DRIFT = 16              # px (720p) the backdrop may wander from its place
 DRIFT_PERIODS = (97.0, 71.0)    # seconds for one horizontal / vertical swing
 DRIFT_TICK_MS = 250     # at most 4 moves a second (~2 at this speed)
-DRIFT_QUIET_S = 0.6     # no motion right after the screen changed
+DRIFT_QUIET_S = 3.0     # the backdrop holds still this long after any input or change
 BG_COMPOSE_W = 480      # the backdrop is composed about this wide, then enlarged (LauncherUi._bg_zoom)
 # Every change of the backdrop repaints the whole window (tens of ms at
 # 1080p), so a cross-fade is one blended picture between the two, no more
 BG_FADE = (0.5,)
 BG_FADE_MS = 60
 POP_DISTANCE = 46       # px (720p) a player's row slides in from the right when joining
-POP_MS = 22
+POP_MS = 240
 
 # Colours live in Core/Theme.py (COLOR is the current theme's)
 PLAYER_COLORS = THEMES["dark"]["PLAYERS"]
@@ -211,8 +211,9 @@ class Animator:
         for key in list(self._running):
             self.finish(key)
 
-    def active(self, key):
-        return key in self._running
+    def active(self, key=None):
+        """Is the animation `key` running (any animation, with no key)?"""
+        return bool(self._running) if key is None else key in self._running
 
     @staticmethod
     def _end(entry):
@@ -238,7 +239,9 @@ class Animator:
                 except tk.TclError:
                     self._running.pop(key, None)
         if self._running and self._job is None:
-            self._job = self.root.after(self.FRAME_MS, self._frame)
+            # Aim at a steady 60 fps: the time this frame took comes off the wait
+            spent = (time.monotonic() - now) * 1000
+            self._job = self.root.after(max(1, int(self.FRAME_MS - spent)), self._frame)
 
 
 class LauncherUi:
@@ -546,15 +549,27 @@ class LauncherUi:
     FADE_MS = 22
 
     def fade(self, switch):
-        """Run switch() (which redraws the screen) in the middle of a short fade."""
-        if self._fade_job or self._fade_switch:
-            self._finish_fade()                 # one already running: complete it now
-        if not self.animations or not self.width:
-            switch()
-            return
-        self._fade_switch = switch
-        self._hold_draw = True
-        self._fade_step(0)
+        """
+        Change screen: switch() draws the new one, whose content then rises
+        a little into place. (A full-screen fade looked softer but every
+        step repainted and blended the whole window: the most expensive
+        thing Tk can be asked to do, and the stutter users noticed.)
+        """
+        self._finish_fade()
+        switch()
+        if self.animations and self.width and self.view == "players":
+            self._rise("players")
+
+    def _rise(self, tag, distance=18, ms=200):
+        c = self.canvas
+        distance = self.px(distance)
+        c.move(tag, 0, distance)
+        offset = [1.0]
+
+        def step(progress):
+            c.move(tag, 0, distance * (1.0 - progress - offset[0]))
+            offset[0] = 1.0 - progress
+        self.animator.run(f"rise-{tag}", ms, step)
 
     def _fade_overlay(self, alpha):
         shade = self.photo(("fade", self.width, self.height, alpha), lambda: Image.new(
@@ -760,7 +775,7 @@ class LauncherUi:
 
     def _drift_tick(self):
         self.root.after(DRIFT_TICK_MS, self._drift_tick)
-        if not self.motion or not self.width or self.alert_mode or self.busy_overlay \
+        if not self.motion or not self.width or self.alert_mode or self.busy_overlay or self.animator.active() \
                 or self._trophies is not None or self._stats is not None or self._splash is not None \
                 or self.dimmed or (self.menu is not None and self.menu.active):
             return
@@ -923,32 +938,28 @@ class LauncherUi:
         self.flashing.add(index)
         self._flash_until[index] = time.monotonic() + duration_ms / 1000
         if pop and self.animations:
-            self._pop[index] = self.px(POP_DISTANCE)
-            if self._pop_job is None:
-                self._pop_job = self.root.after(POP_MS, self._pop_step)
-        self.refresh(self.slots)
+            start = self.px(POP_DISTANCE)
+            self._pop[index] = start
+
+            def step(progress):
+                left = int(round(start * (1.0 - progress)))
+                moved = self._pop.get(index, 0) - left
+                self._pop[index] = left
+                if moved and self.view == "players" and not self._hold_draw:
+                    self.canvas.move(f"slot{index}", -moved, 0)
+
+            def done():
+                self._pop.pop(index, None)
+            self.refresh(self.slots)
+            self.animator.run(f"pop{index}", POP_MS, step, done)
+        else:
+            self.refresh(self.slots)
 
         def stop():
             if time.monotonic() + 0.02 >= self._flash_until.get(index, 0):  # no newer flash running
                 self.flashing.discard(index)
                 self.refresh(self.slots)
         self.root.after(duration_ms, stop)
-
-    def _pop_step(self):
-        """Move the rows sliding in a little closer to their place (ease out)."""
-        self._pop_job = None
-        for index, left in list(self._pop.items()):
-            step = max(1, int(round(left * 0.4)))
-            remaining = left - step
-            if remaining <= 0:
-                step, remaining = left, 0
-                del self._pop[index]
-            else:
-                self._pop[index] = remaining
-            if self.view == "players" and not self._hold_draw:
-                self.canvas.move(f"slot{index}", -step, 0)
-        if self._pop:
-            self._pop_job = self.root.after(POP_MS, self._pop_step)
 
     def _draw_players(self):
         """

@@ -175,4 +175,25 @@ def _run(emulator):
     emulator.profiles = emulator.load_profiles()
 
     LauncherApp(root, emulator, sdl)
-    root.mainloop()
+    fine_timers(True)
+    try:
+        root.mainloop()
+    finally:
+        fine_timers(False)
+
+
+def fine_timers(on):
+    """
+    Windows wakes timers on a 15.6 ms tick by default, so a 16 ms Tk timer
+    fires every 31 ms - animations at an uneven 30 fps and controllers read
+    half as often. timeBeginPeriod(1) asks for 1 ms ticks while the
+    launcher runs (games and video players do the same); undone on exit.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        winmm = ctypes.WinDLL("winmm")
+        (winmm.timeBeginPeriod if on else winmm.timeEndPeriod)(1)
+    except Exception as e:
+        log("WARNING", "Could not change the timer resolution", e)

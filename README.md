@@ -24,14 +24,15 @@ Besides the players, the launcher sets three Eden options, each of which can be 
 ## Features
 
 - **Xbox button layout**: the A button (bottom) is Switch A, so you accelerate in Mario Kart with the button labelled A. A Nintendo (positional) layout and your own Eden profiles are available per player.
-- **Game browser**: the selected game's banner and title on top, a shelf of game icons below that slides under a glowing focus frame. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** move a page, **LT / RT** jump to the next letter.
+- **Game grid**: every game in rows and columns, each with a big local co-op badge, the selected one framed with a glow in the colour of its art; title and facts on top, the game's blurred art behind. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** move a page, **LT / RT** jump to the next letter.
 - **Player count on every cover**: green if the game supports everyone who joined, red if not. **Y** shows only games that fit your group.
 - **Roulette** (**X**): a spinning strip that picks a random game, only among games that support all joined players.
 - **A menu for every game** (**Start**): favourite, hide, sort order, split-screen layout, which emulator starts it, and **restore a save backup** without leaving the couch.
 - **Settings on screen** (**LB** on the player screen): language, theme (dark / OLED black), accent colour, sounds, rumble, game folders, emulators, docked mode… no file to edit.
 - **Several emulators, one list**: Eden, Eglantine, Lichii and other forks together. Switch 2 games start with the emulator that runs them, the rest with your main one. Add one from Settings → Emulators.
 - **Who plays where**: the player screen shows a TV with each player's part of the split screen, and so does the "Here we go" screen before a game starts.
-- **Smooth, light animations**: sliding shelf, cross-fading backgrounds, a breathing focus glow, a settings drawer. They can be turned off.
+- **Smooth, light animations**: a gliding focus frame, rows sliding in, cross-fading backgrounds, a breathing glow, a settings drawer. They can be turned off.
+- **Sounds**: soft synthesised bells and wooden ticks, a different note for every player number. Replace any of them with your own `.wav` in a `sounds` folder.
 - **Play time, statistics, achievements**: recent / A–Z / most played order, last 7 days, most played games, 14 small rewards ("Party of four", "Night owl"…), shown with **RB**.
 - **Save backups**: your Eden saves are zipped before each launch (last 10 kept per game, skipped if unchanged).
 - **Close a game from the controller**: hold **Back + LB + RB**. Eden is asked to close properly (and killed only if it does not answer), then you pick: change players, another game, or the desktop.

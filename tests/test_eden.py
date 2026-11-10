@@ -1750,39 +1750,24 @@ class SplitModeTests(unittest.TestCase):
         self.assertEqual(COLOR["ACCENT"], ACCENTS["violet"])
 
 
-class ShelfTests(unittest.TestCase):
-    """Where the tiles of the game shelf stand (Core/GameGrid.shelf_positions)."""
-    TILE, FOCUS, GAP, FOCUS_X, WIDTH, MARGIN = 100, 140, 10, 134, 1000, 64
+class GridShapeTests(unittest.TestCase):
+    """The game grid's size and scrolling (Core/GameGrid)."""
 
-    def _x(self, count, index):
-        from Core.GameGrid import shelf_positions
-        return shelf_positions(count, index, self.TILE, self.FOCUS, self.GAP, self.FOCUS_X, self.WIDTH, self.MARGIN)
+    def test_shape_fits_the_screen(self):
+        from Core.GameGrid import grid_shape
+        self.assertEqual(grid_shape(1280, 720, 136, 20, 150, 86, 64), (7, 3))
+        self.assertEqual(grid_shape(1920, 1080, 204, 30, 225, 129, 96), (7, 3))     # same layout, 1.5x
+        self.assertEqual(grid_shape(300, 200, 136, 20, 150, 86, 64), (1, 1))         # never zero
 
-    def test_long_row_scrolls_under_a_fixed_focus(self):
-        x = self._x(40, 10)
-        self.assertEqual(x(10), self.FOCUS_X)
-        self.assertEqual(x(11) - x(10), self.FOCUS / 2 + self.GAP + self.TILE / 2)     # next to the larger tile
-        self.assertEqual(x(12) - x(11), self.TILE + self.GAP)
-        self.assertEqual(x(10) - x(9), self.FOCUS / 2 + self.GAP + self.TILE / 2)
-        self.assertEqual(self._x(40, 11)(11), self.FOCUS_X)                            # the row moved, not the focus
-
-    def test_first_tile_starts_at_the_margin(self):
-        x = self._x(40, 0)
-        self.assertEqual(x(0) - self.FOCUS / 2, self.MARGIN)
-
-    def test_end_of_the_row_stops_at_the_right_margin(self):
-        last = 39
-        x = self._x(40, last)
-        self.assertEqual(x(last) + self.FOCUS / 2, self.WIDTH - self.MARGIN)           # the focus travelled right
-        x = self._x(40, last - 1)
-        self.assertEqual(x(last) + self.TILE / 2, self.WIDTH - self.MARGIN)
-
-    def test_short_row_never_scrolls(self):
-        first = self._x(4, 0)(0)
-        for index in range(4):
-            x = self._x(4, index)
-            self.assertEqual(x(0) - (self.FOCUS if index == 0 else self.TILE) / 2, self.MARGIN)
-        self.assertEqual(first, self.MARGIN + self.FOCUS / 2)
+    def test_rows_scroll_only_when_the_selection_leaves_them(self):
+        from Core.GameGrid import first_visible_row
+        columns, rows, count = 7, 3, 40                 # 6 rows in all
+        self.assertEqual(first_visible_row(15, columns, rows, 0, count), 0)          # row 2: still visible
+        self.assertEqual(first_visible_row(21, columns, rows, 0, count), 1)          # row 3: one down
+        self.assertEqual(first_visible_row(8, columns, rows, 2, count), 1)           # row 1: one up
+        self.assertEqual(first_visible_row(39, columns, rows, 0, count), 3)          # last row at the bottom
+        self.assertEqual(first_visible_row(0, columns, rows, 3, count), 0)
+        self.assertEqual(first_visible_row(5, columns, rows, 4, 10), 0)              # no empty rows shown
 
 
 class EmulatorListTests(VariantTests):

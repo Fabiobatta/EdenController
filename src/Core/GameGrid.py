@@ -1,36 +1,31 @@
 """
 Core/GameGrid.py
-The game browser, drawn on the UI canvas (tag "games"):
+The game picker: a grid of square game tiles - rows and columns - under
+the selected game's title and facts, over its blurred art (canvas tag
+"games").
 
-    hero    the selected game: its banner fading into the screen on the
-            right, its title and facts (players, play time...) on the left
-    shelf   one row of square tiles that scrolls under a fixed focus
-            frame; the focused tile is larger and its frame glows in the
-            colour of the game's art, breathing slowly
-
-Every tile carries a players badge - how many can play together on one
-console - coloured against the number of controllers assigned:
+Every tile carries a big players badge - how many can play together on
+one console - coloured against the number of controllers assigned:
 
     green   the game takes everyone who joined
     red     fewer players than joined
     grey    nothing to compare (unknown count, or a single player)
 
-Motion, and why it stays cheap:
-    - a move slides the existing canvas items (a handful of small
-      pictures) for a few frames; only the two tiles changing size get
-      new pictures, taken from one cached master per game
-    - tiles about to scroll into view are composed ahead, a couple per
-      idle moment, so a move finds them ready
-    - the banner is decoded and cut on a background thread, once per
-      game, after the selection has rested for a moment, and fades in
-      over two extra pictures
-    - the glow breathes by swapping six pictures of the frame, each a
-      cached glow shape tinted with the game's colour
-Tiles are composed once per game (a master at the focus size) and cached.
+The focused tile is a little larger, framed in white with a glow in the
+colour of the game's art that breathes slowly. Favourites carry a star.
+
+Motion, and why it stays cheap (Tk repaints whatever area changes, so the
+area matters more than the number of items):
+    - moving within the visible rows changes only two tiles and the frame:
+      the frame glides to the new tile while the old tile shrinks back and
+      the new one grows, in three cached sizes
+    - a new row scrolling into view slides the grid by one row
+    - the backdrop follows the selection only once it has rested, in one
+      blended step (Core/Ui.py)
+    - tiles about to scroll into view are composed ahead while idle
+Tiles are composed once per game (a master at the focused size) and cached.
 """
 
-import hashlib
-import threading
 from collections import OrderedDict
 
 from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -39,32 +34,32 @@ from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
 from .Theme import COLOR
 
-TILE = 132                      # 720p baseline, square
-FOCUS = 184                     # the focused tile
-GAP = 18
-FOCUS_X = 156                   # centre of the focused tile: its left edge under the title
-SHELF_BOTTOM = 622              # the tiles stand on this line
-RADIUS = 16
-MASTER_CACHE = 120              # composed tiles kept (PIL, focus size)
-PHOTO_CACHE = 420               # tile pictures kept (every size shown)
-HERO_CACHE = 5
-HERO_DELAY_MS = 170             # the selection rests this long before its banner is made
-# The banner and the backdrop repaint most of the window when they change:
-# they change together, and the banner takes one half-way step, not more
-HERO_FADE = (0.5,)              # alpha steps before the full banner
-HERO_STEP_MS = 60
-MOVE_MS = 110
-GROW_STEPS = 4                  # sizes a tile passes through between normal and focused
-ENTER_MS = 190
+TILE = 136                      # 720p baseline, square
+GROW = 1.12                     # the focused tile
+GAP = 20
+TOP = 150                       # first row
+BOTTOM = 86                     # space kept for the hint dock
+SIDE = 64
+RADIUS = 14
+BADGE_H = 0.235                 # players badge height, of the tile
+MASTER_CACHE = 160              # composed tiles kept (PIL, focused size)
+PHOTO_CACHE = 480               # tile pictures kept (every size shown)
+HERO_CACHE = 4                  # banners kept for the launch screen
+HERO_FADE = ()
+BACKGROUND_DELAY_MS = 220       # the selection rests this long before the backdrop follows
+MOVE_MS = 120
+SCROLL_MS = 150
+ENTER_MS = 200
+SIZE_STEPS = 3                  # sizes a tile passes through between normal and focused
 PULSE = (0.5, 0.6, 0.72, 0.84, 0.94, 1.0)
 PULSE_MS = 120
 PRELOAD_MS = 40
 SQUARE_MIN = 0.9                # width / height from which a tile counts as square
 
 BADGE = {                       # fill, text
-    "ok": ((46, 160, 67, 240), (255, 255, 255)),
-    "bad": ((210, 58, 48, 240), (255, 255, 255)),
-    "neutral": ((12, 14, 20, 200), (240, 240, 240)),
+    "ok": ((40, 168, 74, 245), (255, 255, 255)),
+    "bad": ((214, 60, 52, 245), (255, 255, 255)),
+    "neutral": ((10, 12, 18, 215), (245, 245, 245)),
 }
 
 
@@ -76,6 +71,7 @@ def badge_state(game_players, joined):
 
 
 def _placeholder_color(title):
+    import hashlib
     digest = hashlib.md5(title.encode("utf-8")).digest()
     return tuple(40 + b % 110 for b in digest[:3])
 
@@ -94,32 +90,26 @@ def _wrap(draw, text, font, width):
     return lines
 
 
-def shelf_positions(count, index, tile, focus, gap, focus_x, width, margin):
+def grid_shape(width, height, tile, gap, top, bottom, side):
+    """(columns, rows) of tiles that fit the screen."""
+    columns = max(1, (width - 2 * side + gap) // (tile + gap))
+    rows = max(1, (height - top - bottom + gap) // (tile + gap))
+    return columns, rows
+
+
+def first_visible_row(index, columns, rows, first_row, count):
     """
-    Centre x of every tile of a shelf of `count` games with `index` focused
-    (the focused tile is `focus` wide, the others `tile`).
-
-    The focused tile sits at focus_x while the row is long enough to
-    scroll; near the end of the list the row stops with its last tile at
-    the right margin and the focus travels instead, and a row that fits on
-    screen never scrolls at all.
-
-    Returns:
-        callable: i -> centre x on screen.
+    The top row on screen after moving to `index`: it changes only when the
+    selection leaves the visible rows, and never shows empty rows past the
+    end.
     """
-    step = tile + gap
-
-    def content(i):                     # centre of tile i, the row starting at 0
-        if i < index:
-            return i * step + tile / 2
-        if i == index:
-            return i * step + focus / 2
-        return i * step + (focus - tile) + tile / 2
-
-    total = count * step - gap + (focus - tile)
-    scroll = content(index) - focus_x
-    scroll = max(-margin, min(scroll, max(-margin, total + margin - width)))
-    return lambda i: content(i) - scroll
+    row = index // columns
+    if row < first_row:
+        first_row = row
+    elif row >= first_row + rows:
+        first_row = row - rows + 1
+    last_row = (count - 1) // columns
+    return max(0, min(first_row, max(0, last_row - rows + 1)))
 
 
 class GameGrid:
@@ -130,24 +120,20 @@ class GameGrid:
         self.players = 0
         self.filter_players = 0
         self.loading = False
-        self.columns = 1                # tiles from the focus to the right edge (one "page")
+        self.columns = 1
         self.rows = 1
+        self.first_row = 0
         self.sort_label = ""
         self.nav = None                 # (label, colour) of the player browsing
-        self._masters = OrderedDict()   # tile key -> PIL image at the focus size
+        self._masters = OrderedDict()   # tile key -> PIL image at the focused size
         self._photos = OrderedDict()    # (tile key, px) -> PhotoImage
-        self._heroes = OrderedDict()    # (path, w, h) -> [PhotoImage per fade step]
+        self._heroes = OrderedDict()    # banners for the launch screen
         self._items = {}                # game index -> canvas item
-        self._shown = None              # (games id, count, index, layout) the items are for
+        self._shown = None              # (layout, index) the items are for
         self._ring = None
         self._ring_key = None
-        self._sliding = False           # the running "shelf" animation moves the focus frame too
-        self._pulse = 0
-        self._pulse_job = None
-        self._hero_job = None
-        self._hero_path = None          # banner on screen
-        self._hero_wanted = None        # banner being prepared: its cache key
-        self._hero_made = None          # (key, [PIL frames]) handed over by the worker thread
+        self._pulse = len(PULSE) - 1
+        self._beat = 0
         self._preload_job = None
         self._letter_job = None
         self._pulse_tick()
@@ -156,6 +142,8 @@ class GameGrid:
     # State
     # ------------------------------------------------------------------
     def set(self, games, index, players, filter_players):
+        if games is not self.games:
+            self.first_row = 0
         self.games, self.index = games, index
         self.players, self.filter_players = players, filter_players
         self.loading = False
@@ -181,7 +169,15 @@ class GameGrid:
         self._shown = None              # next draw rebuilds with the new picture
 
     def page_size(self):
-        return max(1, self.columns)
+        return max(1, self.columns * self.rows)
+
+    def _grown(self):
+        return int(self.ui.px(TILE) * GROW) // 2 * 2
+
+    def _sizes(self):
+        """Tile sizes from normal to focused, the steps of the grow animation."""
+        tile, grown = self.ui.px(TILE), self._grown()
+        return [int(tile + (grown - tile) * n / SIZE_STEPS) // 2 * 2 for n in range(SIZE_STEPS + 1)]
 
     # ------------------------------------------------------------------
     # Tiles
@@ -229,8 +225,8 @@ class GameGrid:
                 draw.text((width / 2, y), line, font=font, fill="#F4F5F7", anchor="ma")
                 y += line_h
 
-        tile = Glyphs.rounded(tile, max(2, int(ui.px(RADIUS) * min(width, height) / ui.px(FOCUS))))
-        scale = min(width, height) / ui.px(FOCUS)
+        tile = Glyphs.rounded(tile, max(2, int(ui.px(RADIUS) * min(width, height) / ui.px(TILE))))
+        scale = min(width, height) / ui.px(TILE)
         if game.get("hidden"):
             # Shown only while "show hidden games" is on: clearly set apart
             dark = Image.new("RGBA", tile.size, (0, 0, 0, 255))
@@ -245,9 +241,13 @@ class GameGrid:
         return tile
 
     def _draw_badge(self, tile, players, state, scale):
-        """Players pill in the bottom-left corner: [people icon] 1-4."""
-        h = max(12, int(self.ui.px(30) * scale))
-        margin = max(3, int(self.ui.px(10) * scale))
+        """
+        Players pill in the bottom-left corner: [people icon] 1-4, large
+        enough to read from the couch, green / red against the players who
+        joined.
+        """
+        h = max(14, int(min(tile.size) * BADGE_H))
+        margin = max(3, int(min(tile.size) * 0.06))
         fill, text_color = BADGE[state]
         font = Glyphs.font(h * 0.6)
         label = str(players) if players <= 1 else f"1-{players}"
@@ -263,8 +263,8 @@ class GameGrid:
 
     def _draw_corner(self, tile, text, color, scale, right=False, bottom=False):
         """A small disc in a corner: the favourite star (text None) or a one-letter mark."""
-        d = max(14, int(self.ui.px(34) * scale))
-        margin = max(3, int(self.ui.px(9) * scale))
+        d = max(14, int(min(tile.size) * 0.2))
+        margin = max(3, int(min(tile.size) * 0.06))
         x = tile.width - margin - d if right else margin
         y = tile.height - margin - d if bottom else margin
         tile.alpha_composite(Glyphs.panel(d, d, d // 2, (10, 12, 18, 225)), (x, y))
@@ -283,7 +283,7 @@ class GameGrid:
         key = self._key(game, "square")
         master = self._masters.get(key)
         if master is None:
-            size = self.ui.px(FOCUS)
+            size = self._grown()
             master = self._masters[key] = self._compose(game, size, size, key[2])
             if len(self._masters) > MASTER_CACHE:
                 self._masters.popitem(last=False)
@@ -329,8 +329,8 @@ class GameGrid:
         key = ("ring-parts", width, height)
         parts = ui._photos.get(key)                 # PIL images, kept with the other cached pictures
         if parts is None:
-            pad = ui.px(26)
-            radius = ui.px(RADIUS) * min(width, height) // ui.px(FOCUS)
+            pad = ui.px(24)
+            radius = ui.px(RADIUS) * min(width, height) // ui.px(TILE)
             line = max(2, ui.px(3))
             size = (width + 2 * pad, height + 2 * pad)
             grow = int(line * 1.5)
@@ -362,36 +362,32 @@ class GameGrid:
     # ------------------------------------------------------------------
     def _metrics(self):
         ui = self.ui
-        tile, focus, gap = ui.px(TILE), ui.px(FOCUS), ui.px(GAP)
-        focus_x, bottom = ui.px(FOCUS_X), ui.height - ui.px(720 - SHELF_BOTTOM)
-        self.columns = max(1, int((ui.width - focus_x - focus / 2) // (tile + gap)) + 1)
-        return tile, focus, gap, focus_x, bottom
+        tile, gap = ui.px(TILE), ui.px(GAP)
+        self.columns, self.rows = grid_shape(ui.width, ui.height, tile, gap, ui.px(TOP), ui.px(BOTTOM),
+                                             ui.px(SIDE))
+        grid_w = self.columns * tile + (self.columns - 1) * gap
+        return tile, gap, (ui.width - grid_w) // 2, ui.px(TOP)
 
-    def _layout(self, index, metrics):
-        """
-        Where everything stands with `index` focused.
+    def _center(self, index, metrics, first_row=None):
+        """Centre of the tile at `index` with `first_row` (default: the current one) at the top."""
+        tile, gap, left, top = metrics
+        first_row = self.first_row if first_row is None else first_row
+        row, column = divmod(index, self.columns)
+        return (left + column * (tile + gap) + tile / 2,
+                top + (row - first_row) * (tile + gap) + tile / 2)
 
-        Returns:
-            (place, visible): place(i) -> (centre x, centre y, size);
-                              visible: the indices on (or just off) screen.
-        """
-        tile, focus, gap, focus_x, bottom = metrics
-        ui = self.ui
-        x_of = shelf_positions(len(self.games), index, tile, focus, gap, focus_x, ui.width, ui.px(64))
-
-        def place(i):
-            size = focus if i == index else tile
-            return x_of(i), bottom - size / 2, size
-        visible = [i for i in range(len(self.games)) if -tile <= x_of(i) <= ui.width + tile]
-        return place, visible
+    def _visible(self, first_row):
+        start = max(0, first_row * self.columns)
+        return range(start, min(len(self.games), (first_row + self.rows) * self.columns))
 
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
     def draw(self, full=False):
         """
-        Show the games with self.index focused. A move of one or two places
-        on the same list slides the shelf; anything else rebuilds it.
+        Show the games with self.index focused. A move within the visible
+        rows changes two tiles; a move to another row slides the grid; any
+        other change (other games, other size) rebuilds it.
         """
         ui = self.ui
         if not ui.width or ui._hold_draw:
@@ -404,21 +400,98 @@ class GameGrid:
         count = len(self.games)
         self.index = max(0, min(self.index, count - 1))
         selected = self.games[self.index]
+        previous_first = self.first_row
+        self.first_row = first_visible_row(self.index, self.columns, self.rows, self.first_row, count)
 
-        layout = (id(self.games), count, ui.width, ui.height, self.players)
-        previous = self._shown
-        moved = self.index - previous[2] if previous and previous[3] == layout else None
-        ui.animator.finish("shelf")
-        if full or moved is None or abs(moved) > 2 or not self._items or not ui.animations:
-            self._build(metrics, selected, direction=0 if moved in (None, 0) else (1 if moved > 0 else -1))
-        elif moved:
-            self._slide(metrics, previous[2])
-        self._shown = (layout[0], count, self.index, layout)
-        self._draw_hero_text(selected, count, animate=bool(moved) or moved is None or full)
-        self._schedule_hero(selected, at_once=moved is None or full)
-        self._place_ring(metrics, selected)
+        layout = (id(self.games), count, ui.width, ui.height, self.players, self.columns, self.rows)
+        shown = self._shown
+        ui.animator.finish("grid")
+        same = shown is not None and shown[0] == layout and self._items and not full
+        if same and self.first_row == previous_first:
+            self._move(metrics, shown[1])
+        elif same and abs(self.first_row - previous_first) == 1 and ui.animations:
+            self._build(metrics)
+            self._slide(metrics, (self.first_row - previous_first) * (metrics[0] + metrics[1]))
+        else:
+            self._build(metrics)
+            if full or shown is None or shown[0] != layout:
+                self._enter(metrics)
+        self._shown = (layout, self.index)
+        self._draw_header(selected, count)
+        self._draw_scrollbar(metrics, count)
+        ui.set_backdrop(selected, BACKGROUND_DELAY_MS)
         if self._preload_job is None:
             self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
+
+    def _build(self, metrics):
+        """Every visible tile, the focused one large inside its frame."""
+        c = self.ui.canvas
+        c.delete("tiles")
+        self._items = {}
+        sizes = self._sizes()
+        for i in self._visible(self.first_row):
+            x, y = self._center(i, metrics)
+            size = sizes[-1] if i == self.index else sizes[0]
+            self._items[i] = c.create_image(x, y, image=self._square(self.games[i], size),
+                                            tags=("games", "tiles", f"tile{i}"))
+        self._place_ring(metrics)
+
+    def _move(self, metrics, old):
+        """Within the visible rows: the frame glides over, the old tile shrinks, the new one grows."""
+        ui, c = self.ui, self.ui.canvas
+        new, games = self.index, self.games
+        if old == new or old not in self._items or new not in self._items:
+            self._build(metrics)
+            return
+        sizes = self._sizes()
+        c.tag_raise(self._items[new])
+        self._place_ring(metrics, glide_from=self._center(old, metrics))
+        if not ui.animations:
+            c.itemconfigure(self._items[old], image=self._square(games[old], sizes[0]))
+            c.itemconfigure(self._items[new], image=self._square(games[new], sizes[-1]))
+            return
+        last = [None]
+
+        def step(progress):
+            n = min(SIZE_STEPS, int(progress * SIZE_STEPS + 0.5))
+            if n == last[0]:
+                return
+            last[0] = n
+            c.itemconfigure(self._items[old], image=self._square(games[old], sizes[SIZE_STEPS - n]))
+            c.itemconfigure(self._items[new], image=self._square(games[new], sizes[n]))
+        ui.animator.run("grid-size", MOVE_MS, step)
+
+    def _slide(self, metrics, distance):
+        """A new row came into view: the tiles start one row away and slide into place."""
+        ui, c = self.ui, self.ui.canvas
+        c.move("tiles", 0, distance)
+        c.move("games-ring", 0, distance)
+        c.move("games-nav", 0, distance)
+        offset = [1.0]
+
+        def step(progress):
+            delta = distance * (1.0 - progress - offset[0])
+            for tag in ("tiles", "games-ring", "games-nav"):
+                c.move(tag, 0, delta)
+            offset[0] = 1.0 - progress
+        ui.animator.run("grid", SCROLL_MS, step)
+
+    def _enter(self, metrics):
+        """The grid appears: the tiles rise a little into place."""
+        ui, c = self.ui, self.ui.canvas
+        if not ui.animations:
+            return
+        distance = ui.px(22)
+        for tag in ("tiles", "games-ring", "games-nav"):
+            c.move(tag, 0, distance)
+        offset = [1.0]
+
+        def step(progress):
+            delta = distance * (1.0 - progress - offset[0])
+            for tag in ("tiles", "games-ring", "games-nav"):
+                c.move(tag, 0, delta)
+            offset[0] = 1.0 - progress
+        ui.animator.run("grid", ENTER_MS, step)
 
     def _preload(self):
         """
@@ -427,118 +500,71 @@ class GameGrid:
         """
         ui = self.ui
         self._preload_job = None
-        if ui.view != "games" or not self.games or ui.animator.active("shelf"):
-            if ui.view == "games" and self.games:
-                self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
+        if ui.view != "games" or not self.games:
             return
-        count, tile, focus = len(self.games), ui.px(TILE), ui.px(FOCUS)
-        ahead = self.columns + 4
-        order = [self.index + d * side for d in range(1, ahead + 1) for side in (1, -1)]
+        if ui.animator.active("grid") or ui.animator.active("grid-size") or ui.animator.active("ring"):
+            self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
+            return
+        count, sizes = len(self.games), self._sizes()
+        near = range(max(0, (self.first_row - 1) * self.columns),
+                     min(count, (self.first_row + self.rows + 1) * self.columns))
+        order = sorted(near, key=lambda i: abs(i - self.index))
         made = 0
         for i in order:
-            if not 0 <= i < count:
-                continue
             game = self.games[i]
             key = self._key(game, "square")
-            if key not in self._masters or (key, tile) not in self._photos:
-                self._square(game, tile)
+            if key not in self._masters or (key, sizes[0]) not in self._photos:
+                self._square(game, sizes[0])
                 made += 1
-            elif abs(i - self.index) <= 2 and ("ring", focus, focus, self.accent(game), 0) not in ui._photos:
+            elif abs(i - self.index) <= self.columns and (key, sizes[1]) not in self._photos:
+                for size in sizes:                      # the grow animation's steps
+                    self._square(game, size)
+                made += 1
+            elif abs(i - self.index) <= 1 and ("ring", sizes[-1], sizes[-1], self.accent(game), 0) not in ui._photos:
                 for level in range(len(PULSE)):         # the frame in this game's colour
-                    self._frame(focus, focus, self.accent(game), level)
+                    self._frame(sizes[-1], sizes[-1], self.accent(game), level)
                 made += 1
             if made >= 2:
                 self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
                 return
 
-    def _build(self, metrics, selected, direction=0):
-        """Create the shelf from scratch, sliding in from `direction` (0: rising a little)."""
-        ui, c = self.ui, self.ui.canvas
-        c.delete("tiles")
-        self._items = {}
-        self._sliding = False
-        place, visible = self._layout(self.index, metrics)
-        for i in visible:
-            x, y, size = place(i)
-            self._items[i] = c.create_image(x, y, image=self._square(self.games[i], int(size)),
-                                            tags=("games", "tiles"))
-        if not ui.animations:
-            return
-        dx, dy = (ui.px(70) * direction, 0) if direction else (0, ui.px(26))
-        c.move("tiles", dx, dy)
-        offset = [1.0]                          # how much of (dx, dy) the tiles are still away
-
-        def step(progress):
-            c.move("tiles", dx * (1.0 - progress - offset[0]), dy * (1.0 - progress - offset[0]))
-            offset[0] = 1.0 - progress
-        ui.animator.run("shelf", ENTER_MS, step)
-
-    def _slide(self, metrics, old_index):
-        """
-        Move the shelf from old_index to self.index: tiles slide, the two
-        focus tiles change size, the focus frame follows its tile.
-        """
-        ui, c = self.ui, self.ui.canvas
-        games, index = self.games, self.index
-        self._sliding = True
-        before, _ = self._layout(old_index, metrics)
-        place, visible = self._layout(index, metrics)
-        wanted = set(visible)
-        for i in wanted - set(self._items):                 # entering: start where they were before the move
-            x, y, size = before(i)
-            self._items[i] = c.create_image(x, y, image=self._square(games[i], int(size)), tags=("games", "tiles"))
-        start = {i: c.coords(item) for i, item in self._items.items()}
-        tile, focus, bottom = metrics[0], metrics[1], metrics[4]
-        ring = self._ring if self._ring and c.type(self._ring) else None
-
-        def step(progress):
-            for i, item in self._items.items():
-                x, y, size = place(i)
-                sx, sy = start[i]
-                x = sx + (x - sx) * progress
-                if i in (index, old_index):
-                    # Growing into the focus / shrinking out of it, standing on the shelf line
-                    # ...in a few fixed sizes, so the pictures are reused from the cache
-                    grow = progress if i == index else 1 - progress
-                    size = int(tile + (focus - tile) * round(grow * GROW_STEPS) / GROW_STEPS) // 2 * 2
-                    c.itemconfigure(item, image=self._square(games[i], size))
-                    c.coords(item, x, bottom - size / 2)
-                    if i == index and ring:
-                        c.coords(ring, x, bottom - focus / 2)
-                else:
-                    c.coords(item, x, sy + (y - sy) * progress)
-
-        def done():
-            for i in [i for i in self._items if i not in wanted]:
-                c.delete(self._items.pop(i))
-        ui.animator.run("shelf", MOVE_MS, step, done)
-
     # ------------------------------------------------------------------
     # The focus frame
     # ------------------------------------------------------------------
-    def _place_ring(self, metrics, selected):
+    def _place_ring(self, metrics, glide_from=None):
         ui, c = self.ui, self.ui.canvas
-        focus = metrics[1]
-        place, _ = self._layout(self.index, metrics)
-        x, y = place(self.index)[0], metrics[4] - focus / 2
-        # Only a slide carries the frame along; after a rebuild it is placed here
-        sliding = self._sliding and ui.animator.active("shelf") and self._ring and c.type(self._ring)
-        self._ring_key = (focus, self.accent(selected))
-        image = self._frame(focus, focus, self._ring_key[1], self._pulse if ui.animations else len(PULSE) - 1)
+        selected = self.games[self.index]
+        size = self._grown()
+        x, y = self._center(self.index, metrics)
+        self._ring_key = (size, self.accent(selected))
+        image = self._frame(size, size, self._ring_key[1], self._pulse if ui.animations else len(PULSE) - 1)
         if self._ring and c.type(self._ring):
-            if not sliding:                     # while the shelf slides, the slide moves the frame
-                c.coords(self._ring, x, y)
             c.itemconfigure(self._ring, image=image)
         else:
             self._ring = c.create_image(x, y, image=image, tags=("games", "games-ring"))
         c.tag_raise("games-ring")
+        if glide_from and ui.animations:
+            sx, sy = glide_from
+            c.coords(self._ring, sx, sy)
+
+            moved = [0.0]
+
+            def step(progress):
+                c.coords(self._ring, sx + (x - sx) * progress, sy + (y - sy) * progress)
+                c.move("games-nav", (x - sx) * (progress - moved[0]), (y - sy) * (progress - moved[0]))
+                moved[0] = progress
+            ui.animator.run("ring", MOVE_MS, step)
+        else:
+            ui.animator.finish("ring")
+            c.coords(self._ring, x, y)
         # Who is browsing: that player's number on the corner of the frame
         c.delete("games-nav")
         if self.nav:
-            d = ui.px(34)
+            d = ui.px(30)
             disc = ui.photo(("nav", self.nav, d), lambda: Glyphs.disc(self.nav[0], d, self.nav[1], COLOR["DISC_TEXT"]))
             back = ui.photo(("nav-back", d), lambda: Glyphs.panel(d + 6, d + 6, (d + 6) // 2, (8, 9, 14, 255)))
-            cx, cy = x - focus / 2 + ui.px(4), y - focus / 2 + ui.px(4)
+            cx, cy = (glide_from or (x, y))
+            cx, cy = cx - size / 2 + ui.px(3), cy - size / 2 + ui.px(3)
             c.create_image(cx, cy, image=back, tags=("games", "games-nav"))
             c.create_image(cx, cy, image=disc, tags=("games", "games-nav"))
 
@@ -546,59 +572,50 @@ class GameGrid:
         """The glow of the focus frame breathes: six cached pictures, there and back."""
         ui = self.ui
         self._pulse_job = ui.root.after(PULSE_MS, self._pulse_tick)
-        if not self._ring_key or not ui.animations or ui.view != "games" or ui.quiet():
+        if not self._ring_key or not ui.animations or ui.view != "games" or ui.quiet() \
+                or ui.animator.active("ring") or ui.animator.active("grid"):
             return
         steps = len(PULSE)
-        self._beat = (getattr(self, "_beat", 0) + 1) % (2 * steps - 2)
+        self._beat = (self._beat + 1) % (2 * steps - 2)
         self._pulse = self._beat if self._beat < steps else 2 * steps - 2 - self._beat
         if self._ring and ui.canvas.type(self._ring):
-            focus, color = self._ring_key
-            ui.canvas.itemconfigure(self._ring, image=self._frame(focus, focus, color, self._pulse))
+            size, color = self._ring_key
+            ui.canvas.itemconfigure(self._ring, image=self._frame(size, size, color, self._pulse))
 
     # ------------------------------------------------------------------
-    # Hero: the selected game's title, facts and banner
+    # Header: the selected game's title and facts
     # ------------------------------------------------------------------
-    def _draw_hero_text(self, selected, count, animate=True):
+    def _draw_header(self, selected, count):
         ui, c = self.ui, self.ui.canvas
-        c.delete("games-herotext")
-        tags = ("games", "games-herotext")
-        left = ui.px(64)
-        base = ui.height - ui.px(720 - SHELF_BOTTOM) - ui.px(FOCUS)        # top of the shelf
-        y = base - ui.px(150)
+        c.delete("games-header")
+        tags = ("games", "games-header")
+        left = ui.px(SIDE)
 
-        caption = f"{self.index + 1} / {count}"
-        if self.sort_label:
-            caption += f"   ·   {self.sort_label.upper()}"
-        if self.filter_players:
-            caption += f"   ·   {t('games_filter', n=self.filter_players).upper()}"
-        c.create_text(left, y, text=caption, anchor="w", fill=self.accent(selected), font=ui.font(13), tags=tags)
-
-        y += ui.px(46)
-        x = left
+        x, y = left, ui.px(56)
         if selected.get("favorite"):
-            star_h = ui.px(30)
+            star_h = ui.px(28)
             star = ui.photo(("star", star_h, COLOR["GOLD"]), lambda: Glyphs.star(star_h, COLOR["GOLD"]))
             c.create_image(x, y, image=star, anchor="w", tags=tags)
-            x += star_h + ui.px(14)
-        room = int(ui.width * 0.56) - x
-        font = next((f for f in (ui.font(42, "semibold"), ui.font(34, "semibold"), ui.font(28, "semibold"))
-                     if f.measure(selected["title"]) <= room), ui.font(28, "semibold"))
+            x += star_h + ui.px(12)
+        room = ui.width - x - ui.px(330)            # the status pill and shortcuts on the right
+        font = next((f for f in (ui.font(32, "semibold"), ui.font(27, "semibold"), ui.font(23, "semibold"))
+                     if f.measure(selected["title"]) <= room), ui.font(23, "semibold"))
         c.create_text(x, y, anchor="w", fill=COLOR["TEXT"], font=font, tags=tags,
                       text=ui.truncate(selected["title"], font, room))
 
-        y += ui.px(54)
-        x = left
+        x, y = left, ui.px(102)
         players = selected.get("players")
         if players:
-            icon_h = ui.px(16)
-            icon = ui.photo(("people", 1 if players <= 1 else 2, icon_h, COLOR["TEXT"]),
-                            lambda: Glyphs.people(1 if players <= 1 else 2, icon_h, COLOR["TEXT"]))
-            x += self._chip(x, y, players_label(players), COLOR["TEXT"], tags, icon) + ui.px(10)
+            state = badge_state(players, self.players)
+            color = {"ok": COLOR["OK"], "bad": COLOR["BAD"]}.get(state, COLOR["TEXT"])
+            icon_h = ui.px(17)
+            icon = ui.photo(("people", 1 if players <= 1 else 2, icon_h, color),
+                            lambda: Glyphs.people(1 if players <= 1 else 2, icon_h, color))
+            text = players_label(players)
             if self.players >= 2:
-                fits = players >= self.players
-                text = ("✓  " + t("players_fit", n=self.players)) if fits else \
-                       ("✕  " + t("players_too_many", max=players, n=self.players))
-                x += self._chip(x, y, text, COLOR["OK"] if fits else COLOR["BAD"], tags) + ui.px(10)
+                text += "   ·   " + (t("players_fit", n=self.players) if state == "ok" else
+                                     t("players_too_many", max=players, n=self.players))
+            x += self._chip(x, y, text, color, tags, icon, strong=True) + ui.px(10)
         seconds = selected.get("playtime") or 0
         if seconds >= 60:
             icon_h = ui.px(15)
@@ -614,45 +631,50 @@ class GameGrid:
         if selected.get("hidden"):
             x += self._chip(x, y, t("games_hidden"), COLOR["TEXT_DIM"], tags) + ui.px(10)
 
-        c.tag_raise("tiles")
-        c.tag_raise("games-ring")
-        c.tag_raise("games-nav")
-        if animate and ui.animations:
-            # The text settles in from a little to the right
-            offset = ui.px(18)
-            c.move("games-herotext", offset, 0)
-            done = [0.0]
+        caption = f"{self.index + 1} / {count}"
+        if self.sort_label:
+            caption += f"   ·   {self.sort_label.upper()}"
+        if self.filter_players:
+            caption += f"   ·   {t('games_filter', n=self.filter_players).upper()}"
+        c.create_text(ui.width - ui.px(SIDE), y, text=caption, anchor="e", fill=COLOR["TEXT_FAINT"],
+                      font=ui.font(12), tags=tags)
 
-            def step(progress):
-                c.move("games-herotext", -offset * (progress - done[0]), 0)
-                done[0] = progress
-            ui.animator.run("herotext", 160, step)
-        else:
-            ui.animator.finish("herotext")
-
-    def _chip(self, x, y, text, color, tags, icon=None):
-        """A glass pill with coloured text (and an icon); returns its width."""
+    def _draw_scrollbar(self, metrics, count):
+        """A thin bar on the right edge: where the visible rows are in the whole list."""
         ui, c = self.ui, self.ui.canvas
-        font = ui.font(13)
+        c.delete("games-scroll")
+        rows_total = (count - 1) // self.columns + 1
+        if rows_total <= self.rows:
+            return
+        tile, gap, _, top = metrics
+        height = self.rows * tile + (self.rows - 1) * gap
+        x = ui.width - ui.px(30)
+        w = max(2, ui.px(4))
+        c.create_rectangle(x, top, x + w, top + height, fill=COLOR["LINE_FAINT"], width=0,
+                           tags=("games", "games-scroll"))
+        thumb = max(ui.px(24), height * self.rows // rows_total)
+        y = top + (height - thumb) * self.first_row // max(1, rows_total - self.rows)
+        c.create_rectangle(x, y, x + w, y + thumb, fill=COLOR["TEXT_DIM"], width=0, tags=("games", "games-scroll"))
+
+    def _chip(self, x, y, text, color, tags, icon=None, strong=False):
+        """A glass pill with coloured text (and an icon); returns its width. strong: larger, outlined in the colour."""
+        ui, c = self.ui, self.ui.canvas
+        font = ui.font(15 if strong else 13)
         icon_w = icon.width() + ui.px(8) if icon else 0
         step = ui.px(14)                        # widths in steps: most chips reuse a cached pill
-        w, h = -(-(font.measure(text) + icon_w + ui.px(26)) // step) * step, ui.px(30)
-        pill = ui.photo(("chip", w, h), lambda: Glyphs.panel(
-            w, h, h // 2, COLOR["CHIP"], outline=(COLOR["EDGE"], max(1, ui.px(1)))))
+        w, h = -(-(font.measure(text) + icon_w + ui.px(26)) // step) * step, ui.px(36 if strong else 30)
+        edge = color if strong else COLOR["EDGE"]
+        pill = ui.photo(("chip", w, h, edge), lambda: Glyphs.panel(
+            w, h, h // 2, COLOR["CHIP"], outline=(edge, max(1, ui.px(1.5 if strong else 1)))))
         c.create_image(x, y, image=pill, anchor="w", tags=tags)
         if icon:
             c.create_image(x + ui.px(13), y, image=icon, anchor="w", tags=tags)
         c.create_text(x + ui.px(13) + icon_w, y, text=text, anchor="w", fill=color, font=font, tags=tags)
         return w
 
-    def _schedule_hero(self, selected, at_once=False):
-        """The backdrop and the banner follow the selection once it has rested (at once on entering)."""
-        ui = self.ui
-        if self._hero_job:
-            ui.root.after_cancel(self._hero_job)
-        delay = 1 if at_once or not ui.animations else HERO_DELAY_MS
-        self._hero_job = ui.root.after(delay, self._show_hero, selected)
-
+    # ------------------------------------------------------------------
+    # Banners (the launch screen shows the game's banner)
+    # ------------------------------------------------------------------
     def _hero_key(self, path):
         from .Ui import current_theme
         ui = self.ui
@@ -697,99 +719,8 @@ class GameGrid:
             self._hero_store(key, photos)
         return photos
 
-    def _show_hero(self, selected):
-        """The selection rested: bring its banner in over the previous one."""
-        ui, c = self.ui, self.ui.canvas
-        self._hero_job = None
-        if ui.view != "games" or not self.games or selected is not self.games[min(self.index, len(self.games) - 1)]:
-            return
-        path = selected.get("background")
-        if path == self._hero_path and c.find_withtag("games-heroimg"):
-            ui.set_backdrop(selected, fade=False)
-            return
-        if not path:
-            # No banner: the blurred backdrop alone changes, with its own cross-fade
-            self._hero_path, self._hero_wanted = None, None
-            c.delete("games-heroimg")
-            ui.set_backdrop(selected)
-            return
-        key = self._hero_key(path)
-        self._hero_wanted = key
-        self._hero_game = selected
-        if key in self._heroes:
-            self._heroes.move_to_end(key)
-            self._present_hero(key, self._heroes[key])
-            return
-
-        def work():
-            try:
-                images = self._hero_images(key)
-            except Exception:
-                images = None
-            if self._hero_wanted == key:            # still the one being waited for
-                self._hero_made = (key, images)
-        threading.Thread(target=work, daemon=True).start()
-        self._hero_job = ui.root.after(15, self._collect_hero, 200)
-
-    def _collect_hero(self, tries):
-        """Wait (without blocking) for the worker thread's banner, then show it."""
-        ui = self.ui
-        self._hero_job = None
-        made = self._hero_made
-        if made is None or made[0] != self._hero_wanted:
-            if self._hero_wanted is not None and tries > 0:
-                self._hero_job = ui.root.after(15, self._collect_hero, tries - 1)
-            return
-        self._hero_made = None
-        key, images = made
-        if images is None or ui.view != "games":
-            self._hero_path = None
-            ui.canvas.delete("games-heroimg")
-            if ui.view == "games":
-                ui.set_backdrop(getattr(self, "_hero_game", None))
-            return
-        self._present_hero(key, images)
-
-    def _present_hero(self, key, frames):
-        """
-        Fade the banner in over the previous one. `frames` are PhotoImages
-        (cached) or PIL images straight from the worker: those become
-        pictures one per step, so no single step is heavy.
-        """
-        ui, c = self.ui, self.ui.canvas
-        old = c.find_withtag("games-heroimg")
-        self._hero_path, self._hero_wanted = key[0], None
-        photos = []
-        ui.set_backdrop(getattr(self, "_hero_game", None), fade=False)    # same repaint as the banner
-
-        def photo(n):
-            frame = frames[n]
-            return frame if isinstance(frame, ImageTk.PhotoImage) else ImageTk.PhotoImage(frame)
-
-        photos.append(photo(0))
-        item = c.create_image(ui.width, 0, image=photos[0], anchor="ne", tags=("games", "games-heroimg"))
-        c.tag_lower(item)
-        for earlier in old:                                  # under the text and tiles, over the old banner
-            c.tag_lower(earlier)
-        c.tag_lower("bg")
-
-        def step(n=1):
-            if not c.type(item):
-                return
-            if n < len(frames):
-                photos.append(photo(n))
-                c.itemconfigure(item, image=photos[n])
-                ui.root.after(HERO_STEP_MS, step, n + 1)
-            else:
-                for earlier in old:
-                    c.delete(earlier)
-                if key not in self._heroes:
-                    self._hero_store(key, photos)
-        ui.root.after(HERO_STEP_MS, step)
-
-    # ------------------------------------------------------------------
     def flash_letter(self, letter):
-        """The letter just jumped to, large over the hero for a moment."""
+        """The letter just jumped to, large in the middle of the grid for a moment."""
         ui, c = self.ui, self.ui.canvas
         c.delete("games-letter")
         if self._letter_job:
@@ -798,7 +729,7 @@ class GameGrid:
         if not ui.width or ui._hold_draw:
             return
         size = ui.px(132)
-        cx, cy = ui.width // 2, ui.height // 2 - ui.px(90)
+        cx, cy = ui.width // 2, ui.height // 2 + ui.px(30)
         box = ui.photo(("letter-box", size), lambda: Glyphs.panel(
             size, size, ui.px(30), COLOR["DIALOG"], outline=(COLOR["EDGE_STRONG"], max(1, ui.px(1.5)))))
         c.create_image(cx, cy, image=box, tags=("games", "games-letter"))
@@ -812,20 +743,15 @@ class GameGrid:
 
     def _clear(self):
         ui = self.ui
-        ui.animator.finish("shelf")
-        ui.animator.finish("herotext")
-        if self._hero_job:
-            ui.root.after_cancel(self._hero_job)
-            self._hero_job = None
+        for key in ("grid", "grid-size", "ring"):
+            ui.animator.finish(key)
         if self._preload_job:
             ui.root.after_cancel(self._preload_job)
             self._preload_job = None
-        self._hero_wanted = None
         ui.canvas.delete("games")
         self._items = {}
         self._ring = None
         self._ring_key = None
-        self._hero_path = None
         self._shown = None
 
     clear = _clear

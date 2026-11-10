@@ -47,7 +47,7 @@ THEMES = {
         "PANEL": (20, 23, 32, 208),             # cards
         "PANEL_EMPTY": (255, 255, 255, 9),
         "DIALOG": (17, 19, 27, 255),
-        "DRAWER": (13, 15, 22, 250),            # side menus
+        "DRAWER": (13, 15, 22, 255),            # side menus
         "PILL": (18, 20, 28, 232),              # toasts, the hint dock
         "CHIP": (255, 255, 255, 22),
         "ROW": (255, 255, 255, 13),             # menu rows, stat tiles

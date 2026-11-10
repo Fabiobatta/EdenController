@@ -2,9 +2,9 @@
 Core/Sound.py
 Short interface sounds: a player joining, confirming, the roulette...
 
-The sounds are synthesised (a few sine notes each) into WAV files in the
-temp folder the first time the launcher runs, on a background thread, so
-the launcher ships no audio files. A WAV with the same name in the
+The sounds are synthesised (FM bells and a wooden tick, see SOUNDS) into
+WAV files in the temp folder the first time the launcher runs, on a
+background thread, so the launcher ships no audio files. A WAV with the same name in the
 "sounds" folder next to the launcher replaces the built-in one.
 
 Playback never blocks the UI loop:
@@ -43,56 +43,135 @@ MIX_BLOCK = 512             # samples per mixer buffer (~23 ms)
 MIX_BUFFERS = 4             # queued buffers: ~90 ms between play() and the speaker
 MAX_VOICES = 8
 
-# C major pentatonic from C5: any sequence of these sounds pleasant
-_NOTES = [523.25, 587.33, 659.25, 783.99, 880.00, 1046.50, 1174.66, 1318.51, 1567.98, 1760.00]
+# ============================================================================
+# THE SOUNDS
+# Soft bells and a wooden tick, in the spirit of a console's menus: short,
+# bright on the attack, mellowing as they ring, with a little room around
+# them. Every melody here is original - short arpeggios on major and
+# lydian chords, nothing taken from any game.
+# ============================================================================
+def _hz(name):
+    """Frequency of a note name: "C5", "F#6", "Bb4"."""
+    letters = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+    semitone = letters[name[0]] + {"#": 1, "b": -1}.get(name[1], 0)
+    octave = int(name[2:] if name[1] in "#b" else name[1:])
+    return 440.0 * 2 ** ((semitone - 9) / 12 + (octave - 4))
 
 
-def _note(index):
-    return _NOTES[index % len(_NOTES)] * (2 ** (index // len(_NOTES)))
+# Each player has their own note (C major pentatonic, rising), so the join
+# chime tells the number without looking
+_PLAYER_NOTES = ("C6", "D6", "E6", "G6", "A6", "C7", "D7", "E7")
 
-
-# name -> [(start s, frequency Hz, duration s, gain)]
-SOUNDS = {
-    "move":    [(0.0, 1760.0, 0.028, 0.18)],
-    "tick":    [(0.0, 1318.5, 0.035, 0.30)],
-    "select":  [(0.0, _note(2), 0.09, 0.55), (0.07, _note(5), 0.16, 0.55)],
-    "back":    [(0.0, _note(4), 0.07, 0.40), (0.06, _note(1), 0.12, 0.40)],
-    "leave":   [(0.0, _note(5), 0.08, 0.45), (0.07, _note(3), 0.08, 0.45), (0.14, _note(0), 0.16, 0.45)],
-    "error":   [(0.0, 220.0, 0.10, 0.45), (0.11, 196.0, 0.16, 0.45)],
-    "toggle":  [(0.0, _note(3), 0.06, 0.45), (0.05, _note(7), 0.12, 0.45)],
-    "launch":  [(0.0, _note(0), 0.12, 0.45), (0.08, _note(2), 0.12, 0.45), (0.16, _note(4), 0.12, 0.45),
-                (0.24, _note(5), 0.45, 0.55)],
-    "win":     [(0.0, _note(0), 0.10, 0.5), (0.09, _note(2), 0.10, 0.5), (0.18, _note(4), 0.10, 0.5),
-                (0.27, _note(5), 0.10, 0.5), (0.38, _note(7), 0.10, 0.5), (0.49, _note(10), 0.55, 0.6),
-                (0.49, _note(7), 0.55, 0.35)],
+# Instruments: (modulator ratio, index at the attack, index after it, index
+# decay s, amplitude decay s, attack s, sparkle gain). FM synthesis: a sine
+# whose frequency is wobbled by another sine; the wobble (index) dies
+# away faster than the note, which is what makes a bell ring "mellow".
+INSTRUMENTS = {
+    "bell": (2.0, 1.9, 0.25, 0.07, 0.30, 0.003, 0.10),     # the main voice: celesta-like
+    "chime": (3.5, 1.2, 0.15, 0.05, 0.55, 0.004, 0.06),    # long, glassy: the end of a fanfare
+    "wood": (4.0, 1.4, 0.0, 0.012, 0.035, 0.0015, 0.0),    # a soft wooden tick: moving around
+    "soft": (1.0, 1.0, 0.2, 0.05, 0.16, 0.006, 0.0),       # round and low: a gentle "no"
 }
-# Achievement: a bell-like arpeggio, higher and longer than "win"
-SOUNDS["trophy"] = [(0.0, _note(5), 0.12, 0.45), (0.08, _note(7), 0.12, 0.45), (0.16, _note(9), 0.12, 0.45),
-                    (0.26, _note(10), 0.7, 0.55), (0.26, _note(12), 0.7, 0.3)]
 
-# Joining: one blip per pulse of the confirmation rumble, higher for each
-# player, and a brighter last one
-for _player in range(1, 9):
-    SOUNDS[f"blip{_player}"] = [(0.0, _note(_player - 1), 0.10, 0.5)]
-    SOUNDS[f"join{_player}"] = [(0.0, _note(_player - 1), 0.08, 0.5), (0.06, _note(_player + 1), 0.08, 0.45),
-                                (0.12, _note(_player + 3), 0.22, 0.5)]
+# name -> {"notes": [(start s, note, ring s, gain, instrument)], "level": peak, "room": reverb}
+SOUNDS = {
+    "move":   {"notes": [(0.0, "E6", 0.09, 1.0, "wood")], "level": 0.34, "room": False},
+    "tick":   {"notes": [(0.0, "A6", 0.07, 1.0, "wood")], "level": 0.30, "room": False},
+    "select": {"notes": [(0.0, "G5", 0.5, 0.8, "bell"), (0.055, "D6", 0.7, 1.0, "bell")], "level": 0.62},
+    "back":   {"notes": [(0.0, "D6", 0.4, 0.8, "bell"), (0.055, "A5", 0.55, 0.9, "bell")], "level": 0.5},
+    "toggle": {"notes": [(0.0, "B5", 0.35, 0.8, "bell"), (0.045, "E6", 0.5, 1.0, "bell")], "level": 0.52},
+    "leave":  {"notes": [(0.0, "E6", 0.35, 0.9, "bell"), (0.07, "C6", 0.35, 0.9, "bell"),
+                         (0.14, "G5", 0.7, 1.0, "bell")], "level": 0.55},
+    "error":  {"notes": [(0.0, "D4", 0.35, 1.0, "soft"), (0.1, "A3", 0.5, 1.0, "soft")], "level": 0.6},
+    "launch": {"notes": [(0.0, "C5", 0.4, 0.7, "bell"), (0.06, "E5", 0.4, 0.75, "bell"),
+                         (0.12, "G5", 0.4, 0.8, "bell"), (0.18, "B5", 0.4, 0.85, "bell"),
+                         (0.24, "D6", 0.5, 0.9, "bell"), (0.32, "G6", 1.4, 0.8, "chime"),
+                         (0.32, "D6", 1.4, 0.5, "chime")], "level": 0.75},
+    "win":    {"notes": [(0.0, "G5", 0.35, 0.8, "bell"), (0.07, "B5", 0.35, 0.8, "bell"),
+                         (0.14, "D6", 0.35, 0.85, "bell"), (0.21, "F#6", 0.35, 0.85, "bell"),
+                         (0.30, "A6", 0.35, 0.9, "bell"), (0.40, "G6", 1.6, 0.9, "chime"),
+                         (0.40, "D6", 1.6, 0.55, "chime"), (0.40, "B6", 1.6, 0.4, "chime")], "level": 0.75},
+    "trophy": {"notes": [(0.0, "F5", 0.4, 0.75, "bell"), (0.06, "A5", 0.4, 0.8, "bell"),
+                         (0.12, "C6", 0.4, 0.85, "bell"), (0.18, "E6", 0.4, 0.85, "bell"),
+                         (0.26, "B6", 0.5, 0.7, "bell"), (0.34, "G6", 1.8, 0.9, "chime"),
+                         (0.34, "C7", 1.8, 0.45, "chime"), (0.34, "E6", 1.8, 0.5, "chime")], "level": 0.78},
+}
+# Joining: one blip per pulse of the confirmation rumble, on the player's own
+# note, then a small rising chime that ends on it an octave up
+for _player, _name in enumerate(_PLAYER_NOTES, start=1):
+    _octave_up = _name[0] + str(int(_name[1:]) + 1)
+    SOUNDS[f"blip{_player}"] = {"notes": [(0.0, _name, 0.4, 1.0, "bell")], "level": 0.5}
+    SOUNDS[f"join{_player}"] = {"notes": [(0.0, _name, 0.4, 0.8, "bell"),
+                                          (0.065, _hz(_name) * 1.5, 0.45, 0.8, "bell"),
+                                          (0.13, _octave_up, 0.9, 0.9, "chime")], "level": 0.62}
+
+ROOM = ((0.071, 0.26), (0.113, 0.18), (0.157, 0.11))    # (delay s, gain): a small, soft room
+LOWPASS = 0.42                                          # one-pole smoothing: takes the edge off the top
+BRIGHT_LIMIT = 8500.0                                   # Hz: no partial above this (RATE / 2 is 11025)
 
 
-def synthesize(notes, volume=1.0):
-    """16-bit mono PCM for a list of notes (sine + a soft octave, exponential decay)."""
-    length = max(start + duration for start, _, duration, _ in notes) + TAIL_S
+def _render_note(samples, first, frequency, ring, gain, instrument):
+    """Add one FM note to `samples` from index `first` (envelopes by running products: no exp per sample)."""
+    ratio, index_hi, index_lo, index_tau, amp_tau, attack, sparkle = INSTRUMENTS[instrument]
+    amp_tau = min(amp_tau * (ring / 0.4) ** 0.5, ring / 3) if instrument in ("bell", "chime") else amp_tau
+    count = min(int(ring * RATE), len(samples) - first)
+    if count <= 0:
+        return
+    # FM sidebands reach about frequency * (1 + ratio * (index + 1)): keep them
+    # under BRIGHT_LIMIT, or high notes fold back into harsh, off-key noise
+    room = max(0.0, (BRIGHT_LIMIT / frequency - 1) / ratio - 1)
+    if index_hi > room:
+        index_lo, index_hi = min(index_lo, room), room
+    if frequency * 4 > BRIGHT_LIMIT:
+        sparkle = 0.0
+    w = 2 * math.pi * frequency / RATE
+    wm = w * ratio
+    ws = w * 4.0                                            # sparkle: a quiet partial two octaves up
+    amp_k = math.exp(-1.0 / (amp_tau * RATE))
+    index_k = math.exp(-1.0 / (index_tau * RATE))
+    sparkle_k = math.exp(-1.0 / (0.04 * RATE))
+    attack_n = max(1, int(attack * RATE))
+    release_n = max(1, int(0.03 * RATE))
+    amp, swing, glint = gain, index_hi - index_lo, sparkle * gain
+    sin = math.sin
+    for i in range(count):
+        envelope = amp * (i / attack_n if i < attack_n else 1.0)
+        if i > count - release_n:
+            envelope *= (count - i) / release_n               # never stop on a non-zero sample
+        index = index_lo + swing
+        samples[first + i] += envelope * sin(w * i + index * sin(wm * i)) + glint * sin(ws * i)
+        amp *= amp_k
+        swing *= index_k
+        glint *= sparkle_k
+
+
+def synthesize(sound, volume=1.0):
+    """
+    16-bit mono PCM of a sound from SOUNDS: its notes rendered, a little
+    room added, softened, and scaled so its peak is the sound's level.
+    """
+    if isinstance(sound, list):                         # a bare list of notes
+        sound = {"notes": sound}
+    notes = sound["notes"]
+    room = sound.get("room", True)
+    tail = (max(d for d, _ in ROOM) * 3 if room else 0.0) + TAIL_S
+    length = max(start + ring for start, _, ring, _, *_ in notes) + tail
     samples = [0.0] * int(length * RATE)
-    for start, frequency, duration, gain in notes:
-        first = int(start * RATE)
-        count = int(duration * RATE)
-        step = 2 * math.pi * frequency / RATE
-        decay = 5.0 / count
-        fade = FADE_S * RATE
-        for i in range(count):
-            envelope = math.exp(-i * decay) * min(1.0, i / fade)
-            samples[first + i] += gain * envelope * (math.sin(i * step) + 0.25 * math.sin(2 * i * step))
-    scale = 32767 * 0.8 * max(0.0, min(1.0, volume))
-    return b"".join(struct.pack("<h", int(max(-1.0, min(1.0, v)) * scale)) for v in samples)
+    for start, note, ring, gain, *rest in notes:
+        frequency = _hz(note) if isinstance(note, str) else float(note)
+        _render_note(samples, int(start * RATE), frequency, ring, gain, rest[0] if rest else "bell")
+    if room:
+        for delay, gain in ROOM:                        # feedback echoes, each quieter than the last
+            d = int(delay * RATE)
+            for i in range(d, len(samples)):
+                samples[i] += gain * samples[i - d]
+    smooth, previous = [], 0.0
+    for value in samples:
+        previous += LOWPASS * (value - previous)
+        smooth.append(previous)
+    peak = max(1e-9, max(abs(v) for v in smooth))
+    scale = 32767 * sound.get("level", 0.6) * max(0.0, min(1.0, volume)) / peak
+    return array("h", (int(max(-32767, min(32767, v * scale))) for v in smooth)).tobytes()
 
 
 def wav(pcm):
@@ -326,7 +405,7 @@ class Sounds:
         """Write every sound once (background thread); play() skips sounds not ready yet."""
         try:
             os.makedirs(self.folder, exist_ok=True)
-            tag = f"v2_{int(self.volume * 100)}"
+            tag = f"v3_{int(self.volume * 100)}"
             for name, notes in SOUNDS.items():
                 custom = os.path.join(self.override_dir or "", name + ".wav")
                 if self.override_dir and os.path.isfile(custom):

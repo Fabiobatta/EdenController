@@ -29,6 +29,7 @@ view models and never touches widgets.
 
 import ctypes
 import os
+import queue
 import math
 import re
 import sys
@@ -67,7 +68,7 @@ DOCK_Y = 42             # centre of the hint dock above the bottom edge
 SPLASH_SHINE_MS = 760   # the light sweeping over the cover on the launch screen
 ART_MAX = 720           # art is kept in memory at most this big
 ART_CACHE = 48          # pictures kept decoded
-BG_CACHE = 8            # blurred backgrounds kept (screen-sized each)
+BG_CACHE = 6            # finished backdrops kept (screen-sized pictures)
 BG_SAMPLE_W = 96        # backdrop detail: the art is shrunk to this width...
 BG_BLUR = 2.2           # ...blurred, and stretched back to the screen
 DRIFT = 16              # px (720p) the backdrop may wander from its place
@@ -77,9 +78,9 @@ DRIFT_QUIET_S = 3.0     # the backdrop holds still this long after any input or 
 BG_COMPOSE_W = 480      # the backdrop is composed about this wide, then enlarged (LauncherUi._bg_zoom)
 # Every change of the backdrop repaints the whole window (tens of ms at
 # 1080p), so a cross-fade is one blended picture between the two, no more
-BG_FADE = (0.5,)
+BG_FADE = (0.4, 0.75)
 LIGHT_WASH = 0.4        # how far the light grid's backdrop goes towards white
-BG_FADE_MS = 60
+BG_FADE_MS = 50
 POP_DISTANCE = 46       # px (720p) a player's row slides in from the right when joining
 POP_MS = 240
 HOP_MS = 560            # a player's icon jumping when they join or pick another one
@@ -393,7 +394,12 @@ class LauncherUi:
         self.animator = Animator(root)
         self._bg_samples = OrderedDict()    # path -> thumbnail-size backdrop (for cross-fades)
         self._bg_shown = None               # path of the backdrop on screen
-        self._bg_fade = None                # (job, temporary picture) of a running cross-fade
+        self._bg_fade = None                # (job, None) of a running cross-fade
+        self._bg_photo = None               # the one picture the backdrop item shows (pasted into)
+        self._bg_gen = 0                    # the cross-fade asked for last (older results are dropped)
+        self._bg_done = None                # (generation, frames, final, key) from the backdrop thread
+        self._bg_queue = queue.Queue()
+        threading.Thread(target=self._bg_worker, name="backdrop", daemon=True).start()
         self.splash_ms = 0                  # how long the "let's go" screen lasts (its progress bar)
         self.resume = None                  # the game "continue" offers on the player screen
         self.quick = ()                     # hints shown next to the clock: [(button, label)]
@@ -799,29 +805,69 @@ class LauncherUi:
         """
         return max(1, round(self.width / BG_COMPOSE_W))
 
-    def _enlarge(self, sample):
-        """Screen-sized backdrop picture (a Tk image) from a thumbnail-size sample."""
+    def _compose_size(self):
         m, zoom = self._margin(), self._bg_zoom()
-        width = -(-(self.width + 2 * m) // zoom)
-        height = -(-(self.height + 2 * m) // zoom)
+        return -(-(self.width + 2 * m) // zoom), -(-(self.height + 2 * m) // zoom)
+
+    def _composed(self, sample, light):
+        """The backdrop at compose size (a few hundred px wide): shaded, or washed light."""
+        width, height = self._compose_size()
+        return compose_background(sample, width, height, self._shade(width, height, light), light)
+
+    def _full_size(self):
+        m = self._margin()
+        return self.width + 2 * m, self.height + 2 * m
+
+    def _full_frame(self, path):
+        """The finished screen-sized backdrop of `path` (PIL), cached."""
         light = self.light_grid()
-        small = ImageTk.PhotoImage(compose_background(sample, width, height, self._shade(width, height, light), light))
-        if zoom == 1:
-            return small
-        big = tk.PhotoImage(master=self.root)
-        self.root.tk.call(big.name, "copy", str(small), "-zoom", zoom, zoom)
-        return big
+        size = self._full_size()
+        key = (path, size, light)
+        frame = self._backgrounds.get(key)
+        if frame is None:
+            frame = self._backgrounds[key] = self._composed(self._sample(path), light).resize(size, Image.BILINEAR)
+            if len(self._backgrounds) > BG_CACHE:
+                self._backgrounds.popitem(last=False)
+        else:
+            self._backgrounds.move_to_end(key)
+        return frame
 
     def _background_photo(self, path):
-        key = (path, self.width, self.height, self._margin(), self.light_grid())
-        if key in self._backgrounds:
-            self._backgrounds.move_to_end(key)
-            return self._backgrounds[key]
-        photo = self._enlarge(self._sample(path))
-        self._backgrounds[key] = photo
-        if len(self._backgrounds) > BG_CACHE:
-            self._backgrounds.popitem(last=False)
-        return photo
+        """A Tk picture of the backdrop of `path` (tests and benchmarks)."""
+        return ImageTk.PhotoImage(self._full_frame(path))
+
+    def _show_frame(self, frame):
+        """
+        Put a screen-sized backdrop on screen by pasting it into the one
+        picture the backdrop item shows: a few milliseconds, where making a
+        new picture of that size costs four times as much.
+        """
+        photo = self._bg_photo
+        if photo is None or (photo.width(), photo.height()) != frame.size:
+            self._bg_photo = ImageTk.PhotoImage(frame)
+            item = self.canvas.find_withtag("bg")
+            if item:
+                self.canvas.itemconfigure(item[0], image=self._bg_photo)
+        else:
+            photo.paste(frame)
+
+    def _bg_worker(self):
+        """
+        The backdrop thread: blends, shades and enlarges a cross-fade's frames
+        (Pillow lets go of the GIL), so the main thread only pastes them.
+        """
+        while True:
+            gen, size, compose, before, after, shade, light, need_final, key = self._bg_queue.get()
+            if gen != self._bg_gen:
+                continue                        # a newer change came in meanwhile
+            try:
+                steps = [Image.blend(before, after, a) for a in BG_FADE] + ([after] if need_final else [])
+                frames = [compose_background(sample, *compose, shade, light).resize(size, Image.BILINEAR)
+                          for sample in steps]
+                final = frames.pop() if need_final else None
+            except Exception:
+                frames, final = [], None
+            self._bg_done = (gen, frames, final, key)
 
     def _apply_background(self):
         self._bg_job = None
@@ -831,37 +877,68 @@ class LauncherUi:
         if current_theme() == "oled":           # pure black: no picture at all
             self.canvas.delete("bg")
             self._bg_shown = None
+            self._bg_photo = None
             return
         m = self._margin()
         x, y = -m + self._drift[0], -m + self._drift[1]
         item = self.canvas.find_withtag("bg")
-        if not item:
-            self.canvas.create_image(x, y, image=self._background_photo(self._bg_wanted), anchor="nw", tags="bg")
-            self.canvas.tag_lower("bg")
-            self._bg_shown = self._bg_wanted
-            return
-        self.canvas.coords(item[0], x, y)
         old, new = self._bg_shown, self._bg_wanted
         self._bg_shown = new
-        if not self.animations or old == new or self.quiet() or not getattr(self, "_bg_crossfade", True):
-            self.canvas.itemconfigure(item[0], image=self._background_photo(new))
+        if not item or not self.animations or old == new or self.quiet() \
+                or not getattr(self, "_bg_crossfade", True):
+            self._show_frame(self._full_frame(new))
+            if not item:
+                self.canvas.create_image(x, y, image=self._bg_photo, anchor="nw", tags="bg")
+                self.canvas.tag_lower("bg")
+            else:
+                self._place_bg(item[0], x, y)
             return
-        # Cross-fade: blend the two thumbnails (cheap), enlarge each step
+        self._place_bg(item[0], x, y)
+        # Cross-fade: the steps are made on the backdrop thread, then pasted in turn
+        light = self.light_grid()
         before, after = self._sample(old), self._sample(new)
         if before.size != after.size:
             before = before.resize(after.size)
+        size, compose = self._full_size(), self._compose_size()
+        key = (new, size, light)
+        self._bg_gen += 1
+        self._bg_queue.put((self._bg_gen, size, compose, before, after, self._shade(*compose, light), light,
+                            key not in self._backgrounds, key))
+        self._bg_poll(self._bg_gen)
+
+    def _place_bg(self, item, x, y):
+        """Move the backdrop only if it is elsewhere: even a move to the same place repaints the whole screen."""
+        if [round(v) for v in self.canvas.coords(item)] != [round(x), round(y)]:
+            self.canvas.coords(item, x, y)
+
+    def _bg_poll(self, gen):
+        """Wait (a few ms at a time) for the backdrop thread, then play the cross-fade."""
+        if gen != self._bg_gen:
+            return
+        done = self._bg_done
+        if not done or done[0] != gen:
+            self._bg_fade = (self.root.after(8, self._bg_poll, gen), None)
+            return
+        self._bg_done = None
+        _, frames, final, key = done
+        if final is not None:
+            self._backgrounds[key] = final
+            if len(self._backgrounds) > BG_CACHE:
+                self._backgrounds.popitem(last=False)
+        else:
+            final = self._backgrounds.get(key) or self._full_frame(key[0])
+        sequence = frames + [final]
 
         def step(n=0):
-            if n < len(BG_FADE):
-                photo = self._enlarge(Image.blend(before, after, BG_FADE[n]))
-                self.canvas.itemconfigure("bg", image=photo)
-                self._bg_fade = (self.root.after(BG_FADE_MS, step, n + 1), photo)
+            self._show_frame(sequence[n])
+            if n + 1 < len(sequence):
+                self._bg_fade = (self.root.after(BG_FADE_MS, step, n + 1), None)
             else:
                 self._bg_fade = None
-                self.canvas.itemconfigure("bg", image=self._background_photo(new))
         step()
 
     def _stop_bg_fade(self):
+        self._bg_gen += 1                       # drop what the backdrop thread is still making
         if self._bg_fade:
             self.root.after_cancel(self._bg_fade[0])
             self._bg_fade = None

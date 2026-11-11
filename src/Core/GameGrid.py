@@ -58,7 +58,7 @@ class _Palette:
 COLOR = _Palette()
 
 TILE = 126                      # 720p baseline: tile width
-ASPECT = 1.5                    # tile height / width: a Switch cover (2:3)
+ASPECT = 1.0                    # tile height / width: square, like the eShop icons
 GROW = 1.08                     # the focused tile
 GAP = 20
 TOP = 164                       # first row
@@ -71,7 +71,7 @@ MASTER_CACHE = 160              # composed tiles kept (PIL, focused size)
 PHOTO_CACHE = 480               # tile pictures kept (every size shown)
 HERO_CACHE = 4                  # banners kept for the launch screen
 HERO_FADE = ()
-BACKGROUND_DELAY_MS = 220       # the selection rests this long before the backdrop follows
+BACKGROUND_DELAY_MS = 300       # the selection rests this long before the backdrop follows
 MOVE_MS = 120
 SCROLL_MS = 150
 ENTER_MS = 200
@@ -80,7 +80,7 @@ PULSE = (0.5, 0.6, 0.72, 0.84, 0.94, 1.0)
 PULSE_MS = 120
 PRELOAD_MS = 40
 PREFETCH_AHEAD = 2               # rows around the selection prepared by the prefetch thread
-SHINE_DELAY_MS = 420            # the selection rests this long before the light sweeps over it
+SHINE_DELAY_MS = 650            # the selection rests this long before the light sweeps over it (after the backdrop)
 SHINE_MS = 620
 SHINE_FRAMES = 18
 TAB_SLIDE = 54                  # px the grid slides in from, sideways, on a new tab

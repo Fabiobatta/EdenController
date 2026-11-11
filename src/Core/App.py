@@ -1799,6 +1799,14 @@ class LauncherApp:
         log("INFO", "Game selected", game["path"])
         self.roulette.close()
         self.menu.close()
+        if game.get("nx2") and not self.emulator_for(game).supports_nx2():
+            # Eden cannot boot a Switch 2 game: say which emulator it needs instead of failing
+            log("WARNING", "No Switch 2 emulator for", game["title"])
+            self.sounds.play("error")
+            self._alert_then = None
+            self.ui.show_alert("GAME_FAILED", title=t("nx2_missing_title"), text=t("nx2_missing_text"),
+                               lines=[game["title"]])
+            return
         if not firmware_checked and self.emulator_for(game).needs_firmware(game):
             # Eden would stop at a mouse-only "Game Requires Firmware" dialog
             name = self.emulator_for(game).display_name

@@ -47,6 +47,9 @@ APPLET_PROBES = ((Config.APPLET_UI, b"disableControllerApplet"),
 # A string only a build that boots Switch 2 containers carries (a log message
 # of core/file_sys/nup_container.cpp)
 NX2_PROBE = b"NUP directory tree"
+# Forks known to boot Switch 2 games, preferred in this order for them
+NX2_FORKS = ("lichii", "eglantine")
+SIBLING_SCAN_MAX = 40           # folders next to the emulator's own searched for the other forks
 PROBE_CHUNK = 8 * 1024 * 1024
 EMULATORS_SECTION = "emulators"
 LOG_FILE = "eden_log.txt"
@@ -457,6 +460,18 @@ class Eden(Emulator):
                 _, found = _pick_binary([(n, os.path.join(path, stem + extension)) for n, stem in BINARIES])
                 path = found if os.path.isfile(found) else (_find_fork(path, extension or ".exe") or found)
             paths.append((name, path))
+        # Then the Switch 2 forks in a folder next to this one (D:\Emulatori\Eden -> D:\Emulatori\Lichii);
+        # the settings come first, so an emulator listed there keeps its entry (and can be removed)
+        parent = os.path.dirname(os.path.abspath(self.dir))
+        try:
+            siblings = sorted(e.path for e in os.scandir(parent) if e.is_dir())[:SIBLING_SCAN_MAX]
+        except OSError:
+            siblings = []
+        for folder in siblings:
+            for stem in NX2_FORKS:
+                candidate = os.path.join(folder, stem + extension)
+                if os.path.isfile(candidate):
+                    paths.append((None, candidate))
 
         variants, seen = [], {os.path.normcase(os.path.abspath(self.exe))}
         for settings_key, path in paths:
@@ -531,16 +546,25 @@ class Eden(Emulator):
         A Switch 2 game goes to the first emulator that runs them; anything
         else to this one.
         """
+        nx2 = bool(game and game.get("nx2"))
         if choice:
             match = next((v for v in self.variants if v.display_name.lower() == choice.lower()), None)
-            if match:
+            if match and (not nx2 or match.supports_nx2()):
                 return match
-        if game and game.get("nx2"):
-            return next((v for v in self.variants if v.supports_nx2()), self)
+        if nx2:
+            able = [v for v in self.variants if v.supports_nx2()]
+            able.sort(key=lambda v: NX2_FORKS.index(v.fork_stem()) if v.fork_stem() in NX2_FORKS else len(NX2_FORKS))
+            return able[0] if able else self
         return self
 
+    def fork_stem(self):
+        """The executable's name without extension, lower case ("lichii")."""
+        return os.path.splitext(os.path.basename(self.exe or ""))[0].lower()
+
     def supports_nx2(self):
-        """True for a build that boots Switch 2 games (Eglantine and what derives from it)."""
+        """True for a build that boots Switch 2 games (Eglantine, Lichii and what derives from them)."""
+        if self.fork_stem() in NX2_FORKS:
+            return True
         return self._binary_fact("nx2", lambda: bool(probe_binary(self.exe, [NX2_PROBE])))
 
     def _binary_fact(self, name, find):

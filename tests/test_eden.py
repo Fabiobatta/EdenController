@@ -1644,9 +1644,10 @@ class VariantTests(unittest.TestCase):
         self.assertTrue(eglantine.supports_nx2())
         self.assertIs(emu.emulator_for({"title": "Old", "nx2": False}), emu)
         self.assertIs(emu.emulator_for({"title": "New", "nx2": True}), eglantine)
-        # The user's own choice for a game wins; an emulator no longer installed does not
+        # The user's own choice for a game wins, unless it cannot boot it (Eden and a Switch 2 game);
+        # an emulator no longer installed does not
         self.assertIs(emu.emulator_for({"title": "Old"}, "eglantine"), eglantine)
-        self.assertIs(emu.emulator_for({"title": "New", "nx2": True}, "Eden"), emu)
+        self.assertIs(emu.emulator_for({"title": "New", "nx2": True}, "Eden"), eglantine)
         self.assertIs(emu.emulator_for({"title": "Old"}, "Gone"), emu)
         self.assertEqual(eglantine.game_command("g.nup")[0], os.path.join(self.dir, "eglantine"))
 
@@ -1864,7 +1865,7 @@ class EmulatorListTests(VariantTests):
     def test_add_and_remove(self):
         from Core.Settings import load_settings
         emu = self._with_file()
-        other = os.path.join(self.tmp.name, "forks")
+        other = os.path.join(self.tmp.name, "far", "forks")     # not next to Eden's folder: found only when added
         os.makedirs(other)
         exe = os.path.join(other, "lichii")
         with open(exe, "wb") as f:
@@ -2110,6 +2111,35 @@ class DialogTests(unittest.TestCase):
         from Core.Process import find_dialogs
         if sys.platform != "win32":
             self.assertEqual(find_dialogs(types.SimpleNamespace(poll=lambda: None, pid=1), ["eden"]), [])
+
+
+class SiblingForkTests(unittest.TestCase):
+    """Lichii in a folder next to Eden's runs the Switch 2 games (Eden/Eden.py)."""
+
+    def test_lichii_next_door_is_found_and_preferred(self):
+        from Core.Settings import Settings
+        from Eden import Eden
+        with tempfile.TemporaryDirectory() as tmp:
+            folders = {name: os.path.join(tmp, name) for name in ("Eden", "Lichii", "Eglantine", "Other")}
+            for folder in folders.values():
+                os.makedirs(folder)
+            for folder, stem, data in (("Eden", "eden", b"qt-config.ini"), ("Lichii", "lichii", b"qt-config.ini"),
+                                       ("Eglantine", "eglantine", b"qt-config.ini NUP directory tree"),
+                                       ("Other", "eden", b"qt-config.ini")):
+                with open(os.path.join(folders[folder], stem + (".exe" if sys.platform == "win32" else "")), "wb") as f:
+                    f.write(data)
+            emu = Eden()
+            emu.settings = Settings({})
+            emu.locate(folders["Eden"])
+            names = [v.display_name for v in emu.variants]
+            self.assertEqual(names[0], "Eden")
+            self.assertIn("Lichii", names)
+            self.assertIn("Eglantine", names)
+            self.assertEqual(names.count("Eden"), 1)            # another Eden next door is not taken
+            nx2 = emu.emulator_for({"title": "Mario Kart World", "nx2": True})
+            self.assertEqual(nx2.display_name, "Lichii")         # named in the request: Lichii first
+            self.assertTrue(nx2.supports_nx2())
+            self.assertIs(emu.emulator_for({"title": "Switch 1 game"}), emu)
 
 
 if __name__ == "__main__":

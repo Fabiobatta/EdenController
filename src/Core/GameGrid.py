@@ -36,10 +36,10 @@ from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
 from .Theme import COLOR
 
-TILE = 144                      # 720p baseline: tile width
+TILE = 126                      # 720p baseline: tile width
 ASPECT = 1.5                    # tile height / width: a Switch cover (2:3)
 GROW = 1.08                     # the focused tile
-GAP = 18
+GAP = 20
 TOP = 164                       # first row
 SECTION = 26                    # extra space under the "Continue playing" row, for its caption
 BOTTOM = 80                     # space kept for the hint dock
@@ -69,6 +69,7 @@ BURST_MS = 560                  # the star bursting when a game becomes a favour
 BURST_SPARKS = 8
 COUNT_MS = 420                  # the play time counting up when a game is selected
 SHINE_ALPHA = 105               # brightest point of the sweep (0-255)
+TAB_FILL = (10, 12, 18, 130)    # the tabs not shown: dark glass, legible on a bright backdrop
 SQUARE_MIN = 0.9                # width / height from which a tile counts as square
 
 BADGE = {                       # fill, text
@@ -946,7 +947,7 @@ class GameGrid:
             caption += f"   ·   {self.sort_label.upper()}"
         if self.filter_players:
             caption += f"   ·   {t('games_filter', n=self.filter_players).upper()}"
-        c.create_text(ui.width - ui.px(SIDE), y, text=caption, anchor="e", fill=COLOR["TEXT_FAINT"],
+        c.create_text(ui.width - ui.px(SIDE), y, text=caption, anchor="e", fill=COLOR["TEXT_DIM"],
                       font=ui.font(12), tags=tags)
 
     def _draw_tabs(self, x, y, tags):
@@ -964,13 +965,13 @@ class GameGrid:
             number = str(count)
             w = font.measure(label) + ui.px(8) + count_font.measure(number) + ui.px(32)
             pill = ui.photo(("tab", w, h, current, COLOR["ACCENT"]), lambda: Glyphs.panel(
-                w, h, h // 2, COLOR["ROW_SELECTED"] if current else COLOR["CHIP"],
+                w, h, h // 2, COLOR["ROW_SELECTED"] if current else TAB_FILL,
                 outline=(COLOR["ACCENT"] if current else COLOR["EDGE"], max(1, ui.px(1.5 if current else 1)))))
             c.create_image(x, y, image=pill, anchor="w", tags=tags)
             c.create_text(x + ui.px(16), y, text=label, anchor="w", font=font, tags=tags,
                           fill=COLOR["TEXT"] if current else COLOR["TEXT_DIM"])
             c.create_text(x + w - ui.px(16), y, text=number, anchor="e", font=count_font, tags=tags,
-                          fill=COLOR["TEXT_DIM"] if current else COLOR["TEXT_FAINT"])
+                          fill=COLOR["TEXT"] if current else COLOR["TEXT_DIM"])
             x += w + ui.px(8)
         glyph = ui.photo(("glyph", "rb", int(ui.px(14) * 1.5)), lambda: Glyphs.button("rb", int(ui.px(14) * 1.5)))
         c.create_image(x + ui.px(2), y, image=glyph, anchor="w", tags=tags)
@@ -1001,7 +1002,7 @@ class GameGrid:
         w, h = -(-(font.measure(text) + icon_w + ui.px(26)) // step) * step, ui.px(36 if strong else 30)
         edge = color if strong else COLOR["EDGE"]
         pill = ui.photo(("chip", w, h, edge), lambda: Glyphs.panel(
-            w, h, h // 2, COLOR["CHIP"], outline=(edge, max(1, ui.px(1.5 if strong else 1)))))
+            w, h, h // 2, TAB_FILL, outline=(edge, max(1, ui.px(1.5 if strong else 1)))))
         c.create_image(x, y, image=pill, anchor="w", tags=tags)
         if icon:
             c.create_image(x + ui.px(13), y, image=icon, anchor="w", tags=tags)

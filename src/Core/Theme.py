@@ -48,7 +48,7 @@ THEMES = {
         "PANEL_EMPTY": (255, 255, 255, 9),
         "DIALOG": (17, 19, 27, 255),
         "DRAWER": (13, 15, 22, 255),            # side menus
-        "PILL": (18, 20, 28, 232),              # toasts, the hint dock
+        "PILL": (18, 20, 28, 196),              # toasts, the hint dock, the clock (the backdrop shows through)
         "CHIP": (255, 255, 255, 22),
         "ROW": (255, 255, 255, 13),             # menu rows, stat tiles
         "ROW_SELECTED": (142, 123, 255, 60),    # follows the accent (apply_theme)

@@ -16,7 +16,7 @@ dicts, no UI.
 import os
 import time
 
-TABS = ("all", "favorites", "recent", "players", "nx2")
+TABS = ("all", "nx2", "favorites", "recent", "players")
 CONTINUE_MAX = 5                # games in the "Continue playing" row
 CONTINUE_DAYS = 30              # played this recently to be there
 CONTINUE_MIN_GAMES = 9          # a shorter list gets no separate row
@@ -31,17 +31,18 @@ def visible(games, show_hidden=False):
 
 def available_tabs(games, joined, show_hidden=False):
     """
-    The tabs over the grid: All, Favourites and Switch 2 always (an empty
-    one says how to fill it), Recent once a game was played, For N players
-    once two or more joined.
+    The tabs over the grid, in order: All and Switch 2 always (an empty
+    Switch 2 tab says how to fill it), Favourites once there is one, Recent
+    once a game was played, For N players once two or more joined.
     """
     games = visible(games, show_hidden)
-    tabs = ["all", "favorites"]
+    tabs = ["all", "nx2"]
+    if any(g.get("favorite") for g in games):
+        tabs.append("favorites")
     if any(g.get("last_played") for g in games):
         tabs.append("recent")
     if joined >= 2:
         tabs.append("players")
-    tabs.append("nx2")
     return tabs
 
 

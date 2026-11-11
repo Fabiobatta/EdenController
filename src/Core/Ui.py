@@ -710,8 +710,8 @@ class LauncherUi:
             mask = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask).ellipse((-w * 0.25, -h * 0.35, w * 1.25, h * 1.2), fill=255)
             mask = mask.filter(ImageFilter.GaussianBlur(18))
-            vignette = mask.point(lambda v: int(55 + v * 0.42))            # 55..162
-            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.45))
+            vignette = mask.point(lambda v: int(84 + v * 0.46))            # 84..201: bright, like the first grid
+            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.4))
             shade = ImageChops.multiply(vignette, bottom).resize((width, height), Image.BILINEAR)
             self._photos[key] = Image.merge("RGB", (shade, shade, shade))
         return self._photos[key]

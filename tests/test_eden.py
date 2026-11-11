@@ -1383,7 +1383,7 @@ class ReconnectTests(unittest.TestCase):
 
 @unittest.skipUnless(HAS_TK, "needs Tk")
 class OrderTests(unittest.TestCase):
-    def test_order_ignores_favourites(self):
+    def test_favourites_first_then_order(self):
         from Core.App import LauncherApp
         games = [{"title": t, "path": t, "title_id": None} for t in ("Alpha", "Bravo", "Charlie", "Delta")]
         app = types.SimpleNamespace(
@@ -1392,16 +1392,15 @@ class OrderTests(unittest.TestCase):
                 "play": {"Bravo": [600, 100], "Charlie": [9000, 50], "Delta": [60, 300]},
                 "favorites": ["Charlie"]})))
         LauncherApp.order_games(app)
-        # favourites have their own tab: the order is the chosen one only
-        self.assertEqual([g["title"] for g in app.games], ["Delta", "Bravo", "Charlie", "Alpha"])
-        self.assertTrue(app.games[2]["favorite"])
+        self.assertEqual([g["title"] for g in app.games], ["Charlie", "Delta", "Bravo", "Alpha"])
+        self.assertTrue(app.games[0]["favorite"])
         app.sort_mode = "most"
         LauncherApp.order_games(app)
         self.assertEqual([g["title"] for g in app.games], ["Charlie", "Bravo", "Delta", "Alpha"])
         app.sort_mode = "az"
         LauncherApp.order_games(app)
-        self.assertEqual([g["title"] for g in app.games], ["Alpha", "Bravo", "Charlie", "Delta"])
-        self.assertEqual(app.games[0]["playtime"], 0)
+        self.assertEqual([g["title"] for g in app.games], ["Charlie", "Alpha", "Bravo", "Delta"])
+        self.assertEqual(app.games[1]["playtime"], 0)
 
 
 @unittest.skipUnless(HAS_TK, "needs Tk")
@@ -1788,9 +1787,9 @@ class LibraryTests(unittest.TestCase):
     def test_tabs_offered(self):
         from Core.Library import available_tabs
         games = self._games()
-        self.assertEqual(available_tabs(games, 1), ["all", "favorites", "recent", "nx2"])
-        self.assertEqual(available_tabs(games, 3), ["all", "favorites", "recent", "players", "nx2"])
-        self.assertEqual(available_tabs([{"title": "x", "path": "x"}], 1), ["all", "favorites", "nx2"])
+        self.assertEqual(available_tabs(games, 1), ["all", "nx2", "favorites", "recent"])
+        self.assertEqual(available_tabs(games, 3), ["all", "nx2", "favorites", "recent", "players"])
+        self.assertEqual(available_tabs([{"title": "x", "path": "x"}], 1), ["all", "nx2"])
 
     def test_continue_row_on_all(self):
         from Core.Library import tab_games

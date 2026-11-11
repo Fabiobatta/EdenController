@@ -78,7 +78,7 @@ def vivid_color(image, default):
     a large grey sky loses to a smaller red kart.
     """
     import colorsys
-    small = image.resize((40, 40), Image.BOX, reducing_gap=2.0).convert("RGB")
+    small = image.resize((28, 28), Image.BOX, reducing_gap=2.0).convert("RGB")
     buckets = {}
     data = small.tobytes()
     for i in range(0, len(data), 3):

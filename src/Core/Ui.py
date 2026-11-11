@@ -32,17 +32,18 @@ import os
 import math
 import re
 import sys
+import threading
 import time
 import tkinter as tk
 import tkinter.font as tkfont
 from collections import OrderedDict
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
+from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageTk
 
 from . import Glyphs
 from .I18n import t
 from .Paths import resource_path
-from .Theme import COLOR, THEMES, apply_theme, current_accent, current_theme, player_color  # noqa: F401
+from .Theme import COLOR, LIGHT_GRID, THEMES, apply_theme, current_accent, current_theme, player_color  # noqa: F401
 
 # ============================================================================
 # HI-DPI: physical pixels on Windows (must run before the window exists)
@@ -77,6 +78,7 @@ BG_COMPOSE_W = 480      # the backdrop is composed about this wide, then enlarge
 # Every change of the backdrop repaints the whole window (tens of ms at
 # 1080p), so a cross-fade is one blended picture between the two, no more
 BG_FADE = (0.5,)
+LIGHT_WASH = 0.4        # how far the light grid's backdrop goes towards white
 BG_FADE_MS = 60
 POP_DISTANCE = 46       # px (720p) a player's row slides in from the right when joining
 POP_MS = 240
@@ -144,6 +146,22 @@ def art_of(game):
     return game.get("background") or game.get("cover") or game.get("image")
 
 
+class MeasuredFont(tkfont.Font):
+    """A Tk font that remembers the widths it measured: the grid's header measures the same texts at every move."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._widths = {}
+
+    def measure(self, text, displayof=None):
+        width = self._widths.get(text)
+        if width is None:
+            if len(self._widths) > 4000:
+                self._widths.clear()
+            width = self._widths[text] = super().measure(text, displayof)
+        return width
+
+
 def load_picture(path, limit=ART_MAX):
     """Decoded picture (RGB, at most `limit` px) or None. Thread-safe (no cache)."""
     if not path:
@@ -152,7 +170,7 @@ def load_picture(path, limit=ART_MAX):
         with Image.open(path) as image:
             image.draft("RGB", (limit, limit))              # fast JPEG downscale
             picture = image.convert("RGB")
-            picture.thumbnail((limit, limit), Image.LANCZOS)
+            picture.thumbnail((limit, limit), Image.BICUBIC, reducing_gap=2.0)
         return picture
     except Exception:
         return None
@@ -172,9 +190,17 @@ def background_sample(art, width, height):
     return image.filter(ImageFilter.GaussianBlur(9)).resize((BG_SAMPLE_W, max(1, round(BG_SAMPLE_W * height / width))))
 
 
-def compose_background(sample, width, height, shade):
-    """Screen-sized backdrop from a background_sample(): stretched and shaded."""
-    return ImageChops.multiply(sample.resize((width, height), Image.BILINEAR), shade)
+def compose_background(sample, width, height, shade, light=False):
+    """
+    Screen-sized backdrop from a background_sample(): stretched and shaded -
+    or, light, made more colourful and washed towards white (a pastel
+    backdrop for the light game grid).
+    """
+    picture = sample.resize((width, height), Image.BILINEAR)
+    if light:
+        picture = Image.blend(ImageEnhance.Color(picture).enhance(1.5), Image.new("RGB", picture.size, (255, 255, 255)),
+                              LIGHT_WASH)
+    return ImageChops.multiply(picture, shade)
 
 
 def ease_out(x):
@@ -327,12 +353,16 @@ class LauncherUi:
         self._fonts = {}
         self._photos = {}
         self._art = OrderedDict()
+        self._art_lock = threading.Lock()   # the grid's prefetch thread loads art too
+        self._bg_ready = {}                 # (path, size) -> backdrop sample made by the prefetch thread
         self._backgrounds = OrderedDict()
         self._bg_wanted = None
         self._bg_owner = None
         self._bg_job = None
         self.motion = True                  # background drift, see BACKGROUND MOTION
         self.dynamic_colors = True          # selection colour from the game's art (GameGrid.accent)
+        self.light_games = True             # the game grid light and colourful (on the dark theme)
+        self._pal = None                    # (key, colours) of pal
         self._drift = (0, 0)
         self._motion_quiet_until = 0.0
         self.busy_overlay = False           # something animated on top (roulette): hold the backdrop still
@@ -407,6 +437,18 @@ class LauncherUi:
     def px(self, value):
         return max(1, int(round(value * self.scale)))
 
+    def light_grid(self):
+        """True while the game grid is shown light: dark text on a pastel backdrop."""
+        return self.view == "games" and self.light_games and current_theme() == "dark"
+
+    @property
+    def pal(self):
+        """The colours to draw with now: the theme's, with the light ones over the light grid."""
+        key = (self.light_grid(), current_theme(), COLOR["ACCENT"])
+        if self._pal is None or self._pal[0] != key:
+            self._pal = (key, {**COLOR, **LIGHT_GRID} if key[0] else COLOR)
+        return self._pal[1]
+
     def set_theme(self, name=None, accent=None):
         """Switch colours (theme: dark / oled; accent: Theme.ACCENTS) and redraw everything with them."""
         apply_theme(name, accent)
@@ -430,7 +472,7 @@ class LauncherUi:
             special = FONT_WEIGHTS.get(weight)
             if special and special in self._families():
                 family, tk_weight = special, "normal"
-            self._fonts[key] = tkfont.Font(family=family, size=-key[0], weight=tk_weight)
+            self._fonts[key] = MeasuredFont(family=family, size=-key[0], weight=tk_weight)
         return self._fonts[key]
 
     def _families(self):
@@ -466,17 +508,20 @@ class LauncherUi:
         """Decoded picture (RGB, at most ART_MAX px), LRU-cached; None if unreadable."""
         if not path:
             return None
-        if path in self._art:
-            self._art.move_to_end(path)
-            return self._art[path]
-        art = load_picture(path)
-        self._art[path] = art
-        if len(self._art) > ART_CACHE:
-            self._art.popitem(last=False)
+        with self._art_lock:
+            if path in self._art:
+                self._art.move_to_end(path)
+                return self._art[path]
+        art = load_picture(path)                # outside the lock: the other thread may decode meanwhile
+        with self._art_lock:
+            self._art[path] = art
+            if len(self._art) > ART_CACHE:
+                self._art.popitem(last=False)
         return art
 
     def forget_art(self, path):
-        self._art.pop(path, None)
+        with self._art_lock:
+            self._art.pop(path, None)
         self._bg_samples.pop(path, None)
         for key in [k for k in self._backgrounds if k[0] == path]:
             del self._backgrounds[key]
@@ -702,16 +747,20 @@ class LauncherUi:
         else:
             self._apply_background()
 
-    def _shade(self, width, height):
-        """Brightness map: dim overall, darker at the edges and at the bottom."""
-        key = ("shade", width, height)
+    def _shade(self, width, height, light=False):
+        """Brightness map: dim overall, darker at the edges and at the bottom (light: only a touch)."""
+        key = ("shade", width, height, light)
         if key not in self._photos:           # stored as a PIL image
             w, h = 160, 90
             mask = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask).ellipse((-w * 0.25, -h * 0.35, w * 1.25, h * 1.2), fill=255)
             mask = mask.filter(ImageFilter.GaussianBlur(18))
-            vignette = mask.point(lambda v: int(84 + v * 0.46))            # 84..201: bright, like the first grid
-            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.4))
+            if light:
+                vignette = mask.point(lambda v: int(222 + v * 0.13))       # 222..255
+                bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.08))
+            else:
+                vignette = mask.point(lambda v: int(84 + v * 0.46))        # 84..201: bright, like the first grid
+                bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.4))
             shade = ImageChops.multiply(vignette, bottom).resize((width, height), Image.BILINEAR)
             self._photos[key] = Image.merge("RGB", (shade, shade, shade))
         return self._photos[key]
@@ -724,11 +773,22 @@ class LauncherUi:
         sample = self._bg_samples.get(path)
         if sample is None:
             m = self._margin()
-            sample = self._bg_samples[path] = background_sample(
-                self.load_art(path), self.width + 2 * m, self.height + 2 * m)
+            size = (self.width + 2 * m, self.height + 2 * m)
+            sample = self._bg_ready.pop((path, size), None) or background_sample(self.load_art(path), *size)
+            self._bg_samples[path] = sample
             if len(self._bg_samples) > 40:
                 self._bg_samples.popitem(last=False)
         return sample
+
+    def prepare_backdrop(self, path):
+        """Off the main thread: decode and blur a backdrop ahead, so showing it later costs little."""
+        m = self._margin()
+        size = (self.width + 2 * m, self.height + 2 * m)
+        if path in self._bg_samples or (path, size) in self._bg_ready:
+            return
+        self._bg_ready[(path, size)] = background_sample(self.load_art(path), *size)
+        if len(self._bg_ready) > 24:
+            self._bg_ready.clear()
 
     def _bg_zoom(self):
         """
@@ -744,7 +804,8 @@ class LauncherUi:
         m, zoom = self._margin(), self._bg_zoom()
         width = -(-(self.width + 2 * m) // zoom)
         height = -(-(self.height + 2 * m) // zoom)
-        small = ImageTk.PhotoImage(compose_background(sample, width, height, self._shade(width, height)))
+        light = self.light_grid()
+        small = ImageTk.PhotoImage(compose_background(sample, width, height, self._shade(width, height, light), light))
         if zoom == 1:
             return small
         big = tk.PhotoImage(master=self.root)
@@ -752,7 +813,7 @@ class LauncherUi:
         return big
 
     def _background_photo(self, path):
-        key = (path, self.width, self.height, self._margin())
+        key = (path, self.width, self.height, self._margin(), self.light_grid())
         if key in self._backgrounds:
             self._backgrounds.move_to_end(key)
             return self._backgrounds[key]
@@ -873,6 +934,7 @@ class LauncherUi:
         c.delete("header")
         if not self.width:
             return
+        P = self.pal
         right = self.width - self.px(MARGIN)
         y = self.px(52)
         # Status pill: connected controllers and the time
@@ -887,33 +949,33 @@ class LauncherUi:
                  for color, avatar, battery in self.batteries]
         w += sum(cell[3] for cell in cells)
         h = self.px(40)
-        c.create_image(right, y, image=self.glass(w, h, h // 2, "PILL"), anchor="e", tags="header")
+        c.create_image(right, y, image=self.glass(w, h, h // 2, P["PILL"], P["EDGE"]), anchor="e", tags="header")
         x = right - w + self.px(14)
         for color, avatar, (level, charging), cell_w in cells:
             mark = self.photo(("avatar", avatar, icon_h, color), lambda: Glyphs.avatar(avatar, icon_h, color))
             c.create_image(x + self.px(5), y, image=mark, anchor="w", tags="header")
-            gauge = self.photo(("battery", cell_h, level, COLOR["TEXT_DIM"], charging),
-                               lambda: Glyphs.battery(cell_h, level, COLOR["TEXT_DIM"], charging))
+            gauge = self.photo(("battery", cell_h, level, P["TEXT_DIM"], charging),
+                               lambda: Glyphs.battery(cell_h, level, P["TEXT_DIM"], charging))
             c.create_image(x + self.px(10) + icon_h, y, image=gauge, anchor="w", tags="header")
             x += cell_w
-        c.create_text(right - self.px(18), y, text=time.strftime("%H:%M"), anchor="e", fill=COLOR["TEXT"],
+        c.create_text(right - self.px(18), y, text=time.strftime("%H:%M"), anchor="e", fill=P["TEXT"],
                       font=clock_font, tags=("header", "clock"))
         x = right - self.px(18) - clock_w - self.px(18)
         c.create_text(x, y, text=str(self.pads), anchor="e", font=count_font, tags="header",
-                      fill=COLOR["TEXT"] if self.pads else COLOR["TEXT_FAINT"])
-        icon = self.photo(("pad", pad_h, COLOR["TEXT_DIM"]), lambda: Glyphs.gamepad(pad_h, COLOR["TEXT_DIM"]))
+                      fill=P["TEXT"] if self.pads else P["TEXT_FAINT"])
+        icon = self.photo(("pad", pad_h, P["TEXT_DIM"]), lambda: Glyphs.gamepad(pad_h, P["TEXT_DIM"]))
         c.create_image(x - count_w - self.px(8), y, image=icon, anchor="e", tags="header")
 
         # Shortcuts to the left of it
         x = right - w - self.px(22)
         for button, label in reversed(self.quick):
-            x -= self.rich(x, y, f"[{button}] {label}", 13, COLOR["TEXT_DIM"], anchor="e", tags="header") + self.px(22)
+            x -= self.rich(x, y, f"[{button}] {label}", 13, P["TEXT_DIM"], anchor="e", tags="header") + self.px(22)
 
         if self.view == "players":
             left = self.px(MARGIN)
-            c.create_text(left, self.px(58), text=t("title_players"), anchor="w", fill=COLOR["TEXT"],
+            c.create_text(left, self.px(58), text=t("title_players"), anchor="w", fill=P["TEXT"],
                           font=self.font(36, "semibold"), tags="header")
-            self.rich(left, self.px(102), t("subtitle_players"), 15, COLOR["TEXT_DIM"],
+            self.rich(left, self.px(102), t("subtitle_players"), 15, P["TEXT_DIM"],
                       bold=False, tags="header")
         self._raise_overlays()
 
@@ -938,6 +1000,7 @@ class LauncherUi:
         c.delete("footer")
         if not self.width:
             return
+        P = self.pal
         y = self.height - self.px(DOCK_Y)
         hints = []
         for buttons, label in self.hints:
@@ -954,17 +1017,17 @@ class LauncherUi:
                 if total <= room:
                     break
             h = self.px(48)
-            c.create_image(self.width // 2, y, image=self.glass(total, h, h // 2, "PILL"), tags="footer")
+            c.create_image(self.width // 2, y, image=self.glass(total, h, h // 2, P["PILL"], P["EDGE"]), tags="footer")
             x = dock_left = self.width // 2 - total // 2 + self.px(26)
             for markup, width in zip(hints, widths):
-                self.rich(x, y, markup, size, COLOR["TEXT"], tags="footer")
+                self.rich(x, y, markup, size, P["TEXT"], tags="footer")
                 x += width + gap
             dock_left -= self.px(26)
         brand = f"{self.emulator_name.upper()} LAUNCHER" + (f"  ·  {self.brand_note}" if self.brand_note else "")
         brand_font = self.font(11)
         if self.px(MARGIN) + brand_font.measure(brand) + self.px(20) < dock_left:    # only where the dock leaves room
             c.create_text(self.px(MARGIN), y, text=brand, anchor="w",
-                          fill=COLOR["TEXT_FAINT"], font=brand_font, tags="footer")
+                          fill=P["TEXT_FAINT"], font=brand_font, tags="footer")
         self._raise_overlays()
 
     # ========================================================================

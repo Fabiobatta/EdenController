@@ -50,6 +50,7 @@ THEMES = {
         "DRAWER": (13, 15, 22, 255),            # side menus
         "PILL": (18, 20, 28, 196),              # toasts, the hint dock, the clock (the backdrop shows through)
         "CHIP": (255, 255, 255, 22),
+        "GLASS": (10, 12, 18, 130),             # tabs and chips over the game grid's backdrop
         "ROW": (255, 255, 255, 13),             # menu rows, stat tiles
         "ROW_SELECTED": (142, 123, 255, 60),    # follows the accent (apply_theme)
         "TROPHY": (22, 19, 10, 246),
@@ -75,6 +76,24 @@ THEMES["oled"] = {
     "OVERLAY": (0, 0, 0, 205),
 }
 THEME_NAMES = ("dark", "oled")
+
+# The game grid of the "dark" theme is light and colourful: a pastel
+# backdrop, dark text, white glass (LauncherUi.pal)
+LIGHT_GRID = {
+    "TEXT": "#14161C",
+    "TEXT_DIM": "#3B4252",
+    "TEXT_FAINT": "#596173",
+    "OK": "#14803C",
+    "BAD": "#D42B1E",
+    "WARN": "#B45309",
+    "GOLD": "#E0A000",
+    "LINE_FAINT": "#C6CBD5",
+    "EDGE": (255, 255, 255, 170),
+    "EDGE_STRONG": (255, 255, 255, 230),
+    "PILL": (255, 255, 255, 205),
+    "CHIP": (255, 255, 255, 150),
+    "GLASS": (255, 255, 255, 170),
+}
 
 COLOR = dict(THEMES["dark"])
 _current = "dark"

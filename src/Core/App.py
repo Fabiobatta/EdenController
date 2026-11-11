@@ -193,6 +193,7 @@ class LauncherApp:
             settings.get(LAUNCHER_SECTION, "backup_dir", "saves_backup"))))
         self.ui.motion = settings.get_bool(LAUNCHER_SECTION, "background_motion", True)
         self.ui.dynamic_colors = settings.get_bool(LAUNCHER_SECTION, "dynamic_colors", True)
+        self.ui.light_games = settings.get(LAUNCHER_SECTION, "grid_style", "light").lower() != "dark"
         self.ui.animations = settings.get_bool(LAUNCHER_SECTION, "animations", True)
         self.ui.splash_ms = SPLASH_MS
         self.idle_dim_s = max(0, settings.get_int(LAUNCHER_SECTION, "idle_dim_minutes", 5)) * 60
@@ -2055,6 +2056,10 @@ class LauncherApp:
             self.ui.dynamic_colors = value == "true"
             self.ui.grid.reset()
 
+        def grid_style(value):
+            self.ui.light_games = value != "dark"
+            self.ui.grid.reset()
+
         def sound(_value=None):
             self.sounds.shutdown()
             self.sounds = Sounds(
@@ -2090,6 +2095,7 @@ class LauncherApp:
             {"label": t("settings_look"), "kind": "header"},
             row(launcher, "language", ("auto", "it", "en"), "auto", language),
             row(launcher, "theme", THEME_NAMES, "dark", lambda value: self.ui.set_theme(name=value)),
+            row(launcher, "grid_style", ("light", "dark"), "light", grid_style),
             row(launcher, "accent", ACCENT_NAMES, "violet", lambda value: self.ui.set_theme(accent=value)),
             row(launcher, "background_motion", on_off, "true", motion),
             row(launcher, "animations", on_off, "true",

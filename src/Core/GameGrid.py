@@ -27,6 +27,7 @@ Tiles are composed once per game (a master at the focused size) and cached.
 """
 
 import math
+import threading
 import time
 from collections import OrderedDict
 
@@ -34,7 +35,27 @@ from PIL import Image, ImageDraw, ImageFilter, ImageTk
 
 from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
-from .Theme import COLOR
+from .Theme import COLOR as THEME
+
+
+class _Palette:
+    """
+    COLOR for the grid: the theme's colours, or the light ones while the
+    grid is shown light (LauncherUi.pal). Set to the UI by GameGrid().
+    """
+    ui = None
+
+    def __getitem__(self, key):
+        return (self.ui.pal if self.ui is not None else THEME)[key]
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+
+COLOR = _Palette()
 
 TILE = 126                      # 720p baseline: tile width
 ASPECT = 1.5                    # tile height / width: a Switch cover (2:3)
@@ -58,6 +79,7 @@ SIZE_STEPS = 3                  # sizes a tile passes through between normal and
 PULSE = (0.5, 0.6, 0.72, 0.84, 0.94, 1.0)
 PULSE_MS = 120
 PRELOAD_MS = 40
+PREFETCH_AHEAD = 2               # rows around the selection prepared by the prefetch thread
 SHINE_DELAY_MS = 420            # the selection rests this long before the light sweeps over it
 SHINE_MS = 620
 SHINE_FRAMES = 18
@@ -69,7 +91,6 @@ BURST_MS = 560                  # the star bursting when a game becomes a favour
 BURST_SPARKS = 8
 COUNT_MS = 420                  # the play time counting up when a game is selected
 SHINE_ALPHA = 105               # brightest point of the sweep (0-255)
-TAB_FILL = (10, 12, 18, 130)    # the tabs not shown: dark glass, legible on a bright backdrop
 SQUARE_MIN = 0.9                # width / height from which a tile counts as square
 
 BADGE = {                       # fill, text
@@ -129,9 +150,12 @@ def badge_state(game_players, joined):
 
 
 def _placeholder_color(title):
+    """A bright, saturated colour of its own for a game without art."""
+    import colorsys
     import hashlib
     digest = hashlib.md5(title.encode("utf-8")).digest()
-    return tuple(40 + b % 110 for b in digest[:3])
+    r, g, b = colorsys.hsv_to_rgb(digest[0] / 255, 0.5 + digest[1] / 255 * 0.2, 0.72 + digest[2] / 255 * 0.14)
+    return int(r * 255), int(g * 255), int(b * 255)
 
 
 def _wrap(draw, text, font, width):
@@ -229,6 +253,7 @@ class Layout:
 class GameGrid:
     def __init__(self, ui):
         self.ui = ui
+        _Palette.ui = ui
         self.games = []
         self.index = 0
         self.players = 0
@@ -257,9 +282,14 @@ class GameGrid:
         self._shine_job = None
         self._shone = None              # the game the light last swept over
         self._bumped = 0.0              # when the last knock at an edge was
+        self._tabs_drawn = None         # what the tabs on screen show (_draw_tabs)
         self.tab_slide = 0              # -1 / 1: the next draw slides the grid in from that side
         self._counted = None            # the game whose play time last counted up
         self._chip_text = None          # canvas text of the last chip drawn
+        self._ready = {}                # (tile key, size) -> master tile composed by the prefetch thread
+        self._wanted = []               # games the prefetch thread should prepare, nearest first
+        self._wake = threading.Condition()
+        threading.Thread(target=self._prefetch_loop, name="grid-prefetch", daemon=True).start()
         self._pulse_tick()
 
     # ------------------------------------------------------------------
@@ -287,6 +317,7 @@ class GameGrid:
     def reset(self):
         """Screen size or colours changed: every cached picture is stale."""
         self._masters.clear()
+        self._ready.clear()
         self._photos.clear()
         self._heroes.clear()
         self._shown = None
@@ -344,7 +375,7 @@ class GameGrid:
             # blurred, darkened stretch of itself - as Playnite shows them
             stretch = Glyphs.cover_crop(art, 24, max(1, round(24 * height / width))).filter(ImageFilter.GaussianBlur(2))
             tile = Image.blend(stretch.resize((width, height), Image.BILINEAR).convert("RGB"),
-                               Image.new("RGB", (width, height), (0, 0, 0)), 0.35)
+                               Image.new("RGB", (width, height), (255, 255, 255)), 0.16)
             icon = Glyphs.cover_crop(art, width, width).convert("RGB")
             tile.paste(icon, (0, (height - width) // 2))
         elif art is not None:
@@ -424,7 +455,8 @@ class GameGrid:
         master = self._masters.get(key)
         if master is None:
             size = self._grown()
-            master = self._masters[key] = self._compose(game, size, tall(size), key[2])
+            master = self._ready.pop((key, size), None) or self._compose(game, size, tall(size), key[2])
+            self._masters[key] = master
             if len(self._masters) > MASTER_CACHE:
                 self._masters.popitem(last=False)
         else:
@@ -491,12 +523,19 @@ class GameGrid:
     def _frame(self, width, height, color, level):
         ui = self.ui
 
+        light = ui.light_grid()
+
         def make():
             glows, rim = self._ring_parts(width, height)
             image = Image.new("RGBA", rim.size, Glyphs._rgb(color) + (0,))
             image.putalpha(glows[level])
+            if light:
+                # white would vanish on the light backdrop: the rim in the game's colour, deeper
+                tinted = Image.new("RGBA", rim.size, Glyphs._shade(Glyphs._rgb(color), 0.82) + (0,))
+                tinted.putalpha(rim.getchannel("A"))
+                rim = tinted
             return Image.alpha_composite(image, rim)
-        return ui.photo(("ring", width, height, color, level), make)
+        return ui.photo(("ring", width, height, color, level, light), make)
 
     # ------------------------------------------------------------------
     # Geometry
@@ -577,6 +616,7 @@ class GameGrid:
         self._draw_header(selected, count)
         self._draw_scrollbar(metrics, count)
         ui.set_backdrop(selected, BACKGROUND_DELAY_MS)
+        self._want_nearby()
         self._schedule_shine(selected)
         if self._preload_job is None:
             self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
@@ -781,8 +821,8 @@ class GameGrid:
                 for size in sizes:                      # the grow animation's steps
                     self._cover(game, size)
                 made += 1
-            elif abs(i - self.index) <= 1 and ("ring", sizes[-1], tall(sizes[-1]), self.accent(game), 0) \
-                    not in ui._photos:
+            elif abs(i - self.index) <= 1 and ("ring", sizes[-1], tall(sizes[-1]), self.accent(game), 0,
+                                               ui.light_grid()) not in ui._photos:
                 for level in range(len(PULSE)):         # the frame in this game's colour
                     self._frame(sizes[-1], tall(sizes[-1]), self.accent(game), level)
                 made += 1
@@ -876,6 +916,45 @@ class GameGrid:
                 c.itemconfigure(item, image=shine_frame(ui, size, n, height=tall(size)))
         ui.animator.run("shine", SHINE_MS, step, lambda: c.delete(item))
 
+    # ------------------------------------------------------------------
+    # Prefetch: the slow picture work for the games near the selection,
+    # done on a thread so that moving never waits for it (Pillow releases
+    # the GIL while it decodes, resizes and blurs)
+    # ------------------------------------------------------------------
+    def _want_nearby(self):
+        if not self.games:
+            return
+        span = self.columns * PREFETCH_AHEAD
+        order = sorted(range(max(0, self.index - span), min(len(self.games), self.index + span + 1)),
+                       key=lambda i: abs(i - self.index))
+        with self._wake:
+            self._wanted = [self.games[i] for i in order]
+            self._wake.notify()
+
+    def _prefetch_loop(self):
+        from .Ui import art_of
+        while True:
+            with self._wake:
+                while not self._wanted:
+                    self._wake.wait()
+                game = self._wanted.pop(0)
+            try:
+                ui = self.ui
+                if not ui.width:
+                    continue
+                self.accent(game)                       # decodes its art, picks its colour
+                path = art_of(game)
+                if path:
+                    ui.prepare_backdrop(path)
+                size = self._grown()
+                key = self._key(game, "square")
+                if key not in self._masters and (key, size) not in self._ready:
+                    self._ready[(key, size)] = self._compose(game, size, tall(size), key[2])
+                    if len(self._ready) > MASTER_CACHE:
+                        self._ready.clear()
+            except Exception:
+                pass                                    # the main thread will make it, and log what fails
+
     def _pulse_tick(self):
         """The glow of the focus frame breathes: six cached pictures, there and back."""
         ui = self.ui
@@ -898,7 +977,7 @@ class GameGrid:
         c.delete("games-header")
         tags = ("games", "games-header")
         left = ui.px(SIDE)
-        self._draw_tabs(left, ui.px(52), tags)
+        self._draw_tabs(left, ui.px(52))
 
         x, y = left, ui.px(96)
         if selected.get("favorite"):
@@ -950,9 +1029,18 @@ class GameGrid:
         c.create_text(ui.width - ui.px(SIDE), y, text=caption, anchor="e", fill=COLOR["TEXT_DIM"],
                       font=ui.font(12), tags=tags)
 
-    def _draw_tabs(self, x, y, tags):
-        """The tabs over the grid: [LB] All 42 · Favourites 5 · ... [RB], the current one lit."""
+    def _draw_tabs(self, x, y):
+        """
+        The tabs over the grid: [LB] All 42 · Favourites 5 · ... [RB], the
+        current one lit. Drawn again only when they change, not at every move.
+        """
         ui, c = self.ui, self.ui.canvas
+        drawn = (tuple(self.tabs), self.tab, x, y, ui.width, ui.light_grid(), COLOR["ACCENT"])
+        if drawn == self._tabs_drawn and c.find_withtag("games-tabs"):
+            return
+        c.delete("games-tabs")
+        self._tabs_drawn = drawn
+        tags = ("games", "games-tabs")
         if len(self.tabs) < 2:
             return
         h = ui.px(34)
@@ -960,18 +1048,22 @@ class GameGrid:
         c.create_image(x, y, image=glyph, anchor="w", tags=tags)
         x += glyph.width() + ui.px(10)
         font, count_font = ui.font(14), ui.font(12, False)
+        light = ui.light_grid()
+        # The current tab: tinted glass on the dark grid, solid accent with white text on the light one
+        lit = Glyphs._rgb(COLOR["ACCENT"]) + (240,) if light else COLOR["ROW_SELECTED"]
+        lit_text = "#FFFFFF" if light else COLOR["TEXT"]
         for key, label, count in self.tabs:
             current = key == self.tab
             number = str(count)
             w = font.measure(label) + ui.px(8) + count_font.measure(number) + ui.px(32)
-            pill = ui.photo(("tab", w, h, current, COLOR["ACCENT"]), lambda: Glyphs.panel(
-                w, h, h // 2, COLOR["ROW_SELECTED"] if current else TAB_FILL,
+            pill = ui.photo(("tab", w, h, current, lit, COLOR["GLASS"]), lambda: Glyphs.panel(
+                w, h, h // 2, lit if current else COLOR["GLASS"],
                 outline=(COLOR["ACCENT"] if current else COLOR["EDGE"], max(1, ui.px(1.5 if current else 1)))))
             c.create_image(x, y, image=pill, anchor="w", tags=tags)
             c.create_text(x + ui.px(16), y, text=label, anchor="w", font=font, tags=tags,
-                          fill=COLOR["TEXT"] if current else COLOR["TEXT_DIM"])
+                          fill=lit_text if current else COLOR["TEXT_DIM"])
             c.create_text(x + w - ui.px(16), y, text=number, anchor="e", font=count_font, tags=tags,
-                          fill=COLOR["TEXT"] if current else COLOR["TEXT_DIM"])
+                          fill=lit_text if current else COLOR["TEXT_DIM"])
             x += w + ui.px(8)
         glyph = ui.photo(("glyph", "rb", int(ui.px(14) * 1.5)), lambda: Glyphs.button("rb", int(ui.px(14) * 1.5)))
         c.create_image(x + ui.px(2), y, image=glyph, anchor="w", tags=tags)
@@ -1001,8 +1093,8 @@ class GameGrid:
         step = ui.px(14)                        # widths in steps: most chips reuse a cached pill
         w, h = -(-(font.measure(text) + icon_w + ui.px(26)) // step) * step, ui.px(36 if strong else 30)
         edge = color if strong else COLOR["EDGE"]
-        pill = ui.photo(("chip", w, h, edge), lambda: Glyphs.panel(
-            w, h, h // 2, TAB_FILL, outline=(edge, max(1, ui.px(1.5 if strong else 1)))))
+        pill = ui.photo(("chip", w, h, edge, COLOR["GLASS"]), lambda: Glyphs.panel(
+            w, h, h // 2, COLOR["GLASS"], outline=(edge, max(1, ui.px(1.5 if strong else 1)))))
         c.create_image(x, y, image=pill, anchor="w", tags=tags)
         if icon:
             c.create_image(x + ui.px(13), y, image=icon, anchor="w", tags=tags)
@@ -1118,7 +1210,7 @@ class GameGrid:
         ui, c = self.ui, self.ui.canvas
         cx, cy = ui.width // 2, ui.height // 2
         if not self.loading:
-            self._draw_tabs(ui.px(SIDE), ui.px(52), ("games", "games-header"))
+            self._draw_tabs(ui.px(SIDE), ui.px(52))
         if self.loading:
             c.create_text(cx, cy, fill=COLOR["TEXT_DIM"], font=ui.font(22, "semibold"),
                           text=t("games_loading"), tags=("games", "games-empty"))

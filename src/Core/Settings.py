@@ -62,6 +62,8 @@ background_motion = true
 dynamic_colors = true
 ; Colours: dark, or oled (pure black, no background picture)
 theme = dark
+; The game list: light (bright and colourful) or dark
+grid_style = light
 ; Accent colour: violet, azure, mint, amber or rose
 accent = violet
 ; Screen fades, cards popping in, the "let's go" screen before a game
@@ -129,6 +131,8 @@ background_motion = true
 dynamic_colors = true
 ; Colori: dark (scuro) oppure oled (nero puro, senza immagine di sfondo)
 theme = dark
+; La lista giochi: light (chiara e colorata) oppure dark (scura)
+grid_style = light
 ; Colore d'accento: violet (viola), azure (azzurro), mint (menta), amber (ambra) o rose (rosa)
 accent = violet
 ; Dissolvenze, schede che entrano, schermata "si parte" prima del gioco

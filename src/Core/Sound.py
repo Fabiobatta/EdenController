@@ -33,6 +33,7 @@ import threading
 import time
 import wave
 from array import array
+from operator import add
 
 from .Log import log
 
@@ -219,11 +220,14 @@ class Mixer:
             mixed = [0] * count
             for voice in voices:
                 samples, position = voice
-                for i, value in enumerate(samples[position:position + count]):
-                    mixed[i] += value
+                part = samples[position:position + count].tolist()
+                part += [0] * (count - len(part))
+                mixed = list(map(add, mixed, part))     # C loops: the UI thread keeps the GIL
                 voice[1] += count
             self._voices = [v for v in voices if v[1] < len(v[0])]
-        return array("h", [32767 if v > 32767 else -32768 if v < -32768 else v for v in mixed]).tobytes()
+        if max(mixed) > 32767 or min(mixed) < -32768:
+            mixed = [32767 if v > 32767 else -32768 if v < -32768 else v for v in mixed]
+        return array("h", mixed).tobytes()
 
 
 def load_pcm(path):

@@ -1216,16 +1216,31 @@ class LauncherApp:
         try:
             games = self.emu.list_games()
             # [Players] in the settings file corrects the eShop player counts
-            overrides = self.emu.settings.sections.get("players", {})
             for game in games:
                 self.art.resolve(game)
-                value = overrides.get((game.get("title_id") or "").lower()) or overrides.get(game["title"].lower())
-                if value and value.strip().isdigit():
-                    game["players"] = int(value)
+                game["players_db"] = game.get("players")
+                self._apply_players_override(game)
         except Exception as e:
             log("EXCEPTION", "Game scan failed", e)
             games = []
         self._scan_result = games               # picked up by update_loop
+
+    @staticmethod
+    def players_key(game):
+        """The [Players] key of a game: its title ID, else its title."""
+        return (game.get("title_id") or game["title"]).replace("=", " ").replace(";", " ").strip()
+
+    def players_override(self, game):
+        """The player count set for `game` in [Players] (the game menu or by hand), or None."""
+        overrides = self.emu.settings.sections.get("players", {})
+        value = overrides.get(self.players_key(game).lower()) or overrides.get(game["title"].lower())
+        return int(value) if value and value.strip().isdigit() and int(value) > 0 else None
+
+    def _apply_players_override(self, game):
+        """[Players] corrects or fills in the eShop player count (Switch 2 games often have none)."""
+        value = self.players_override(game)
+        if value:
+            game["players"] = value
 
     def rescan_games(self):
         """The game folders changed: list the games again in the background."""
@@ -1243,12 +1258,9 @@ class LauncherApp:
         """
         try:
             games = Library.from_snapshot(self.emu.settings.load_cache("gamelist"))
-            overrides = self.emu.settings.sections.get("players", {})
             for game in games:
                 self.art.resolve(game)
-                value = overrides.get((game.get("title_id") or "").lower()) or overrides.get(game["title"].lower())
-                if value and value.strip().isdigit():
-                    game["players"] = int(value)
+                self._apply_players_override(game)
         except Exception as e:
             log("EXCEPTION", "Could not read the saved game list", e)
             games = []
@@ -2352,6 +2364,23 @@ class LauncherApp:
             automatic = self.emu.emulator_for(game).display_name
             rows.append({"label": t("gm_emulator"), "change": emulator,
                          "value": chosen or t("gm_auto", what=automatic)})
+
+        # Local players: the eShop count, or one set here (Switch 2 games often have none)
+        counts = (None, 1, 2, 3, 4, 6, 8)
+        own = self.players_override(game)
+        own = own if own in counts else None
+        known = game.get("players_db")
+
+        def players(delta):
+            picked = counts[(counts.index(own) + delta) % len(counts)]
+            if game["title"].lower() != self.players_key(game).lower() and \
+                    game["title"].lower() in settings.sections.get("players", {}):
+                settings.set("Players", game["title"], None)        # one written by hand under the title
+            settings.set("Players", self.players_key(game), picked)
+            game["players"] = picked or known
+            self.ui.grid.forget(game)
+        rows.append({"label": t("gm_players"), "change": players,
+                     "value": str(own) if own else t("gm_auto", what=players_label(known) if known else "?")})
 
         mode = self._state_map("split").get(key, "auto")
         mode = mode if mode in SPLIT_MODES else "auto"

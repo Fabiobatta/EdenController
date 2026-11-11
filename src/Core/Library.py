@@ -20,7 +20,7 @@ TABS = ("all", "nx2", "favorites", "recent", "players")
 CONTINUE_MAX = 5                # games in the "Continue playing" row
 CONTINUE_DAYS = 30              # played this recently to be there
 CONTINUE_MIN_GAMES = 9          # a shorter list gets no separate row
-SNAPSHOT_KEYS = ("title", "path", "title_id", "image", "players", "icon_url", "banner_url", "nx2",
+SNAPSHOT_KEYS = ("title", "path", "title_id", "image", "players", "players_db", "icon_url", "banner_url", "nx2",
                  "custom_input")
 SNAPSHOT_VERSION = 1
 

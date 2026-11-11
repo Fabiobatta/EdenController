@@ -2142,5 +2142,24 @@ class SiblingForkTests(unittest.TestCase):
             self.assertIs(emu.emulator_for({"title": "Switch 1 game"}), emu)
 
 
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class PlayersOverrideTests(unittest.TestCase):
+    """The local player count set from the game menu ([Players])."""
+
+    def test_override_by_title_id_or_title(self):
+        from Core.App import LauncherApp
+        from Core.Settings import Settings
+        app = LauncherApp.__new__(LauncherApp)
+        app.emu = types.SimpleNamespace(settings=Settings({"players": {"0100abcd00010000": "4", "zelda oot": "1"}}))
+        kirby = {"title": "Kirby Air Riders", "title_id": "0100ABCD00010000", "players": None}
+        zelda = {"title": "Zelda OoT", "title_id": None, "players": None}
+        other = {"title": "Other", "title_id": "0100000000020000", "players": 2}
+        for game in (kirby, zelda, other):
+            app._apply_players_override(game)
+        self.assertEqual((kirby["players"], zelda["players"], other["players"]), (4, 1, 2))
+        self.assertEqual(LauncherApp.players_key(kirby), "0100ABCD00010000")
+        self.assertEqual(LauncherApp.players_key({"title": "A=B", "title_id": None}), "A B")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -24,7 +24,7 @@ Besides the players, the launcher sets three Eden options, each of which can be 
 ## Features
 
 - **Xbox button layout**: the A button (bottom) is Switch A, so you accelerate in Mario Kart with the button labelled A. A Nintendo (positional) layout and your own Eden profiles are available per player.
-- **Game grid**: every game in rows and columns, each with a big local co-op badge, the selected one framed with a glow in the colour of its art; title and facts on top, the game's blurred art behind. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** switch between tabs (All · Favourites · Recent · For N players · Switch 2), **LT / RT** jump to the next letter.
+- **Game grid**: every game as a cover in rows and columns, each with a big local co-op badge, the selected one framed with a glow in the colour of its art; title and facts on top, the game's blurred art behind. Updates and DLC are hidden (title IDs are read from the files). **LB / RB** switch between tabs (All · Favourites · Recent · For N players · Switch 2; favourites stay in their own tab), **LT / RT** jump to the next letter.
 - **Continue playing**: the games of the last 30 days sit in their own row at the top of the grid.
 - **Player icons**: each player picks an icon (star, heart, leaf, bolt, mushroom…) with the **D-pad** on the player screen; it shows on their card, on the split-screen map and on the tile they are browsing.
 - **Controller batteries**: next to the clock and on each player's card, for the controllers that report one (wired and virtual pads usually do not).

@@ -36,12 +36,13 @@ from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
 from .Theme import COLOR
 
-TILE = 128                      # 720p baseline, square
-GROW = 1.12                     # the focused tile
+TILE = 144                      # 720p baseline: tile width
+ASPECT = 1.5                    # tile height / width: a Switch cover (2:3)
+GROW = 1.08                     # the focused tile
 GAP = 18
-TOP = 182                       # first row
+TOP = 164                       # first row
 SECTION = 26                    # extra space under the "Continue playing" row, for its caption
-BOTTOM = 86                     # space kept for the hint dock
+BOTTOM = 80                     # space kept for the hint dock
 SIDE = 64
 RADIUS = 14
 BADGE_H = 0.235                 # players badge height, of the tile
@@ -77,37 +78,46 @@ BADGE = {                       # fill, text
 }
 
 
-def shine_image(size, radius, position, alpha=SHINE_ALPHA):
+def tall(width):
+    """Height of a tile `width` px wide (even)."""
+    return int(width * ASPECT) // 2 * 2
+
+
+def shine_image(size, radius, position, alpha=SHINE_ALPHA, height=None):
     """
-    A soft diagonal band of light over a rounded square `size` px wide;
-    position 0-1 sweeps it from the top-left corner off the bottom-right one.
+    A soft diagonal band of light over a rounded rectangle `size` px wide
+    (`height` tall, default square); position 0-1 sweeps it from the
+    top-left corner off the bottom-right one.
     """
+    height = height or size
     S = 2
-    W = size * S
-    band = Image.new("L", (W, W), 0)
+    W, H = size * S, height * S
+    band = Image.new("L", (W, H), 0)
     d = ImageDraw.Draw(band)
-    centre = (-0.15 + 1.3 * position) * W * 2       # along x + y
+    centre = (-0.15 + 1.3 * position) * (W + H)     # along x + y
     half = W * 0.2
-    d.polygon([(centre - half, 0), (centre + half, 0), (centre + half - W, W), (centre - half - W, W)],
+    d.polygon([(centre - half, 0), (centre + half, 0), (centre + half - H, H), (centre - half - H, H)],
               fill=alpha)
     thin = W * 0.04                                 # a brighter thin line inside the band
     d.polygon([(centre + half * 0.55 - thin, 0), (centre + half * 0.55 + thin, 0),
-               (centre + half * 0.55 + thin - W, W), (centre + half * 0.55 - thin - W, W)],
+               (centre + half * 0.55 + thin - H, H), (centre + half * 0.55 - thin - H, H)],
               fill=min(255, int(alpha * 1.6)))
-    band = band.filter(ImageFilter.GaussianBlur(W * 0.035)).resize((size, size), Image.BILINEAR)
-    mask = Image.new("L", (W, W), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, W - 1), radius=radius * S, fill=255)
-    mask = mask.resize((size, size), Image.LANCZOS)
+    band = band.filter(ImageFilter.GaussianBlur(W * 0.035)).resize((size, height), Image.BILINEAR)
+    mask = Image.new("L", (W, H), 0)
+    ImageDraw.Draw(mask).rounded_rectangle((0, 0, W - 1, H - 1), radius=radius * S, fill=255)
+    mask = mask.resize((size, height), Image.LANCZOS)
     from PIL import ImageChops
-    image = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    image = Image.new("RGBA", (size, height), (255, 255, 255, 0))
     image.putalpha(ImageChops.multiply(band, mask))
     return image
 
 
-def shine_frame(ui, size, n, radius=None):
+def shine_frame(ui, size, n, radius=None, height=None):
     """Frame n of the sweep over a tile `size` px wide (cached PhotoImage, made when first needed)."""
-    radius = radius if radius is not None else max(2, int(ui.px(RADIUS) * size / ui.px(TILE)))
-    return ui.photo(("shine", size, radius, n), lambda: shine_image(size, radius, n / (SHINE_FRAMES - 1)))
+    height = height or size
+    radius = radius if radius is not None else max(2, int(ui.px(RADIUS) * min(size, height) / ui.px(TILE)))
+    return ui.photo(("shine", size, height, radius, n),
+                    lambda: shine_image(size, radius, n / (SHINE_FRAMES - 1), height=height))
 
 
 def badge_state(game_players, joined):
@@ -137,10 +147,11 @@ def _wrap(draw, text, font, width):
     return lines
 
 
-def grid_shape(width, height, tile, gap, top, bottom, side):
-    """(columns, rows) of tiles that fit the screen."""
+def grid_shape(width, height, tile, gap, top, bottom, side, tile_h=None):
+    """(columns, rows) of tiles `tile` wide (`tile_h` tall, default square) that fit the screen."""
+    tile_h = tile_h or tile
     columns = max(1, (width - 2 * side + gap) // (tile + gap))
-    rows = max(1, (height - top - bottom + gap) // (tile + gap))
+    rows = max(1, (height - top - bottom + gap) // (tile_h + gap))
     return columns, rows
 
 
@@ -327,7 +338,15 @@ class GameGrid:
         else:
             order = ("cover", "image", "background")    # the user's own picture wins when it fits
         art = next((a for a in (ui.load_art(game.get(k)) for k in order) if a is not None), None)
-        if art is not None:
+        if art is not None and not square and art.width / art.height >= SQUARE_MIN:
+            # A square icon (or a banner) in a cover-shaped tile: whole, over a
+            # blurred, darkened stretch of itself - as Playnite shows them
+            stretch = Glyphs.cover_crop(art, 24, max(1, round(24 * height / width))).filter(ImageFilter.GaussianBlur(2))
+            tile = Image.blend(stretch.resize((width, height), Image.BILINEAR).convert("RGB"),
+                               Image.new("RGB", (width, height), (0, 0, 0)), 0.35)
+            icon = Glyphs.cover_crop(art, width, width).convert("RGB")
+            tile.paste(icon, (0, (height - width) // 2))
+        elif art is not None:
             tile = Glyphs.cover_crop(art, width, height)
         else:
             base = _placeholder_color(game["title"])
@@ -338,7 +357,7 @@ class GameGrid:
                                    light.point(lambda v: int(v * 0.55)))
             draw = ImageDraw.Draw(tile)
             font = Glyphs.font(max(10, width // 9))
-            lines = _wrap(draw, game["title"], font, width - width // 5)[:4]
+            lines = _wrap(draw, game["title"], font, width - width // 5)[:4 if square else 6]
             line_h = font.size * 1.22
             y = (height - line_h * len(lines)) / 2
             for line in lines:
@@ -404,19 +423,20 @@ class GameGrid:
         master = self._masters.get(key)
         if master is None:
             size = self._grown()
-            master = self._masters[key] = self._compose(game, size, size, key[2])
+            master = self._masters[key] = self._compose(game, size, tall(size), key[2])
             if len(self._masters) > MASTER_CACHE:
                 self._masters.popitem(last=False)
         else:
             self._masters.move_to_end(key)
         return key, master
 
-    def _square(self, game, px):
-        """PhotoImage of a game's square tile, `px` wide."""
+    def _cover(self, game, px):
+        """PhotoImage of a game's tile in the grid, `px` wide."""
         key, master = self._master(game)
         photo = self._photos.get((key, px))
         if photo is None:
-            image = master if px == master.width else master.resize((px, px), Image.BILINEAR, reducing_gap=2.0)
+            image = master if px == master.width else master.resize((px, tall(px)), Image.BILINEAR,
+                                                                    reducing_gap=2.0)
             photo = self._photos[(key, px)] = ImageTk.PhotoImage(image)
             if len(self._photos) > PHOTO_CACHE:
                 self._photos.popitem(last=False)
@@ -427,8 +447,8 @@ class GameGrid:
     def tile(self, game, width, height, selected=False):
         """PhotoImage of a game's tile (cached), also used by the roulette and the menus."""
         width, height = int(width), int(height)
-        if width == height:
-            return self._square(game, width)
+        if height == tall(width):
+            return self._cover(game, width)
         key = (self._key(game, (width, height)), width)
         photo = self._photos.get(key)
         if photo is None:
@@ -484,26 +504,27 @@ class GameGrid:
         ui = self.ui
         tile, gap = ui.px(TILE), ui.px(GAP)
         section = ui.px(SECTION) if self.pinned else 0
+        tile_h = tall(tile)
         self.columns, self.rows = grid_shape(ui.width, ui.height - section, tile, gap, ui.px(TOP),
-                                             ui.px(BOTTOM), ui.px(SIDE))
+                                             ui.px(BOTTOM), ui.px(SIDE), tile_h)
         self.layout = Layout(len(self.games), self.columns, self.pinned)
         grid_w = self.columns * tile + (self.columns - 1) * gap
-        return tile, gap, (ui.width - grid_w) // 2, ui.px(TOP)
+        return tile, gap, (ui.width - grid_w) // 2, ui.px(TOP), tile_h
 
     def _row_y(self, row, metrics, first_row=None):
         """Top of `row` on screen with `first_row` at the top (default: the current one)."""
-        tile, gap, _, top = metrics
+        _, gap, _, top, tile_h = metrics
         first_row = self.first_row if first_row is None else first_row
-        y = top + (row - first_row) * (tile + gap)
+        y = top + (row - first_row) * (tile_h + gap)
         if self.layout.pinned and first_row == 0 and row >= 1:
             y += self.ui.px(SECTION)            # room for the "All games" caption
         return y
 
     def _center(self, index, metrics, first_row=None):
         """Centre of the tile at `index` with `first_row` (default: the current one) at the top."""
-        tile, gap, left, _ = metrics
+        tile, gap, left, _, tile_h = metrics
         row, column = self.layout.cell(index)
-        return left + column * (tile + gap) + tile / 2, self._row_y(row, metrics, first_row) + tile / 2
+        return left + column * (tile + gap) + tile / 2, self._row_y(row, metrics, first_row) + tile_h / 2
 
     def _visible(self, first_row):
         rows = range(first_row, first_row + self.rows)
@@ -525,6 +546,7 @@ class GameGrid:
             self._clear()
             self._draw_placeholder()
             return
+        ui.canvas.delete("games-empty")
         metrics = self._metrics()
         count = len(self.games)
         self.index = max(0, min(self.index, count - 1))
@@ -567,17 +589,17 @@ class GameGrid:
         for i in self._visible(self.first_row):
             x, y = self._center(i, metrics)
             size = sizes[-1] if i == self.index else sizes[0]
-            self._items[i] = c.create_image(x, y, image=self._square(self.games[i], size),
+            self._items[i] = c.create_image(x, y, image=self._cover(self.games[i], size),
                                             tags=("games", "tiles", f"tile{i}"))
         if self.layout.pinned and self.first_row == 0:
             # The two sections of the "All" tab, captioned
             ui, left = self.ui, metrics[2]
-            tile, gap, _, top = metrics
+            tile, gap, _, top, tile_h = metrics
             font = ui.font(11)
             if self.columns - self.layout.pinned >= 2:
                 # beside the row, in the room its few games leave free
                 x = left + self.layout.pinned * (tile + gap) + gap
-                y = top + tile // 2
+                y = top + tile_h // 2
                 c.create_rectangle(x, y - ui.px(22), x + ui.px(4), y + ui.px(22), fill=COLOR["ACCENT"], width=0,
                                    tags=("games", "tiles"))
                 c.create_text(x + ui.px(18), y - ui.px(10), text=t("games_continue"), anchor="w",
@@ -605,8 +627,8 @@ class GameGrid:
         c.tag_raise(self._items[new])
         self._place_ring(metrics, glide_from=self._center(old, metrics))
         if not ui.animations:
-            c.itemconfigure(self._items[old], image=self._square(games[old], sizes[0]))
-            c.itemconfigure(self._items[new], image=self._square(games[new], sizes[-1]))
+            c.itemconfigure(self._items[old], image=self._cover(games[old], sizes[0]))
+            c.itemconfigure(self._items[new], image=self._cover(games[new], sizes[-1]))
             return
         last = [None]
 
@@ -615,8 +637,8 @@ class GameGrid:
             if n == last[0]:
                 return
             last[0] = n
-            c.itemconfigure(self._items[old], image=self._square(games[old], sizes[SIZE_STEPS - n]))
-            c.itemconfigure(self._items[new], image=self._square(games[new], sizes[n]))
+            c.itemconfigure(self._items[old], image=self._cover(games[old], sizes[SIZE_STEPS - n]))
+            c.itemconfigure(self._items[new], image=self._cover(games[new], sizes[n]))
         ui.animator.run("grid-size", MOVE_MS, step)
 
     def _slide(self, metrics, distance):
@@ -694,7 +716,7 @@ class GameGrid:
         d = max(14, int(size * 0.2))
         margin = max(3, int(size * 0.06))
         x, y = c.coords(self._items[self.index])
-        sx, sy = x + size / 2 - margin - d / 2, y - size / 2 + margin + d / 2
+        sx, sy = x + size / 2 - margin - d / 2, y - tall(size) / 2 + margin + d / 2
         c.delete("games-burst")
         tags = ("games", "games-burst")
         gold = COLOR["GOLD"]
@@ -736,11 +758,12 @@ class GameGrid:
             return
         sizes = self._sizes()
         if ui.animations:                               # the light sweep, a few frames per call
-            missing = [n for n in range(SHINE_FRAMES) if not ui.has_photo(("shine", sizes[-1],
-                       max(2, int(ui.px(RADIUS) * sizes[-1] / ui.px(TILE))), n))]
+            width, height = sizes[-1], tall(sizes[-1])
+            radius = max(2, int(ui.px(RADIUS) * width / ui.px(TILE)))
+            missing = [n for n in range(SHINE_FRAMES) if not ui.has_photo(("shine", width, height, radius, n))]
             if missing:
                 for n in missing[:4]:
-                    shine_frame(ui, sizes[-1], n)
+                    shine_frame(ui, width, n, height=height)
                 self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
                 return
         rows = range(self.first_row - 1, self.first_row + self.rows + 1)
@@ -751,15 +774,16 @@ class GameGrid:
             game = self.games[i]
             key = self._key(game, "square")
             if key not in self._masters or (key, sizes[0]) not in self._photos:
-                self._square(game, sizes[0])
+                self._cover(game, sizes[0])
                 made += 1
             elif abs(i - self.index) <= self.columns and (key, sizes[1]) not in self._photos:
                 for size in sizes:                      # the grow animation's steps
-                    self._square(game, size)
+                    self._cover(game, size)
                 made += 1
-            elif abs(i - self.index) <= 1 and ("ring", sizes[-1], sizes[-1], self.accent(game), 0) not in ui._photos:
+            elif abs(i - self.index) <= 1 and ("ring", sizes[-1], tall(sizes[-1]), self.accent(game), 0) \
+                    not in ui._photos:
                 for level in range(len(PULSE)):         # the frame in this game's colour
-                    self._frame(sizes[-1], sizes[-1], self.accent(game), level)
+                    self._frame(sizes[-1], tall(sizes[-1]), self.accent(game), level)
                 made += 1
             if made >= 2:
                 self._preload_job = ui.root.after(PRELOAD_MS, self._preload)
@@ -774,7 +798,7 @@ class GameGrid:
         size = self._grown()
         x, y = self._center(self.index, metrics)
         self._ring_key = (size, self.accent(selected))
-        image = self._frame(size, size, self._ring_key[1], self._pulse if ui.animations else len(PULSE) - 1)
+        image = self._frame(size, tall(size), self._ring_key[1], self._pulse if ui.animations else len(PULSE) - 1)
         if self._ring and c.type(self._ring):
             c.itemconfigure(self._ring, image=image)
         else:
@@ -802,7 +826,7 @@ class GameGrid:
                                                                              COLOR["DISC_TEXT"]))
             back = ui.photo(("nav-back", d), lambda: Glyphs.panel(d + 6, d + 6, (d + 6) // 2, (8, 9, 14, 255)))
             cx, cy = (glide_from or (x, y))
-            cx, cy = cx - size / 2 + ui.px(3), cy - size / 2 + ui.px(3)
+            cx, cy = cx - size / 2 + ui.px(3), cy - tall(size) / 2 + ui.px(3)
             c.create_image(cx, cy, image=back, tags=("games", "games-nav"))
             c.create_image(cx, cy, image=disc, tags=("games", "games-nav"))
 
@@ -834,7 +858,7 @@ class GameGrid:
         self._shone = self.games[self.index]
         size = self._grown()
         x, y = c.coords(self._items[self.index])
-        item = c.create_image(x, y, image=shine_frame(ui, size, 0), tags=("games", "games-shine"))
+        item = c.create_image(x, y, image=shine_frame(ui, size, 0, height=tall(size)), tags=("games", "games-shine"))
         c.tag_raise("games-shine")
         c.tag_raise("games-ring")
         c.tag_raise("games-nav")
@@ -848,7 +872,7 @@ class GameGrid:
             n = min(SHINE_FRAMES - 1, int(progress * SHINE_FRAMES))
             if n != shown[0]:
                 shown[0] = n
-                c.itemconfigure(item, image=shine_frame(ui, size, n))
+                c.itemconfigure(item, image=shine_frame(ui, size, n, height=tall(size)))
         ui.animator.run("shine", SHINE_MS, step, lambda: c.delete(item))
 
     def _pulse_tick(self):
@@ -863,7 +887,7 @@ class GameGrid:
         self._pulse = self._beat if self._beat < steps else 2 * steps - 2 - self._beat
         if self._ring and ui.canvas.type(self._ring):
             size, color = self._ring_key
-            ui.canvas.itemconfigure(self._ring, image=self._frame(size, size, color, self._pulse))
+            ui.canvas.itemconfigure(self._ring, image=self._frame(size, tall(size), color, self._pulse))
 
     # ------------------------------------------------------------------
     # Header: the selected game's title and facts
@@ -875,7 +899,7 @@ class GameGrid:
         left = ui.px(SIDE)
         self._draw_tabs(left, ui.px(52), tags)
 
-        x, y = left, ui.px(102)
+        x, y = left, ui.px(96)
         if selected.get("favorite"):
             star_h = ui.px(28)
             star = ui.photo(("star", star_h, COLOR["GOLD"]), lambda: Glyphs.star(star_h, COLOR["GOLD"]))
@@ -887,7 +911,7 @@ class GameGrid:
         c.create_text(x, y, anchor="w", fill=COLOR["TEXT"], font=font, tags=tags,
                       text=ui.truncate(selected["title"], font, room))
 
-        x, y = left, ui.px(144)
+        x, y = left, ui.px(132)
         players = selected.get("players")
         if players:
             state = badge_state(players, self.players)
@@ -958,8 +982,8 @@ class GameGrid:
         rows_total = self.layout.rows
         if rows_total <= self.rows:
             return
-        tile, gap, _, top = metrics
-        height = self.rows * tile + (self.rows - 1) * gap
+        _, gap, _, top, tile_h = metrics
+        height = self.rows * tile_h + (self.rows - 1) * gap
         x = ui.width - ui.px(30)
         w = max(2, ui.px(4))
         c.create_rectangle(x, top, x + w, top + height, fill=COLOR["LINE_FAINT"], width=0,
@@ -1092,14 +1116,21 @@ class GameGrid:
     def _draw_placeholder(self):
         ui, c = self.ui, self.ui.canvas
         cx, cy = ui.width // 2, ui.height // 2
+        if not self.loading:
+            self._draw_tabs(ui.px(SIDE), ui.px(52), ("games", "games-header"))
         if self.loading:
             c.create_text(cx, cy, fill=COLOR["TEXT_DIM"], font=ui.font(22, "semibold"),
-                          text=t("games_loading"), tags="games")
+                          text=t("games_loading"), tags=("games", "games-empty"))
+        elif self.tab in ("favorites", "nx2"):
+            c.create_text(cx, cy - ui.px(20), fill=COLOR["TEXT"], font=ui.font(24, "semibold"),
+                          text=t(f"games_none_{self.tab}"), tags=("games", "games-empty"))
+            ui.rich(cx, cy + ui.px(24), t(f"games_none_{self.tab}_hint"), 16, COLOR["TEXT_DIM"],
+                    anchor="center", tags=("games", "games-empty"))
         elif self.filter_players:
             c.create_text(cx, cy - ui.px(20), fill=COLOR["TEXT"], font=ui.font(24, "semibold"),
-                          text=t("games_none_for", n=self.filter_players), tags="games")
+                          text=t("games_none_for", n=self.filter_players), tags=("games", "games-empty"))
             ui.rich(cx, cy + ui.px(24), f"[y] {t('hint_filter_off')}", 16, COLOR["TEXT_DIM"],
-                    anchor="center", tags="games")
+                    anchor="center", tags=("games", "games-empty"))
         else:
             c.create_text(cx, cy, fill=COLOR["TEXT"], font=ui.font(24, "semibold"),
-                          text=t("games_none"), tags="games")
+                          text=t("games_none"), tags=("games", "games-empty"))

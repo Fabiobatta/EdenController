@@ -1342,7 +1342,7 @@ class LauncherApp:
     def order_games(self):
         """
         Copy play time / favourite flags from the state onto the games and
-        sort them: favourites first, then by the chosen order.
+        sort them by the chosen order (favourites have their own tab).
         """
         state = self.emu.settings.state or {}
         played = state.get("play") or {}
@@ -1359,9 +1359,9 @@ class LauncherApp:
             game["emulator_name"] = self.emulator_for(game).display_name if several else None
         by_title = lambda g: g["title"].lower()     # noqa: E731
         orders = {
-            "recent": lambda g: (not g["favorite"], -(g["last_played"] or 0), by_title(g)),
-            "az": lambda g: (not g["favorite"], by_title(g)),
-            "most": lambda g: (not g["favorite"], -(g["playtime"] or 0), by_title(g)),
+            "recent": lambda g: (-(g["last_played"] or 0), by_title(g)),
+            "az": by_title,
+            "most": lambda g: (-(g["playtime"] or 0), by_title(g)),
         }
         self.games = sorted(self.games, key=orders[self.sort_mode])
 
@@ -1769,8 +1769,7 @@ class LauncherApp:
         letter = self._letter
 
         def group_start(i):
-            while i > 0 and letter(games[i - 1]) == letter(games[i]) \
-                    and bool(games[i - 1].get("favorite")) == bool(games[i].get("favorite")):
+            while i > 0 and letter(games[i - 1]) == letter(games[i]):
                 i -= 1
             return i
 

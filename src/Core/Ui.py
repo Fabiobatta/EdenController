@@ -710,8 +710,8 @@ class LauncherUi:
             mask = Image.new("L", (w, h), 0)
             ImageDraw.Draw(mask).ellipse((-w * 0.25, -h * 0.35, w * 1.25, h * 1.2), fill=255)
             mask = mask.filter(ImageFilter.GaussianBlur(18))
-            vignette = mask.point(lambda v: int(38 + v * 0.36))            # 38..130
-            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.62))
+            vignette = mask.point(lambda v: int(55 + v * 0.42))            # 55..162
+            bottom = Image.linear_gradient("L").resize((w, h)).point(lambda v: 255 - int(v * 0.45))
             shade = ImageChops.multiply(vignette, bottom).resize((width, height), Image.BILINEAR)
             self._photos[key] = Image.merge("RGB", (shade, shade, shade))
         return self._photos[key]
@@ -1546,7 +1546,7 @@ class LauncherUi:
         self.canvas.delete("splash")
 
     def _draw_splash(self, entering=False):
-        from .GameGrid import SHINE_FRAMES, shine_frame
+        from .GameGrid import SHINE_FRAMES, shine_frame, tall
         from .I18n import players_label
         c = self.canvas
         c.delete("splash")
@@ -1564,30 +1564,31 @@ class LauncherUi:
             c.create_image(self.width, 0, image=frames[-1], anchor="ne", tags="splash")
 
         left = self.px(96)
-        tile = self.px(196) // 2 * 2
+        tile = self.px(168) // 2 * 2
+        tile_h = tall(tile)                 # a cover, as in the grid
         map_w, map_h = self.px(338), self.px(190)
-        block_h = tile + (self.px(64) + map_h if players else 0) + self.px(70)
+        block_h = tile_h + (self.px(64) + map_h if players else 0) + self.px(70)
         top = max(self.px(40), (self.height - block_h) // 2 - self.px(16))
         accent = self.grid.accent(game)
-        self._splash_cover = (left, top, tile)
+        self._splash_cover = (left, top, tile, tile_h)
         cover = ("splash", "splash-cover")
         words = ("splash", "splash-words")
         lower = ("splash", "splash-lower")
-        c.create_image(left + tile // 2, top + tile // 2, image=self.grid.halo(game, tile, tile), tags=cover)
-        c.create_image(left, top, image=self.grid.tile(game, tile, tile), anchor="nw", tags=cover)
+        c.create_image(left + tile // 2, top + tile_h // 2, image=self.grid.halo(game, tile, tile_h), tags=cover)
+        c.create_image(left, top, image=self.grid.tile(game, tile, tile_h), anchor="nw", tags=cover)
         tx = left + tile + self.px(38)
         width = int(self.width * 0.58) - tx
-        c.create_text(tx, top + tile // 2 - self.px(62), text=t("splash_title").upper(), anchor="w", fill=accent,
+        c.create_text(tx, top + tile_h // 2 - self.px(62), text=t("splash_title").upper(), anchor="w", fill=accent,
                       font=self.font(14), tags=words)
         title_font = next((f for f in (self.font(44, "semibold"), self.font(36, "semibold"))
                            if f.measure(game["title"]) <= width), self.font(30, "semibold"))
-        c.create_text(tx, top + tile // 2 - self.px(14), text=self.truncate(game["title"], title_font, width),
+        c.create_text(tx, top + tile_h // 2 - self.px(14), text=self.truncate(game["title"], title_font, width),
                       anchor="w", fill=COLOR["TEXT"], font=title_font, tags=words)
         details = [text for text in (players_label(game["players"]) if game.get("players") else "", emulator) if text]
-        c.create_text(tx, top + tile // 2 + self.px(34), text="   ·   ".join(details), anchor="w",
+        c.create_text(tx, top + tile_h // 2 + self.px(34), text="   ·   ".join(details), anchor="w",
                       fill=COLOR["TEXT_DIM"], font=self.font(16, False), tags=words)
 
-        y = top + tile + self.px(34)
+        y = top + tile_h + self.px(34)
         if players:
             regions = tuple(region for region, _ in layout) if layout else None
             picture = self.photo(("tv", map_w, map_h, regions, players, COLOR["DISC_TEXT"], icons),
@@ -1638,7 +1639,7 @@ class LauncherUi:
 
             def settle():
                 enter(1.0)
-                self._splash_shine(left + tile // 2, top + tile // 2, tile, shine_frame, SHINE_FRAMES)
+                self._splash_shine(left + tile // 2, top + tile_h // 2, tile, shine_frame, SHINE_FRAMES, tile_h)
             self.animator.run("splash-in", 380, enter, settle)
 
     def splash_exit(self):
@@ -1652,13 +1653,13 @@ class LauncherUi:
         for key in ("splash-in", "splash-shine"):
             self.animator.finish(key)
         game = self._splash[0]
-        left, top, tile = self._splash_cover
+        left, top, tile, tile_h = self._splash_cover
         _, master = self.grid._master(game)
         tags = ("splash", "splash-exit")
         screen = COLOR["SCREEN"]
         dark = screen if isinstance(screen, str) else "#%02X%02X%02X" % tuple(screen[:3])
-        veil = c.create_rectangle(left, top, left + tile, top + tile, fill=dark, width=0, tags=tags)
-        cover = c.create_image(left + tile / 2, top + tile / 2, tags=tags)
+        veil = c.create_rectangle(left, top, left + tile, top + tile_h, fill=dark, width=0, tags=tags)
+        cover = c.create_image(left + tile / 2, top + tile_h / 2, tags=tags)
         c.tag_raise("splash-exit")
 
         def frame(n):
@@ -1666,13 +1667,12 @@ class LauncherUi:
                 from PIL import ImageEnhance
                 scale = 1 + 0.55 * n / (EXIT_FRAMES - 1)
                 light = 1 - max(0.0, (n / (EXIT_FRAMES - 1) - 0.35) / 0.65)
-                size = int(tile * scale)
-                image = master.resize((size, size), Image.BILINEAR)
+                image = master.resize((int(tile * scale), int(tile_h * scale)), Image.BILINEAR)
                 rgb = ImageEnhance.Brightness(image.convert("RGB")).enhance(light)
                 rgb.putalpha(image.getchannel("A"))
                 return rgb
             return self.photo(("splash-exit", game["path"], tile, n), make)
-        start_x, start_y = left + tile / 2, top + tile / 2
+        start_x, start_y = left + tile / 2, top + tile_h / 2
         end_x, end_y = self.width / 2, self.height / 2
         started, shown = time.monotonic(), [None]
 
@@ -1680,7 +1680,7 @@ class LauncherUi:
             p = 1.0 if progress >= 1.0 else min(1.0, (time.monotonic() - started) * 1000 / SPLASH_EXIT_MS)
             grow = smoothstep(p / 0.75)
             c.coords(veil, left * (1 - grow), top * (1 - grow), left + tile + (self.width - left - tile) * grow,
-                     top + tile + (self.height - top - tile) * grow)
+                     top + tile_h + (self.height - top - tile_h) * grow)
             glide = smoothstep(p / 0.8)
             c.coords(cover, start_x + (end_x - start_x) * glide, start_y + (end_y - start_y) * glide)
             n = min(EXIT_FRAMES - 1, int(p * EXIT_FRAMES))
@@ -1690,12 +1690,12 @@ class LauncherUi:
         step(0.0)
         self.animator.run("splash-exit", SPLASH_EXIT_MS, step)
 
-    def _splash_shine(self, x, y, size, frame, count):
+    def _splash_shine(self, x, y, size, frame, count, height=None):
         """The light sweeps once over the cover, as on the selected tile in the grid."""
         c = self.canvas
         if self._splash is None:
             return
-        item = c.create_image(x, y, image=frame(self, size, 0), tags=("splash", "splash-cover"))
+        item = c.create_image(x, y, image=frame(self, size, 0, height=height), tags=("splash", "splash-cover"))
         shown = [0]
 
         started = time.monotonic()
@@ -1706,7 +1706,7 @@ class LauncherUi:
             n = min(count - 1, int(progress * count))
             if n != shown[0]:
                 shown[0] = n
-                c.itemconfigure(item, image=frame(self, size, n))
+                c.itemconfigure(item, image=frame(self, size, n, height=height))
         self.animator.run("splash-shine", SPLASH_SHINE_MS, step, lambda: c.delete(item))
 
     # ========================================================================

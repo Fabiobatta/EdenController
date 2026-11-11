@@ -30,17 +30,18 @@ def visible(games, show_hidden=False):
 
 
 def available_tabs(games, joined, show_hidden=False):
-    """The tabs worth showing: "all" always, the others only when they have games."""
+    """
+    The tabs over the grid: All, Favourites and Switch 2 always (an empty
+    one says how to fill it), Recent once a game was played, For N players
+    once two or more joined.
+    """
     games = visible(games, show_hidden)
-    tabs = ["all"]
-    if any(g.get("favorite") for g in games):
-        tabs.append("favorites")
+    tabs = ["all", "favorites"]
     if any(g.get("last_played") for g in games):
         tabs.append("recent")
     if joined >= 2:
         tabs.append("players")
-    if any(g.get("nx2") for g in games):
-        tabs.append("nx2")
+    tabs.append("nx2")
     return tabs
 
 

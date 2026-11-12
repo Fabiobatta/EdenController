@@ -302,7 +302,11 @@ def pick_dialogs(windows, main_names):
 
     Returns:
         list: [(hwnd, title)] of the windows owned by another one, or titled
-              without the emulator's name (an untitled window is not one).
+              like neither a main window nor the emulator (an untitled window
+              is not one). A main window's title is "<build name> | <version>
+              | <compiler>" (yuzu/main_window.cpp, UpdateWindowTitle), and the
+              build name need not be the emulator's: Lichii calls itself
+              "Fritchii | v5.3 | Clang 22.1.8".
     """
     found = []
     for hwnd, title, owned in windows:
@@ -310,7 +314,8 @@ def pick_dialogs(windows, main_names):
         if not title:
             continue
         lowered = title.lower()
-        if owned or not any(name in lowered for name in main_names):
+        main_title = lowered.count(" | ") >= 2 or any(name in lowered for name in main_names)
+        if owned or not main_title:
             found.append((hwnd, title))
     return found
 

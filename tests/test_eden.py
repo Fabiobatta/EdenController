@@ -2103,8 +2103,10 @@ class DialogTests(unittest.TestCase):
                    (2, "Game Requires Firmware", False),
                    (3, "", False),
                    (4, "Eden", True),
-                   (5, "Il gioco richiede il firmware", False)]
-        self.assertEqual(pick_dialogs(windows, ["eden"]),
+                   (5, "Il gioco richiede il firmware", False),
+                   (6, "Fritchii | v5.3 | Clang 22.1.8", False),         # Lichii's main window, by its build name
+                   (7, "Fritchii | v5.3 | Clang 22.1.8 | Donkey Kong Bananza | NVIDIA", False)]
+        self.assertEqual(pick_dialogs(windows, ["eden", "lichii"]),
                          [(2, "Game Requires Firmware"), (4, "Eden"), (5, "Il gioco richiede il firmware")])
 
     def test_no_dialogs_outside_windows(self):

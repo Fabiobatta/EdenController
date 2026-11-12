@@ -34,17 +34,13 @@ Work kept off the 16 ms loop:
 
 import ctypes
 import os
-
-
 import sys
 import threading
 import time
 
-
 from . import Library
 from .Achievements import Achievements
 from .Art import ArtLibrary
-
 from .Build import BUILD
 from .I18n import t
 from .Log import log
@@ -57,13 +53,13 @@ from .Sound import Sounds
 from .Theme import apply_theme
 from .Ui import COLOR, LauncherUi
 from .Update import UpdateCheck
-
 from .AppLaunch import LaunchMixin
 from .AppLibrary import LibraryMixin
 from .AppMenus import MenusMixin
 from .AppPlayers import PlayersMixin
 from .AppShared import (ALERT_GUARD_S, BATTERY_POLL_S, COMBO_GLYPHS, DIALOG_POLL_S, MAX_LOOP_ERRORS_LOGGED,
                         POLL_INTERVAL_MS, SORT_MODES, SPLASH_MS, _int, match_reconnects)
+
 
 __all__ = ["LauncherApp", "match_reconnects"]       # match_reconnects: from AppShared, for the tests
 
@@ -182,6 +178,10 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
         self._held_next = 0.0
         self._battery_next = 0.0           # next battery reading
         self._batteries = None              # last batteries shown
+        self._low_batteries = {}            # path -> lowest level read during the game (under LOW_BATTERY)
+        self._updater = None                # Core.Update.Updater while a newer build downloads
+        self._update_shown = None           # the download percentage on screen
+        self._update_check = None           # thread of a "check now" from the settings
         self.hid_profiles = {}              # {path: profile_key} across reconnects
         self.process = None                 # Emulator subprocess handle
         self.returning_to_launcher = False  # Flag for kill -> restart flow
@@ -253,6 +253,8 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
             self._answer_confirm(True)
         elif self.ui.alert_mode == "EMU_DIALOG":
             self._answer_dialog(True)
+        elif self.ui.alert_mode == "BUSY":
+            return
         elif self.ui.alert_mode == "GAME_FAILED":
             self._close_failed_alert()
         elif self.closing or self.mode == "SPLASH":
@@ -277,6 +279,8 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
             self._close_failed_alert()
         elif self.ui.alert_mode == "EMU_DIALOG":
             self._answer_dialog(False)
+        elif self.ui.alert_mode == "BUSY":
+            return
         elif self.ui.alert_mode:
             self.ui.close_alert()
         elif self.mode == "SPLASH":
@@ -366,7 +370,9 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
             self.ui.close_alert()
             if not self._loading:
                 self.root.withdraw()
-        if now >= self._battery_next and not self.process:
+        if self._updater or self._update_check:
+            self._watch_update()
+        if now >= self._battery_next:                   # during the game too: low batteries are told after it
             self._battery_next = now + BATTERY_POLL_S
             self.poll_batteries()
 
@@ -467,6 +473,8 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
                 self.ui.close_alert()
                 if not self._loading:
                     self.root.withdraw()            # Cancel, resume game
+        elif mode == "BUSY":
+            return                                  # an update installing: nothing to answer
         elif mode == "EMU_DIALOG":
             if button in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
                 self._answer_dialog(button == sdl.SDL_CONTROLLER_BUTTON_A)

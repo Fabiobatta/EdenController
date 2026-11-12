@@ -2183,5 +2183,118 @@ class GameShownTests(unittest.TestCase):
         self.assertTrue(render_shown([top, (2, 1280, 720)], {1: [], 2: [(30, 2, True, 1280, 720)]}))
 
 
+class SelfUpdateTests(unittest.TestCase):
+    """Installing a newer build from the controller (Core/Update.py)."""
+
+    class _Response:
+        def __init__(self, data):
+            import io
+            self._data = io.BytesIO(data)
+            self.headers = {"Content-Length": str(len(data))}
+
+        def read(self, n=-1):
+            return self._data.read(n)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def _exe(self, size=1024 * 1024 + 10):
+        return b"MZ" + b"x" * (size - 2)
+
+    def test_release_asset(self):
+        from Core.Update import release_asset
+        release = {"assets": [{"name": "other.zip"}, {"name": "EdenLauncher.exe", "size": 5,
+                   "browser_download_url": "https://example/e.exe", "digest": "sha256:ABC"}]}
+        self.assertEqual(release_asset(40, lambda url: release), ("https://example/e.exe", 5, "ABC"))
+        with self.assertRaises(ValueError):
+            release_asset(40, lambda url: {"assets": []})
+
+    def test_download_checks_what_it_gets(self):
+        import hashlib
+        from Core.Update import download
+        data = self._exe()
+        good = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "new.exe")
+            seen = []
+            download("u", dest, len(data), good, lambda done, total: seen.append((done, total)),
+                     opener=lambda u: self._Response(data))
+            with open(dest, "rb") as f:
+                self.assertEqual(f.read(), data)
+            self.assertEqual(seen[-1], (len(data), len(data)))
+            for bad, kwargs in ((data, {"sha256": "0" * 64}), (b"<html>" + data, {}), (data[:1000], {})):
+                if os.path.exists(dest):
+                    os.remove(dest)
+                with self.assertRaises(ValueError):
+                    download("u", dest, opener=lambda u, b=bad: self._Response(b), **kwargs)
+                self.assertFalse(os.path.exists(dest))
+                self.assertFalse(os.path.exists(dest + ".part"))
+
+    def test_install_swaps_and_cleans_up(self):
+        from Core.Update import cleanup_old, install
+        with tempfile.TemporaryDirectory() as tmp:
+            exe, new = os.path.join(tmp, "EdenLauncher.exe"), os.path.join(tmp, "EdenLauncher.exe.new")
+            with open(exe, "w") as f:
+                f.write("old")
+            with open(new, "w") as f:
+                f.write("new")
+            old = install(exe, new)
+            with open(exe) as f:
+                self.assertEqual(f.read(), "new")
+            with open(old) as f:
+                self.assertEqual(f.read(), "old")
+            self.assertFalse(os.path.exists(new))
+            cleanup_old(exe)
+            self.assertFalse(os.path.exists(old))
+            cleanup_old(exe)                                    # nothing left: no error
+
+    def test_updater_states(self):
+        import time as clock
+        from Core.Update import Updater
+
+        def fetch(url, dest, size, sha, progress):
+            progress(5, 10)
+            with open(dest, "w") as f:
+                f.write("new")
+        with tempfile.TemporaryDirectory() as tmp:
+            exe = os.path.join(tmp, "EdenLauncher.exe")
+            ok = Updater(41, exe, asset=lambda n: ("u", 3, None), fetch=fetch)
+            ok.start()
+            failing = Updater(41, exe, asset=lambda n: (_ for _ in ()).throw(OSError("offline")), fetch=fetch)
+            failing.start()
+            for _ in range(100):
+                if ok.state != "downloading" and failing.state != "downloading":
+                    break
+                clock.sleep(0.01)
+            self.assertEqual((ok.state, ok.progress), ("ready", 1.0))
+            self.assertEqual((failing.state, failing.error), ("failed", "offline"))
+
+
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class LowBatteryTests(unittest.TestCase):
+    def test_told_after_the_game(self):
+        from Core.App import LauncherApp
+        app = LauncherApp.__new__(LauncherApp)
+        toasts = []
+        app.ui = types.SimpleNamespace(show_toast=lambda m, c=None: toasts.append(m))
+        app.assignments = [{"path": "XInput#0"}, {"path": "XInput#1"}, {"path": "XInput#2"}]
+        app.pads = {0: {"path": "XInput#0", "battery": (80, False)}, 1: {"path": "XInput#1", "battery": (9, False)},
+                    2: {"path": "XInput#2", "battery": (5, True)}}                  # charging: fine
+        app._low_batteries = {"XInput#0": 12}                                        # low during the game
+        app.report_low_batteries()
+        self.assertEqual(len(toasts), 1)
+        self.assertIn("P1 12%", toasts[0])
+        self.assertIn("P2 9%", toasts[0])
+        self.assertNotIn("P3", toasts[0])
+        self.assertEqual(app._low_batteries, {})
+        toasts.clear()
+        app.pads[1]["battery"] = (90, False)
+        app.report_low_batteries()
+        self.assertEqual(toasts, [])
+
+
 if __name__ == "__main__":
     unittest.main()

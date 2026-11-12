@@ -5,28 +5,16 @@ behind it, the emulator's dialogs, the close menu, writing the controller
 configuration (a part of LauncherApp, see Core/App.py).
 """
 
-
 import os
-
-
 import sys
-
 import time
 from tkinter import messagebox
 
-
 from .Backup import backup_saves
-
 from .I18n import t
 from .Log import log
-
-
 from .Process import answer_dialog, bring_to_front, find_dialogs, game_shown, launch, request_close
-
-
 from .Ui import COLOR, SPLASH_EXIT_MS, player_color, split_layout, split_mode
-
-
 from .AppShared import (CLOSE_TIMEOUT_S, INSTANT_EXIT_S, LOADING_MAX_S, LOADING_POLL_S, QUICK_EXIT_S,
                         SPLASH_LAUNCH_MS, SPLASH_MS)
 
@@ -80,6 +68,7 @@ class LaunchMixin:
         self.end_session()
         self.sounds.resume()
         then()
+        self.report_low_batteries()
 
     def kill_and_quit(self):
         """Close the emulator and exit the launcher (close menu -> Desktop)."""
@@ -135,6 +124,7 @@ class LaunchMixin:
         if back_to_grid:
             # Picked from the game grid: offer it again, same players
             self.show_games()
+            self.report_low_batteries()
         elif not failed:
             self._exit_launcher()           # emulator closed normally
         return False

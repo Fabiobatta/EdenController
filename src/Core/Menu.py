@@ -12,6 +12,7 @@ save backups, the folder browser.
 change, so a row's text always shows the current value:
 
     {"label": "Volume", "value": "70", "change": fn(delta)}     left / right
+    {"label": "Keys", "value": "missing", "value_color": "#F55"} a coloured value (a check)
     {"label": "Restore a save", "action": fn}                   A
     {"label": "Emulator", "kind": "header"}                     a caption
     {"label": "No backups yet", "kind": "info"}                 plain text
@@ -244,7 +245,8 @@ class Menu:
                           fill=row.get("color") or COLOR["TEXT"], tags=tags)
             if value_text:
                 c.create_text(left + inner - ui.px(16), middle, anchor="e", font=value_font, text=value_text,
-                              fill=COLOR["TEXT"] if chosen else COLOR["TEXT_DIM"], tags=tags)
+                              fill=row.get("value_color") or (COLOR["TEXT"] if chosen else COLOR["TEXT_DIM"]),
+                              tags=tags)
         arrow_font = ui.font(12)
         if first > 0:
             c.create_text(left + inner // 2, top - ui.px(10), text="▲", fill=COLOR["TEXT_DIM"],

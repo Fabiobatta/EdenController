@@ -203,6 +203,29 @@ def launch(cmd_args, env):
     return process
 
 
+def start_detached(command):
+    """
+    Start a program on its own, outliving the launcher (the update restarts
+    the launcher this way). The launcher's bundle is kept out of its
+    environment, and PyInstaller is told to start the new exe from scratch
+    rather than as a part of this one.
+    """
+    bundle_dir = getattr(sys, "_MEIPASS", None)
+    env = clean_child_env(os.environ, bundle_dir)
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    if sys.platform != "win32":
+        return subprocess.Popen(command, env=env, start_new_session=True, cwd=os.path.dirname(command[0]) or None)
+    if bundle_dir:
+        _set_dll_directory(None)
+    try:
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: not tied to this launcher's console or job
+        return subprocess.Popen(command, env=env, creationflags=0x00000008 | 0x00000200,
+                                cwd=os.path.dirname(command[0]) or None, close_fds=True)
+    finally:
+        if bundle_dir:
+            _set_dll_directory(bundle_dir)
+
+
 # ============================================================================
 # CLOSING
 # ============================================================================

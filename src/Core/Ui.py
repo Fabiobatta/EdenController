@@ -1931,6 +1931,7 @@ class LauncherUi:
                     (("a", "alert_yes"), ("b", "alert_no"))),
         "EMU_DIALOG": ("alert_dialog_title", "alert_dialog_text", "WARN",
                        (("a", "alert_dialog_ok"), ("b", "alert_dialog_cancel"))),
+        "BUSY": ("upd_title", "upd_progress", "TEXT", ()),          # always with its own texts
     }
 
     def show_alert(self, mode, buttons=None, lines=(), name=None, title=None, text=None):

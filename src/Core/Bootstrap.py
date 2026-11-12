@@ -148,6 +148,9 @@ def _run(emulator):
     log("INFO", "Config", emulator.config_path)
     log("INFO", "Executable", emulator.exe)
     log("INFO", "Settings", emulator.settings.path)
+    if getattr(sys, "frozen", False):
+        from .Update import cleanup_old
+        cleanup_old(sys.executable)             # what an update left behind
     log("INFO", "Language", language)
 
     # 3. Version, SDL backend choice, environment (before SDL is imported)

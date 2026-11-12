@@ -936,6 +936,20 @@ class Eden(Emulator):
             + f" ({self.nand_dir()})")
         return installed is False
 
+    def health(self):
+        from Core.Paths import file_version
+        checks = [("program", "ok" if os.path.isfile(self.exe or "") else "bad",
+                   file_version(self.exe) if os.path.isfile(self.exe or "") else self.exe)]
+        checks.append(("config", "ok" if os.path.isfile(self.config_path) else "bad", self.config_path))
+        keys = os.path.join(self.user_dir, "keys", "prod.keys")
+        if not os.path.isfile(keys):
+            checks.append(("keys", "bad", keys))
+        else:
+            checks.append(("keys", "ok" if Switch.load_header_key(keys) else "warn", keys))
+        firmware = self.firmware_installed()
+        checks.append(("firmware", {True: "ok", False: "bad", None: "warn"}[firmware], self.nand_dir()))
+        return checks
+
     def window_names(self):
         stem = os.path.splitext(os.path.basename(self.exe or ""))[0]
         return sorted({name.lower() for name in (self.display_name, stem, "eden") if name})

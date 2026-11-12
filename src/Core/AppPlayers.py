@@ -4,28 +4,16 @@ The controllers: hot-plug, the players who joined, their icons, batteries
 and button layouts (a part of LauncherApp, see Core/App.py).
 """
 
-
 import ctypes
-
-
 import re
-
-
 import time
 
-
 from . import Glyphs
-
-
 from .I18n import t
 from .Log import log
-
-
 from .Ui import COLOR, player_color
-
-
-from .AppShared import (DPAD_BUTTONS, HELD_BUTTONS, HELD_POLL_S, MAX_PLAYERS, RUMBLE_GAP_MS, RUMBLE_PULSE_MS,
-                        RUMBLE_STRENGTH, TRIGGER_PRESSED, match_reconnects)
+from .AppShared import (DPAD_BUTTONS, HELD_BUTTONS, HELD_POLL_S, LOW_BATTERY, MAX_PLAYERS, RUMBLE_GAP_MS,
+                        RUMBLE_PULSE_MS, RUMBLE_STRENGTH, TRIGGER_PRESSED, match_reconnects)
 
 
 class PlayersMixin:
@@ -385,8 +373,25 @@ class PlayersMixin:
                 level = None
             changed |= level != pad.get("battery")
             pad["battery"] = level
+            if self.process and level and level[0] < LOW_BATTERY and not level[1]:
+                # In the game: noted, and told when the players are back in the launcher
+                self._low_batteries[pad["path"]] = min(level[0], self._low_batteries.get(pad["path"], 100))
         if changed:
             self.refresh_grid()
+
+    def report_low_batteries(self):
+        """Back from a game: name the players whose controller needs charging."""
+        low, self._low_batteries = self._low_batteries, {}
+        for assignment in self.assignments:
+            battery = self._battery_of(assignment["path"])
+            if battery and battery[0] < LOW_BATTERY and not battery[1]:
+                low[assignment["path"]] = min(battery[0], low.get(assignment["path"], 100))
+        players = [(i, low[a["path"]]) for i, a in enumerate(self.assignments) if a["path"] in low]
+        if not players:
+            return
+        log("INFO", "Low batteries", ", ".join(f"P{i + 1} {level}%" for i, level in players))
+        self.ui.show_toast(t("toast_battery_low", players=", ".join(f"P{i + 1} {level}%" for i, level in players)),
+                           player_color(players[0][0]))
 
     def _battery_of(self, path):
         pad = next((p for p in self.pads.values() if p["path"] == path), None)

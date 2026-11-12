@@ -48,6 +48,7 @@ DPAD_BUTTONS = ("SDL_CONTROLLER_BUTTON_DPAD_UP", "SDL_CONTROLLER_BUTTON_DPAD_DOW
 TRIGGER_PRESSED = 0.5
 HELD_POLL_S = 0.1
 DIALOG_POLL_S = 0.5                # how often the emulator's windows are checked for a dialog
+LOW_BATTERY = 15                   # % under which a player is told to charge their controller
 BATTERY_POLL_S = 20.0              # controller batteries are read this often
 
 # kill_combo button names -> button picture

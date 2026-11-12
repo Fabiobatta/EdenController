@@ -216,6 +216,13 @@ class Emulator:
         """The last error lines of the emulator's own log, newest last."""
         return []
 
+    def health(self):
+        """
+        What a "health check" screen shows about this emulator: [(check, state,
+        detail)], state "ok", "warn" or "bad"; check is an I18n key (hc_<check>).
+        """
+        return []
+
     def needs_firmware(self, game):
         """True if `game` will not start because the emulator lacks the console firmware it requires."""
         return False

@@ -5,28 +5,16 @@ the roulette and the game grid with its tabs (a part of LauncherApp,
 see Core/App.py).
 """
 
-
 import random
-
-
 import threading
 import time
 
-
 from . import Library, Stats
 from .Achievements import ACHIEVEMENTS
-
-
 from .I18n import playtime_label, t
 from .Log import log
-
-
 from .Roulette import pick_candidates
-
-
 from .Ui import COLOR, player_color
-
-
 from .AppShared import (MIN_SESSION_S, NAV_REPEAT_DELAY, NAV_REPEAT_RATE, STICK_THRESHOLD, TICK_RUMBLE,
                         TRIGGER_PRESSED, WIN_RUMBLE)
 

@@ -4,29 +4,22 @@ The drawer menus: settings, game folders, emulators, a game's menu and its
 save backups (a part of LauncherApp, see Core/App.py).
 """
 
-
 import os
-
-
 import sys
-
+import threading
 import time
-
 
 from .Backup import backup_saves, list_backups, restore
 from .Build import BUILD
 from .I18n import STRINGS, last_played_label, players_label, playtime_label, set_language, t
 from .Log import log
-
 from .Paths import base_dir
-
-
 from .Settings import LAUNCHER_SECTION
 from .Sound import Sounds
 from .Theme import ACCENT_NAMES, THEME_NAMES
 from .Ui import COLOR, SPLIT_MODES, split_mode
-from .Update import DOWNLOAD_PAGE
-
+from .Process import can_watch_windows, start_detached
+from .Update import Updater
 from .AppShared import IDLE_DIM_CHOICES, SORT_MODES
 
 
@@ -140,6 +133,8 @@ class MenusMixin:
             row(launcher, "background_motion", on_off, "true", motion),
             row(launcher, "animations", on_off, "true",
                 lambda value: setattr(self.ui, "animations", value == "true")),
+            row(launcher, "loading_screen", on_off, "true",
+                lambda value: setattr(self.ui, "splash_waits", can_watch_windows() and value == "true")),
             row(launcher, "dynamic_colors", on_off, "true", colors),
             row(launcher, "idle_dim_minutes", IDLE_DIM_CHOICES, "5", idle),
             {"label": t("settings_sound"), "kind": "header"},
@@ -162,11 +157,154 @@ class MenusMixin:
                 rows.append(row(self.emu.settings_section, key, values, default))
         rows += [
             {"label": t("settings_launcher"), "kind": "header"},
+            {"label": t("health_title"), "action": self.open_health},
             row(launcher, "check_updates", on_off, "true", updates),
-            {"label": t("settings_version", version=self._version_text()), "kind": "info"},
         ]
         if self.update.newer:
-            rows.append({"label": t("settings_update", n=self.update.newer, page=DOWNLOAD_PAGE), "kind": "info"})
+            rows.append({"label": t("upd_install", n=self.update.newer), "color": COLOR["OK"],
+                         "action": self._ask_update})
+        elif BUILD > 0:
+            rows.append({"label": t("upd_check_now"), "action": self._check_updates_now})
+        rows.append({"label": t("settings_version", version=self._version_text()), "kind": "info"})
+        return rows
+
+    # ------------------------------------------------------------------
+    # Updating the launcher from the controller
+    # ------------------------------------------------------------------
+    @staticmethod
+    def can_self_update():
+        """Only the Windows exe replaces itself (from source there is nothing to swap)."""
+        return sys.platform == "win32" and bool(getattr(sys, "frozen", False))
+
+    def _check_updates_now(self):
+        if self._update_check:
+            return
+        self.ui.show_toast(t("upd_checking"), COLOR["ACCENT"])
+        self._update_check = threading.Thread(target=self.update.run, name="update-check", daemon=True)
+        self._update_check.start()
+
+    def _ask_update(self):
+        build = self.update.newer
+        if not self.can_self_update():
+            self.ui.show_toast(t("upd_only_exe"), COLOR["WARN"])
+            return
+        self.confirm(t("upd_title", n=build), t("upd_text", n=build), self._start_update,
+                     buttons=(("a", "upd_go"), ("b", "alert_back")))
+
+    def _start_update(self):
+        build = self.update.newer
+        self.menu.close()
+        self._after_menu()
+        log("INFO", "Update requested", f"build {build}")
+        self._updater = Updater(build, sys.executable)
+        self._updater.start()
+        self._update_shown = 0
+        self.ui.show_alert("BUSY", title=t("upd_title", n=build), text=t("upd_progress", pct=0))
+
+    def _watch_update(self):
+        """Called by the main loop while an update is checked for or downloads."""
+        check = self._update_check
+        if check and not check.is_alive():
+            self._update_check = None
+            if self.update.newer:
+                self.ui.show_toast(t("toast_update", n=self.update.newer), COLOR["ACCENT"])
+                self._set_brand()
+            else:
+                self.ui.show_toast(t("upd_latest"), COLOR["OK"])
+            if self.mode == "MENU":
+                self.menu.refresh()
+        updater = self._updater
+        if not updater:
+            return
+        if updater.state == "downloading":
+            pct = int(updater.progress * 100)
+            if pct != self._update_shown:
+                self._update_shown = pct
+                self.ui.show_alert("BUSY", title=t("upd_title", n=updater.build), text=t("upd_progress", pct=pct))
+        elif updater.state == "ready":
+            self._updater = None
+            try:
+                updater.install()
+                start_detached([updater.exe] + sys.argv[1:])
+            except Exception as e:
+                log("EXCEPTION", "Could not install the update", e)
+                self._update_failed(updater.build, str(e))
+                return
+            log("INFO", "Update installed - restarting", f"build {updater.build}")
+            self.ui.show_alert("BUSY", title=t("upd_title", n=updater.build), text=t("upd_restarting"))
+            self.root.update()
+            self.quit()
+        elif updater.state == "failed":
+            self._updater = None
+            self._update_failed(updater.build, updater.error)
+
+    def _update_failed(self, build, error):
+        self.sounds.play("error")
+        self._alert_then = None
+        self.ui.show_alert("GAME_FAILED", title=t("upd_failed"), text=t("upd_failed_text"), lines=[error or "?"])
+
+    # ------------------------------------------------------------------
+    # The health check (Settings > Check)
+    # ------------------------------------------------------------------
+    def open_health(self):
+        self._open_menu(t("health_title"), self._health_rows, subtitle=t("health_subtitle"))
+
+    def _health_rows(self):
+        colors = {"ok": COLOR["OK"], "warn": COLOR["WARN"], "bad": COLOR["BAD"]}
+        marks = {"ok": "✓", "warn": "!", "bad": "✗"}
+        nothing = lambda: None                                  # noqa: E731  (selectable, so the list scrolls)
+
+        def check(label, state, value, action=None):
+            return {"label": label, "value": f"{value}  {marks.get(state, '')}".strip(), "action": action or nothing,
+                    "value_color": colors.get(state)}
+
+        rows = []
+        games = self.games or []
+        nx2_games = [g for g in games if g.get("nx2")]
+        for emulator in self.emu.variants:
+            role = t("hc_role_nx2") if emulator.supports_nx2() else t("hc_role_main")
+            rows.append({"label": f"{emulator.display_name} · {role}", "kind": "header"})
+            for key, state, detail in emulator.health():
+                value = {"ok": t(f"hc_{key}_ok"), "warn": t(f"hc_{key}_warn"), "bad": t(f"hc_{key}_bad")}[state]
+                if key == "program" and detail and state == "ok":
+                    value = detail
+                rows.append(check(t(f"hc_{key}"), state, value))
+        if nx2_games:
+            able = [v for v in self.emu.variants if v.supports_nx2()]
+            rows.append(check(t("hc_nx2_games", n=len(nx2_games)), "ok" if able else "bad",
+                              able[0].display_name if able else t("hc_nx2_missing"), self.open_emulators))
+
+        rows.append({"label": t("settings_games"), "kind": "header"})
+        folders, _ = self.emu.game_folders()
+        reachable = sum(1 for folder, _deep in folders if os.path.isdir(folder))
+        rows.append(check(t("opt_game_dirs"), "ok" if folders and reachable == len(folders) else
+                          "bad" if not reachable else "warn",
+                          t("hc_folders", ok=reachable, n=len(folders)), self.open_folders))
+        no_players = sum(1 for g in games if not g.get("players"))
+        rows.append(check(t("hc_games"), "ok" if games else "warn",
+                          t("hc_games_count", n=len(games), nx2=len(nx2_games))))
+        rows.append(check(t("hc_no_players"), "ok" if not no_players else "warn", str(no_players)))
+
+        rows.append({"label": t("hc_controllers"), "kind": "header"})
+        assigned = {a["path"]: i for i, a in enumerate(self.assignments)}
+        for pad in self.pads.values():
+            player = assigned.get(pad["path"])
+            battery = pad.get("battery")
+            parts = [f"P{player + 1}" if player is not None else t("hc_not_playing")]
+            if battery:
+                parts.append(f"{battery[0]}%")
+            state = "warn" if battery and battery[0] < 15 and not battery[1] else "ok"
+            rows.append(check(pad["name"], state, " · ".join(parts)))
+        if not self.pads:
+            rows.append(check(t("hc_controllers"), "warn", t("hc_no_controllers")))
+
+        rows.append({"label": t("settings_launcher"), "kind": "header"})
+        if self.update.newer:
+            rows.append(check(t("hc_build", n=BUILD or "-"), "warn", t("hc_build_newer", n=self.update.newer),
+                              self._ask_update))
+        else:
+            rows.append(check(t("hc_build", n=BUILD or "-"), "ok", t("hc_build_latest")))
+        rows.append({"label": t("hc_logs", path=self.emu.log_dir()), "kind": "info"})
         return rows
 
     @staticmethod

@@ -5,9 +5,12 @@ Filesystem location helpers shared by every emulator.
 Knows nothing about any specific emulator - callers pass the emulator name in.
 """
 
+import ctypes
 import glob
 import os
+import struct
 import sys
+import time
 
 from .Log import log
 
@@ -93,3 +96,34 @@ def find_appimage(directory, name):
         glob.glob(os.path.join(directory, f"{name.upper()}*.AppImage"))
     )
     return matches[0] if matches else None
+
+
+def file_version(path):
+    """
+    "0.2.1" from a Windows program's version resource (product version, else
+    file version), else its date ("12/10/2026"); None if it cannot be read.
+    """
+    if sys.platform == "win32":
+        try:
+            version = ctypes.windll.version
+            size = version.GetFileVersionInfoSizeW(path, None)
+            if size:
+                data = ctypes.create_string_buffer(size)
+                pointer, length = ctypes.c_void_p(), ctypes.c_uint()
+                if version.GetFileVersionInfoW(path, 0, size, data) and version.VerQueryValueW(
+                        data, "\\VarFileInfo\\Translation", ctypes.byref(pointer), ctypes.byref(length)) \
+                        and length.value >= 4:
+                    language, codepage = struct.unpack("<HH", ctypes.string_at(pointer.value, 4))
+                    for key in ("ProductVersion", "FileVersion"):
+                        query = f"\\StringFileInfo\\{language:04x}{codepage:04x}\\{key}"
+                        if version.VerQueryValueW(data, query, ctypes.byref(pointer), ctypes.byref(length)) \
+                                and length.value:
+                            text = ctypes.wstring_at(pointer.value, length.value).strip("\0 ")
+                            if text:
+                                return text
+        except Exception:
+            pass
+    try:
+        return time.strftime("%d/%m/%Y", time.localtime(os.path.getmtime(path)))
+    except OSError:
+        return None

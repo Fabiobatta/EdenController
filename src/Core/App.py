@@ -1922,9 +1922,11 @@ class LauncherApp:
     def _step_aside(self):
         if not self.process or self._loading:
             return
+        # The emulator first, while the launcher is still the foreground window: Windows lets
+        # only the foreground program hand the front to another one
+        bring_to_front(self.process)
         self._end_loading()
         self.root.withdraw()
-        bring_to_front(self.process)
 
     def _end_loading(self):
         """The launch screen is no longer kept over the emulator."""

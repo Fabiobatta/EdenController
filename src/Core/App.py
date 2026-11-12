@@ -50,7 +50,8 @@ from .I18n import STRINGS, last_played_label, players_label, playtime_label, set
 from .Log import log
 from .Menu import Menu
 from .Paths import base_dir
-from .Process import answer_dialog, dialog_open, find_dialogs, launch, request_close
+from .Process import (answer_dialog, bring_to_front, can_watch_windows, dialog_open, find_dialogs, game_shown, launch,
+                      request_close)
 from .Roulette import Roulette, pick_candidates
 from .Settings import DEFAULT_KILL_COMBO, LAUNCHER_SECTION, parse_combo
 from .Sound import Sounds
@@ -79,6 +80,9 @@ SORT_MODES = ("recent", "az", "most")
 ALERT_GUARD_S = 0.6         # dialogs ignore buttons this long after they open
 MIN_SESSION_S = 10          # shorter runs (crash at boot...) are not play time
 SPLASH_MS = 1700            # the "let's go" screen before a game starts (its last part: the exit)
+SPLASH_LAUNCH_MS = 1100     # ...when it stays until the game is on screen: the emulator starts sooner
+LOADING_POLL_S = 0.25       # how often the emulator's windows are looked at while the game loads
+LOADING_MAX_S = 150         # the launch screen gives way after this long, loaded or not
 CLOSE_TIMEOUT_S = 5.0       # the emulator gets this long to close by itself
 QUICK_EXIT_S = 20           # an emulator gone this soon after a launch...
 INSTANT_EXIT_S = 5          # ...is reported if it failed, or closed sooner than this
@@ -196,6 +200,9 @@ class LauncherApp:
         self.ui.light_games = settings.get(LAUNCHER_SECTION, "grid_style", "light").lower() != "dark"
         self.ui.animations = settings.get_bool(LAUNCHER_SECTION, "animations", True)
         self.ui.splash_ms = SPLASH_MS
+        # The launch screen stays over the emulator until the game is on screen (Windows: its windows show it)
+        self.ui.splash_waits = can_watch_windows() and settings.get_bool(LAUNCHER_SECTION, "loading_screen", True)
+        self._loading = None                # {"since", "next"} while the game loads behind the launch screen
         self.idle_dim_s = max(0, settings.get_int(LAUNCHER_SECTION, "idle_dim_minutes", 5)) * 60
         self.last_input = time.monotonic()
         self.menu = Menu(self.ui, sound=lambda name: self.sounds.play(name))
@@ -399,6 +406,8 @@ class LauncherApp:
 
     def _closed(self, then):
         self.process = None
+        if self._loading or self.ui._splash is not None:
+            self._end_loading()
         self.end_session()
         self.sounds.resume()
         then()
@@ -434,6 +443,8 @@ class LauncherApp:
         emulator = self.running_emu or self.emu
         elapsed = time.monotonic() - self.launched_at
         self.process = None
+        if self._loading or self.ui._splash is not None:
+            self._end_loading()             # gone while loading: no launch screen left behind
         self.end_session()
         self.sounds.resume()
         self.root.deiconify()
@@ -719,6 +730,8 @@ class LauncherApp:
             self._poll_closing()
         elif self.process and not self.ui.alert_mode:
             self._check_process()
+            if self.process and self._loading:
+                self._watch_loading(now)
             if self.process and now >= self._dialog_next:
                 self._dialog_next = now + DIALOG_POLL_S
                 self._watch_dialogs()
@@ -744,7 +757,8 @@ class LauncherApp:
             log("INFO", "The emulator's dialog was closed outside the launcher", self._dialog[1])
             self._dialog = None
             self.ui.close_alert()
-            self.root.withdraw()
+            if not self._loading:
+                self.root.withdraw()
         if now >= self._battery_next and not self.process:
             self._battery_next = now + BATTERY_POLL_S
             self.poll_batteries()
@@ -844,7 +858,8 @@ class LauncherApp:
                 self.kill_and_quit()                # Exit to desktop
             elif button == sdl.SDL_CONTROLLER_BUTTON_B:
                 self.ui.close_alert()
-                self.root.withdraw()                # Cancel, resume game
+                if not self._loading:
+                    self.root.withdraw()            # Cancel, resume game
         elif mode == "EMU_DIALOG":
             if button in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
                 self._answer_dialog(button == sdl.SDL_CONTROLLER_BUTTON_A)
@@ -895,7 +910,7 @@ class LauncherApp:
     def _answer_dialog(self, accept):
         dialog, self._dialog = self._dialog, None
         self.ui.close_alert()
-        if self.process:
+        if self.process and not self._loading:
             self.root.withdraw()
         if dialog:
             answer_dialog(dialog[0], accept)
@@ -1842,8 +1857,13 @@ class LauncherApp:
         self.ui.show_splash(game, players, split_layout(len(players), mode),
                             emulator.display_name if len(self.emu.variants) > 1 else None,
                             icons=icons, starting=emulator.display_name)
-        self._splash_job = self.root.after(SPLASH_MS, self._launch_now, game, from_roulette)
-        self._exit_job = self.root.after(SPLASH_MS - SPLASH_EXIT_MS, self._splash_exit)
+        if self.ui.splash_waits:
+            self.ui.splash_ms = SPLASH_LAUNCH_MS    # the screen stays: the cover goes only when the game shows
+            self._splash_job = self.root.after(SPLASH_LAUNCH_MS, self._launch_now, game, from_roulette)
+        else:
+            self.ui.splash_ms = SPLASH_MS
+            self._splash_job = self.root.after(SPLASH_MS, self._launch_now, game, from_roulette)
+            self._exit_job = self.root.after(SPLASH_MS - SPLASH_EXIT_MS, self._splash_exit)
 
     def _splash_exit(self):
         self._exit_job = None
@@ -1873,7 +1893,46 @@ class LauncherApp:
             backup_saves(game, root, folders, self.backup_dir, self.backup_keep)
         self.start_session(game, from_roulette)
         self.mode = "GAMES"
-        self.force_launch(emulator.game_command(game["path"]), emulator)
+        waits = self.ui.splash_waits and self.ui._splash is not None and self.ui.animations
+        self.force_launch(emulator.game_command(game["path"]), emulator, keep_splash=waits)
+        if not self._loading:
+            self.ui.hide_splash()
+
+    # ------------------------------------------------------------------
+    # The launch screen over the emulator until the game is on screen
+    # ------------------------------------------------------------------
+    def _watch_loading(self, now):
+        loading = self._loading
+        if now < loading["next"]:
+            return
+        loading["next"] = now + LOADING_POLL_S
+        if game_shown(self.process):
+            log("INFO", "The game is on screen", f"after {now - loading['since']:.1f} s")
+            self._reveal_game()
+        elif now - loading["since"] > LOADING_MAX_S:
+            log("WARNING", "The game did not show in time - showing the emulator anyway")
+            self._reveal_game()
+
+    def _reveal_game(self):
+        """The game drew its first frame: the cover sinks into the dark, then the emulator is in front."""
+        self._loading = None
+        self.ui.splash_exit()
+        self.root.after(SPLASH_EXIT_MS + 40, self._step_aside)
+
+    def _step_aside(self):
+        if not self.process or self._loading:
+            return
+        self._end_loading()
+        self.root.withdraw()
+        bring_to_front(self.process)
+
+    def _end_loading(self):
+        """The launch screen is no longer kept over the emulator."""
+        self._loading = None
+        try:
+            self.root.attributes("-topmost", False)
+        except Exception:
+            pass
         self.ui.hide_splash()
 
     def resume_last_game(self, instance_id):
@@ -1964,7 +2023,7 @@ class LauncherApp:
         else:
             self.force_launch()
 
-    def force_launch(self, cmd_args=None, emulator=None):
+    def force_launch(self, cmd_args=None, emulator=None, keep_splash=False):
         """
         Write the controller configuration and start the emulator.
 
@@ -1986,7 +2045,12 @@ class LauncherApp:
         if cmd_args is None:
             cmd_args = emulator.command(sys.argv)
         log("INFO", "Launching", str(cmd_args))
-        self.root.withdraw()  # Hide launcher window
+        if keep_splash:
+            # The launch screen stays in front of the emulator while it loads the game
+            self.root.attributes("-topmost", True)
+            self.root.lift()
+        else:
+            self.root.withdraw()  # Hide launcher window
         self.returning_to_launcher = False  # Clear restart flag
         self.ui.set_dim(False)
 
@@ -1996,6 +2060,9 @@ class LauncherApp:
                 self.running_emu = emulator
                 self.launched_at = time.monotonic()
                 self._dialogs_seen = set()
+                if keep_splash:
+                    self._loading = {"since": self.launched_at, "next": 0.0}
+                    self.ui.splash_loading()
                 self.sounds.suspend()
             except Exception as e:
                 log("EXCEPTION", "Launch failed", e)

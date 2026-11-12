@@ -367,6 +367,106 @@ def answer_dialog(hwnd, accept):
 
 
 # ============================================================================
+# THE GAME ON SCREEN
+# ============================================================================
+# Eden shows its own loading screen (the game's name, "Loading shaders...")
+# while the game's picture stays hidden: the render window is shown only
+# once the loading screen has gone, i.e. the game drew its first frame
+# (yuzu/main_window.cpp, LoadingScreen::Hidden -> render_window->show()).
+# The picture is a native window (bootmanager.cpp, RenderWidget with
+# WA_NativeWindow) and the only child of the render window; Qt may make
+# the render window's siblings - the loading screen, the game list - native
+# windows too, but none of those is the only child of its parent.
+RENDER_SHARE = 0.35             # of the main window's area, a child window this big can be the game's picture
+
+
+def render_shown(tops, descendants):
+    """
+    True once the emulator's game picture is on screen.
+
+    Args:
+        tops (list): [(hwnd, width, height)] of its visible top-level windows.
+        descendants (dict): {top hwnd: [(hwnd, parent hwnd, visible, width, height)]}
+                            of every window inside each one.
+    """
+    for top, w, h in tops:
+        inside = descendants.get(top, [])
+        children = {}
+        for hwnd, parent, _visible, _w, _h in inside:
+            children.setdefault(parent, []).append(hwnd)
+        for hwnd, parent, visible, cw, ch in inside:
+            if visible and cw * ch >= RENDER_SHARE * w * h and hwnd not in children \
+                    and len(children.get(parent, ())) == 1:
+                return True
+    return False
+
+
+def can_watch_windows():
+    """True where the launcher can see the emulator's windows (Windows)."""
+    return sys.platform == "win32"
+
+
+def _window_size(user32, hwnd, client=False):
+    from ctypes import wintypes
+    rect = wintypes.RECT()
+    (user32.GetClientRect if client else user32.GetWindowRect)(hwnd, ctypes.byref(rect))
+    return rect.right - rect.left, rect.bottom - rect.top
+
+
+def game_shown(process):
+    """True once the game's picture is on screen (always False outside Windows)."""
+    if sys.platform != "win32" or process is None or process.poll() is not None:
+        return False
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        user32.EnumChildWindows.argtypes = [wintypes.HWND, enum_proc, wintypes.LPARAM]
+        user32.IsWindowVisible.argtypes = [wintypes.HWND]
+        user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        tops, descendants = [], {}
+        for hwnd, _title, owned in _process_windows(process.pid):
+            if owned:
+                continue
+            w, h = _window_size(user32, hwnd, client=True)
+            tops.append((hwnd, w, h))
+            found = descendants[hwnd] = []
+
+            @enum_proc
+            def each(child, _):
+                cw, ch = _window_size(user32, child)
+                parent = user32.GetAncestor(child, 1)           # GA_PARENT
+                found.append((int(child), int(parent or 0), bool(user32.IsWindowVisible(child)), cw, ch))
+                return True
+            user32.EnumChildWindows(hwnd, each, 0)
+        return render_shown(tops, descendants)
+    except Exception as e:
+        log("WARNING", "Could not look at the emulator's windows", e)
+        return False
+
+
+def bring_to_front(process):
+    """Give the emulator's largest window the keyboard and the front (Windows)."""
+    if sys.platform != "win32" or process is None:
+        return
+    try:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        windows = [(hwnd, _window_size(user32, hwnd)) for hwnd, _t, owned in _process_windows(process.pid)
+                   if not owned]
+        if windows:
+            hwnd = max(windows, key=lambda item: item[1][0] * item[1][1])[0]
+            user32.SetForegroundWindow(hwnd)
+    except Exception as e:
+        log("WARNING", "Could not bring the emulator to the front", e)
+
+
+# ============================================================================
 # APPIMAGE MOUNT HELPERS (LINUX ONLY)
 # ============================================================================
 _mount_proc = None  # Popen handle - terminating it unmounts the squashfs

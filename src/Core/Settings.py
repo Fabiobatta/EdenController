@@ -68,6 +68,9 @@ grid_style = light
 accent = violet
 ; Screen fades, cards popping in, the "let's go" screen before a game
 animations = true
+; The "let's go" screen stays in front of the emulator until the game is on
+; screen (its loading screen and shaders included): true / false
+loading_screen = true
 ; Dim the screen after this many minutes without input (0 = never)
 idle_dim_minutes = 5
 ; Tell when a newer build is on GitHub (checked once a day): true / false
@@ -137,6 +140,9 @@ grid_style = light
 accent = violet
 ; Dissolvenze, schede che entrano, schermata "si parte" prima del gioco
 animations = true
+; La schermata "si parte" resta davanti all'emulatore finche' il gioco non e'
+; sullo schermo (caricamento e shader compresi): true / false
+loading_screen = true
 ; Oscura lo schermo dopo questi minuti senza input (0 = mai)
 idle_dim_minutes = 5
 ; Avvisa quando su GitHub c'e' una build piu' nuova (una volta al giorno): true / false

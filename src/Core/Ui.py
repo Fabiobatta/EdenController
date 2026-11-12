@@ -87,6 +87,9 @@ HOP_MS = 560            # a player's icon jumping when they join or pick another
 HOP_HEIGHT = 13
 TV_MORPH_MS = 300       # the split-screen map dividing anew when a player joins or leaves
 SPLASH_EXIT_MS = 460    # the cover growing into a dark screen as the game opens
+SPLASH_WAIT_MAX_MS = 600000     # a launch screen that waits for the game keeps its bar moving this long at most
+LOADING_LOOP_S = 1.3    # one run of the light along the bar while the game loads
+LOADING_SEGMENT = 0.3   # of the bar
 EXIT_FRAMES = 12
 
 # Colours live in Core/Theme.py (COLOR is the current theme's)
@@ -375,6 +378,8 @@ class LauncherUi:
         self._stats = None                  # statistics screen data, None = closed
         self._splash = None                 # "let's go" screen data, None = closed
         self._splash_cover = None           # (left, top, size) of the cover on the launch screen
+        self.splash_waits = False           # the launch screen stays until the game is on screen (App)
+        self._splash_loading = False        # the emulator is running, loading the game
         self.animations = True              # fades, cards popping in
         self.brand_note = ""                # after the name in the footer ("build 21")
         self.alert_buttons = None           # replaces an alert's default buttons
@@ -1679,7 +1684,13 @@ class LauncherUi:
         self._splash = (game, tuple(players), layout, emulator, tuple(icons or ()), starting)
         self._draw_splash(entering=True)
 
+    def splash_loading(self):
+        """The game is starting behind the launch screen: say so, and drop the "cancel" hint."""
+        self._splash_loading = True
+        self.canvas.delete("splash-hint")
+
     def hide_splash(self):
+        self._splash_loading = False
         self._splash = None
         for key in ("splash", "splash-in", "splash-shine", "splash-exit"):
             self.animator.finish(key)
@@ -1747,21 +1758,33 @@ class LauncherUi:
         line = max(2, self.px(4))
         c.create_rectangle(left, bar_y, left + bar_w, bar_y + line, fill=COLOR["LINE"], width=0, tags=lower)
         bar = c.create_rectangle(left, bar_y, left, bar_y + line, fill=accent, width=0, tags=lower)
-        self.rich(self.width // 2, self.height - self.px(DOCK_Y), t("splash_hints"), 14, COLOR["TEXT_DIM"],
-                  anchor="center", tags="splash")
+        if not self._splash_loading:
+            self.rich(self.width // 2, self.height - self.px(DOCK_Y), t("splash_hints"), 14, COLOR["TEXT_DIM"],
+                      anchor="center", tags=("splash", "splash-hint"))
         self._raise_overlays()
         if not (self.animations and self.splash_ms):
             return
         started = time.monotonic()
-        bar_ms = max(1, self.splash_ms - SPLASH_EXIT_MS)    # full when the cover starts growing
+        waits = self.splash_waits               # it stays until the game is on screen (splash_loading)
+        bar_ms = max(1, self.splash_ms - (0 if waits else SPLASH_EXIT_MS))  # full when the cover starts growing
+        loading = t("splash_loading")
 
         def step(_progress):                    # linear: the bar is a clock, not a gesture
             elapsed = time.monotonic() - started
+            dots = "." * (1 + int(elapsed * 4) % 3)
+            if self._splash_loading or (waits and elapsed * 1000 >= bar_ms):
+                # The game is loading: a stretch of light running along the bar, again and again
+                phase = (elapsed % LOADING_LOOP_S) / LOADING_LOOP_S
+                head = phase * (1 + LOADING_SEGMENT)
+                c.coords(bar, left + int(bar_w * max(0.0, head - LOADING_SEGMENT)), bar_y,
+                         left + int(bar_w * min(1.0, head)), bar_y + line)
+                c.itemconfigure(status_item, text=loading + dots)
+                return
             done = min(1.0, elapsed * 1000 / bar_ms)
             c.coords(bar, left, bar_y, left + int(bar_w * done), bar_y + line)
             if status:
-                c.itemconfigure(status_item, text=status + "." * (1 + int(elapsed * 4) % 3))
-        self.animator.run("splash", self.splash_ms, step)
+                c.itemconfigure(status_item, text=status + dots)
+        self.animator.run("splash", SPLASH_WAIT_MAX_MS if waits else self.splash_ms, step)
 
         if entering:
             # Cover from the left, words and the map rising after it

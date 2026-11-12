@@ -2161,5 +2161,27 @@ class PlayersOverrideTests(unittest.TestCase):
         self.assertEqual(LauncherApp.players_key({"title": "A=B", "title_id": None}), "A B")
 
 
+class GameShownTests(unittest.TestCase):
+    """When the game's picture is on screen, from Eden's windows (Core/Process.py)."""
+
+    def test_render_window_shown(self):
+        from Core.Process import render_shown
+        top = (1, 1920, 1080)
+        # Loading: the central widget holds native siblings (game list, loading screen, render window)
+        loading = {1: [(10, 1, True, 1920, 1040),          # central widget
+                       (11, 10, False, 1920, 1040),        # game list, hidden
+                       (12, 10, True, 1920, 1040),         # loading screen
+                       (13, 10, False, 1920, 1040),        # render window, hidden
+                       (14, 13, False, 1920, 1040)]}       # its picture
+        self.assertFalse(render_shown([top], loading))
+        playing = {1: [(10, 1, True, 1920, 1040), (11, 10, False, 1920, 1040), (12, 10, False, 1920, 1040),
+                       (13, 10, True, 1920, 1040), (14, 13, True, 1920, 1040)]}
+        self.assertTrue(render_shown([top], playing))
+        # A small native child (a toolbar button) is not the game
+        self.assertFalse(render_shown([top], {1: [(20, 1, True, 200, 40)]}))
+        # Separate render window: the picture is the only child of its own top-level window
+        self.assertTrue(render_shown([top, (2, 1280, 720)], {1: [], 2: [(30, 2, True, 1280, 720)]}))
+
+
 if __name__ == "__main__":
     unittest.main()

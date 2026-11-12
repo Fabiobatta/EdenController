@@ -31,7 +31,7 @@ import threading
 import time
 from collections import OrderedDict
 
-from PIL import Image, ImageDraw, ImageFilter, ImageTk
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageTk
 
 from . import Glyphs
 from .I18n import last_played_label, players_label, playtime_label, t
@@ -1123,10 +1123,10 @@ class GameGrid:
     # ------------------------------------------------------------------
     # Banners (the launch screen shows the game's banner)
     # ------------------------------------------------------------------
-    def _hero_key(self, path):
+    def _hero_key(self, path, soft=False):
         from .Ui import current_theme
         ui = self.ui
-        return (path, int(ui.width * 0.66), int(ui.height * 0.70), current_theme(), bool(ui.animations))
+        return (path, int(ui.width * 0.66), int(ui.height * 0.70), current_theme(), bool(ui.animations), soft)
 
     @staticmethod
     def _hero_images(key):
@@ -1135,11 +1135,18 @@ class GameGrid:
         first, the last one the full banner. No Tk here: safe on a thread.
         """
         from .Ui import load_picture
-        path, width, height, theme, animated = key
+        path, width, height, theme, animated, soft = key
         art = load_picture(path, limit=max(width, 1280))
         if art is None:
             return None
-        image = Glyphs.cover_crop(art, width, height).convert("RGBA")
+        if soft:
+            # No banner (most Switch 2 games): the game's icon, enlarged and
+            # softly blurred - it is far too small to be shown sharp this big
+            small = Glyphs.cover_crop(art, max(1, width // 8), max(1, height // 8))
+            small = small.filter(ImageFilter.GaussianBlur(2.2))
+            image = ImageEnhance.Color(small.resize((width, height), Image.BICUBIC)).enhance(1.25).convert("RGBA")
+        else:
+            image = Glyphs.cover_crop(art, width, height).convert("RGBA")
         mask = Glyphs.hero_mask(width, height)
         if theme != "oled":
             mask = mask.point(lambda v: int(v * 0.86))          # the blurred backdrop stays in the picture
@@ -1155,9 +1162,9 @@ class GameGrid:
         if len(self._heroes) > HERO_CACHE:
             self._heroes.popitem(last=False)
 
-    def _hero_frames(self, path):
+    def _hero_frames(self, path, soft=False):
         """The banner's pictures, made right now if need be (the launch screen uses the last one)."""
-        key = self._hero_key(path)
+        key = self._hero_key(path, soft)
         photos = self._heroes.get(key)
         if photos is None:
             images = self._hero_images(key)

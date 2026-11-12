@@ -1710,7 +1710,11 @@ class LauncherUi:
                            lambda: Image.new("RGBA", (self.width, self.height), COLOR["SCREEN"]))
         c.create_image(0, 0, image=shade, anchor="nw", tags="splash")
         # The game's banner on the right, as in the game browser
-        frames = self.grid._hero_frames(game["background"]) if game.get("background") else None
+        if game.get("background"):
+            frames = self.grid._hero_frames(game["background"])
+        else:                                   # no banner (most Switch 2 games): the icon, blurred
+            art = game.get("cover") or game.get("image")
+            frames = self.grid._hero_frames(art, soft=True) if art else None
         if frames:
             c.create_image(self.width, 0, image=frames[-1], anchor="ne", tags="splash")
 

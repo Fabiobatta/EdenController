@@ -2023,6 +2023,74 @@ class AvatarChoiceTests(unittest.TestCase):
         self.assertIn(app.avatar_of(0), __import__("Core.Glyphs", fromlist=["AVATARS"]).AVATARS)
 
 
+@unittest.skipUnless(HAS_TK, "needs Tk")
+class SeatTests(unittest.TestCase):
+    """L3 "where am I?" and swapping places with the d-pad (Core/AppPlayers)."""
+
+    def _app(self, players=3):
+        from Core.App import LauncherApp
+        app = LauncherApp.__new__(LauncherApp)
+        state = {}
+        app.emu = types.SimpleNamespace(settings=types.SimpleNamespace(
+            state=state, save_state=lambda **values: state.update(values)))
+        app.played, app.toasts, app.pulses, app.flashed = [], [], [], []
+        app.sounds = types.SimpleNamespace(play=lambda *a: app.played.append(a[0]))
+        app.refresh_grid = app.update_hints = lambda: None
+        app.ui = types.SimpleNamespace(hop=lambda *a, **k: None,
+                                       flash_slot=lambda i, *a, **k: app.flashed.append(i),
+                                       show_toast=lambda text, color=None: app.toasts.append(text))
+        app.pads = {i: {"path": f"XInput#{i}", "ctrl": i} for i in range(4)}
+        app.assignments = [{"path": f"XInput#{i}", "name": f"Pad {i}", "is_editing": False}
+                           for i in range(players)]
+        app.confirm_player_number = lambda iid, n, sound=True, in_game=False: app.pulses.append((iid, n, sound))
+        app._whoami_until = {}
+        app.mode, app.process, app.rumble_enabled = "PLAYERS", None, False
+        return app, state
+
+    def test_swap_moves_the_controller_and_its_icon(self):
+        app, state = self._app()
+        icons = [app.avatar_of(i) for i in range(3)]
+        app.move_seat(1, -1)                        # P2 goes up
+        self.assertEqual([a["path"] for a in app.assignments], ["XInput#1", "XInput#0", "XInput#2"])
+        self.assertEqual(state["avatars"][:3], [icons[1], icons[0], icons[2]])
+        self.assertEqual(app.pulses, [(1, 1, True), (0, 2, False)])    # both feel their new number
+        self.assertIn("P1 ⇄ P2", app.toasts[-1])
+
+    def test_swap_stops_at_the_ends(self):
+        app, _ = self._app()
+        app.move_seat(0, -1)
+        app.move_seat(2, 1)
+        self.assertEqual([a["path"] for a in app.assignments], ["XInput#0", "XInput#1", "XInput#2"])
+        self.assertEqual(app.pulses, [])
+        self.assertEqual(app.played, ["back", "back"])
+
+    def test_no_swap_while_choosing_a_layout_or_not_playing(self):
+        app, _ = self._app()
+        app.assignments[1]["is_editing"] = True
+        app.move_seat(1, -1)
+        app.move_seat(3, -1)                        # pad 3 has not joined
+        self.assertEqual([a["path"] for a in app.assignments], ["XInput#0", "XInput#1", "XInput#2"])
+
+    def test_where_am_i(self):
+        app, _ = self._app()
+        app.where_am_i(2)
+        self.assertEqual(app.pulses, [(2, 3, True)])
+        self.assertIn("P3", app.toasts[-1])
+        self.assertEqual(app.flashed, [2])
+        app.where_am_i(2)                           # still pulsing: not again
+        self.assertEqual(len(app.pulses), 1)
+        app.where_am_i(3)                           # not playing
+        self.assertEqual(len(app.pulses), 1)
+        self.assertEqual(app.played[-1], "back")
+
+    def test_where_am_i_in_the_game_skips_the_rows(self):
+        app, _ = self._app()
+        app.process = object()
+        app.where_am_i(0)
+        self.assertEqual(app.pulses, [(0, 1, True)])
+        self.assertEqual(app.flashed, [])
+
+
 class MotionTests(unittest.TestCase):
     """Small animation helpers (Core/Ui)."""
 

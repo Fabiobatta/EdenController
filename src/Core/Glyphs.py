@@ -116,7 +116,7 @@ def button(name, height):
     A controller button prompt, `height` px tall.
 
     Names: a b x y (face buttons), lb rb (bumpers), lt rt (triggers),
-    ls rs (stick clicks), start, back, dpad.
+    ls rs (stick clicks), start, back, dpad, updown (the d-pad's up / down).
     """
     h = max(8, int(height))
     s = SUPERSAMPLE
@@ -160,16 +160,21 @@ def button(name, height):
             d.rounded_rectangle((x - box / 2, y - box / 2, x + box / 2, y + box / 2),
                                 radius=box * 0.2, outline=(255, 255, 255, 255), width=line,
                                 fill=NEUTRAL + (255,))
-    elif name == "dpad":
+    elif name in ("dpad", "updown"):
+        # "updown": the up and down arms lit, the sideways ones faded
         arm = h * s * 0.34
         c = h * s / 2
-        for box in ((c - arm / 2, 0, c + arm / 2, full), (0, c - arm / 2, full, c + arm / 2)):
-            d.rounded_rectangle(box, radius=arm * 0.25, fill=NEUTRAL_LIGHT + (255,))
+        lit, faded = NEUTRAL_LIGHT + (255,), NEUTRAL_LIGHT + (45,)
+        side = faded if name == "updown" else lit
+        d.rounded_rectangle((0, c - arm / 2, full, c + arm / 2), radius=arm * 0.25, fill=side)
+        d.rounded_rectangle((c - arm / 2, 0, c + arm / 2, full), radius=arm * 0.25, fill=lit)
         tri = arm * 0.32
-        for (x, y), points in (((c, arm * 0.55), ((0, -1), (-1, 1), (1, 1))),
-                               ((c, full - arm * 0.55), ((0, 1), (-1, -1), (1, -1))),
-                               ((arm * 0.55, c), ((-1, 0), (1, -1), (1, 1))),
-                               ((full - arm * 0.55, c), ((1, 0), (-1, -1), (-1, 1)))):
+        for n, ((x, y), points) in enumerate((((c, arm * 0.55), ((0, -1), (-1, 1), (1, 1))),
+                                              ((c, full - arm * 0.55), ((0, 1), (-1, -1), (1, -1))),
+                                              ((arm * 0.55, c), ((-1, 0), (1, -1), (1, 1))),
+                                              ((full - arm * 0.55, c), ((1, 0), (-1, -1), (-1, 1))))):
+            if name == "updown" and n >= 2:
+                continue
             d.polygon([(x + px * tri, y + py * tri) for px, py in points], fill=NEUTRAL + (255,))
     else:
         raise ValueError(f"unknown button {name!r}")

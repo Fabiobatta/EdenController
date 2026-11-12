@@ -179,6 +179,7 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
         self._battery_next = 0.0           # next battery reading
         self._batteries = None              # last batteries shown
         self._low_batteries = {}            # path -> lowest level read during the game (under LOW_BATTERY)
+        self._whoami_until = {}             # instance id -> end of its "where am I?" pulses
         self._updater = None                # Core.Update.Updater while a newer build downloads
         self._update_shown = None           # the download percentage on screen
         self._update_check = None           # thread of a "check now" from the settings
@@ -409,9 +410,11 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
                 if self._woke():
                     continue                    # that press only lit the screen again
                 if self.ui.alert_mode:
-                    self.on_alert_button(button)
+                    self.on_alert_button(button, which)
                 elif self.process or self.closing:
                     continue    # Ignore input while a game runs (no mid-game reassignment)
+                elif button == sdl.SDL_CONTROLLER_BUTTON_LEFT_STICK:
+                    self.where_am_i(which)      # L3, on every screen: "which player is this controller?"
                 elif self.mode == "SPLASH":
                     if button == sdl.SDL_CONTROLLER_BUTTON_B:
                         self.cancel_splash()
@@ -457,13 +460,15 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
             return True
         return False
 
-    def on_alert_button(self, button):
+    def on_alert_button(self, button, which=None):
         sdl = self.sdl
         mode = self.ui.alert_mode
         if time.monotonic() - self.ui.alert_since < ALERT_GUARD_S:
             return      # a press meant for the screen underneath (e.g. A to join)
         if mode == "KILL_CONFIRM":
-            if button == sdl.SDL_CONTROLLER_BUTTON_A:
+            if button == sdl.SDL_CONTROLLER_BUTTON_LEFT_STICK and which is not None:
+                self.where_am_i(which)              # in the game: "which player am I?"
+            elif button == sdl.SDL_CONTROLLER_BUTTON_A:
                 self.kill_and_restart()             # Return to the player cards
             elif button == sdl.SDL_CONTROLLER_BUTTON_X and self.picker and self.games:
                 self.kill_and_pick()                # Another game, same players
@@ -564,6 +569,9 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
         sdl = self.sdl
         slot_idx = self.find_slot_by_instance(which)
         editing = slot_idx != -1 and self.assignments[slot_idx]["is_editing"]
+        if button in (sdl.SDL_CONTROLLER_BUTTON_DPAD_UP, sdl.SDL_CONTROLLER_BUTTON_DPAD_DOWN) and not editing:
+            self.move_seat(which, -1 if button == sdl.SDL_CONTROLLER_BUTTON_DPAD_UP else 1)
+            return
         if slot_idx != -1 and button not in (sdl.SDL_CONTROLLER_BUTTON_A, sdl.SDL_CONTROLLER_BUTTON_B):
             self.ui.flash_slot(slot_idx, 350)          # "which card is mine?"
         if button == sdl.SDL_CONTROLLER_BUTTON_A:
@@ -606,7 +614,8 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
             return
         elif self.mode == "GAMES":
             hints = [("a", t("hint_play")), ("x", t("hint_surprise")), ("start", t("hint_menu")),
-                     ("back", t("hint_favorite")), (("lt", "rt"), t("hint_letter")), ("b", t("hint_back"))]
+                     ("back", t("hint_favorite")), (("lt", "rt"), t("hint_letter")), ("ls", t("hint_whoami")),
+                     ("b", t("hint_back"))]
         else:
             if self.has_game_args:
                 start = t("hint_launch_game")
@@ -616,7 +625,9 @@ class LauncherApp(PlayersMixin, LibraryMixin, LaunchMixin, MenusMixin):
                 start = t("hint_launch", name=self.emu.display_name)
             hints = [("a", t("hint_join"))]
             if self.assignments:
-                hints += [("x", t("hint_layout")), ("b", t("hint_leave"))]
+                hints += [("x", t("hint_layout")), ("b", t("hint_leave")), ("ls", t("hint_whoami"))]
+            if len(self.assignments) > 1:
+                hints.append(("updown", t("hint_swap")))
             hints += [("start", start), ("back", t("hint_quit"))]
             quick = [("lb", t("hint_settings")), ("rb", t("hint_trophies"))]
             resume = self._last_game() if self.picker else None

@@ -632,8 +632,8 @@ class LauncherUi:
             self.grid.draw(full=True)
 
     def _raise_overlays(self):
-        for tag in ("header", "footer", "roulette", "trophies", "menu", "splash", "toast", "trophy",
-                    "alert", "fade", "dim"):
+        for tag in ("header", "footer", "roulette", "trophies", "menu", "splash", "trophy",
+                    "alert", "toast", "fade", "dim"):
             self.canvas.tag_raise(tag)
 
     raise_overlays = _raise_overlays
@@ -2015,6 +2015,7 @@ class LauncherUi:
         if rows:
             self._draw_held(detail, cx - w // 2, top + self.px(262) + extra, w, per_row)
         c.tag_raise("alert")
+        c.tag_raise("toast")                    # e.g. the close menu's "this controller is P2"
         c.tag_raise("fade")
         c.tag_raise("dim")
 
@@ -2026,6 +2027,8 @@ class LauncherUi:
                       fill=COLOR["LINE"], width=max(1, self.px(1)), tags="alert")
         c.create_text(left + pad, y, text=t("held_title"), anchor="w", fill=COLOR["TEXT_FAINT"],
                       font=self.font(12, False), tags="alert")
+        self.rich(left + width - pad, y, f"[ls] {t('hint_whoami')}", 13, COLOR["TEXT_DIM"],
+                  anchor="e", tags="alert")
         cell = (width - 2 * pad) // per_row
         label_font = self.font(14)
         for i, (label, color, held) in enumerate(detail):

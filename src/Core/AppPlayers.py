@@ -254,16 +254,21 @@ class PlayersMixin:
         self.update_hints()
         self.confirm_player_number(instance_id, player)
 
-    def confirm_player_number(self, instance_id, count):
+    def confirm_player_number(self, instance_id, count, sound=True, in_game=False):
         """
         Pulse the controller once per player number (P1 = 1 pulse, P2 = 2 ...),
         so whoever holds it knows their slot without looking at the screen.
         Each pulse has a rising blip; the last one a small chime.
+
+        Args:
+            sound (bool):   False: only the rumble (another pad pulses the notes).
+            in_game (bool): also while a game runs (the close menu's "where am I?").
         """
         def pulse(n):
-            if self.process:
+            if self.process and not in_game:
                 return
-            self.sounds.play("join" if n == count else "blip", n)
+            if sound:
+                self.sounds.play("join" if n == count else "blip", n)
             # Looked up at pulse time: a launch may have closed the handle since
             pad = self.pads.get(instance_id)
             if pad and self.rumble_enabled:
@@ -272,6 +277,71 @@ class PlayersMixin:
         period = RUMBLE_PULSE_MS + RUMBLE_GAP_MS
         for n in range(count):
             self.root.after(n * period, pulse, n + 1)
+
+    def where_am_i(self, instance_id):
+        """
+        L3, anywhere outside a game and in the close menu: which player is
+        the controller in my hands? Its row glows, its icon jumps, it
+        rumbles its number and a toast names it in the player's colour.
+        """
+        now = time.monotonic()
+        if now < self._whoami_until.get(instance_id, 0.0):
+            return                                  # still pulsing the last answer
+        slot_idx = self.find_slot_by_instance(instance_id)
+        if slot_idx == -1:
+            self.sounds.play("back")
+            self.ui.show_toast(t("toast_whoami_none"), COLOR["TEXT_DIM"])
+            pad = self.pads.get(instance_id)
+            if pad and self.rumble_enabled:
+                self.sdl.rumble(pad["ctrl"], RUMBLE_STRENGTH * 0.5, RUMBLE_PULSE_MS)
+            return
+        player = slot_idx + 1
+        self._whoami_until[instance_id] = now + player * (RUMBLE_PULSE_MS + RUMBLE_GAP_MS) / 1000
+        log("INFO", f"Where am I? -> Player {player}", self.assignments[slot_idx]["name"])
+        self.ui.show_toast(t("toast_whoami", n=player), player_color(slot_idx))
+        if self.mode == "PLAYERS" and not self.process:
+            self.ui.flash_slot(slot_idx, 900)
+            self.ui.hop(slot_idx)
+        self.confirm_player_number(instance_id, player, in_game=True)
+
+    def move_seat(self, instance_id, direction):
+        """
+        D-pad up / down on the player screen: swap places with the player
+        above / below. The icon goes with the person; the number and its
+        colour stay with the place. Both controllers rumble their new number.
+        """
+        slot_idx = self.find_slot_by_instance(instance_id)
+        if slot_idx == -1 or self.assignments[slot_idx]["is_editing"]:
+            return
+        target = slot_idx + direction
+        if not 0 <= target < len(self.assignments):
+            self.sounds.play("back")
+            self.ui.flash_slot(slot_idx, 350)
+            return
+        count = len(self.assignments)
+        avatars = [self.avatar_of(i) for i in range(count)]
+        avatars[slot_idx], avatars[target] = avatars[target], avatars[slot_idx]
+        saved = list((self.emu.settings.state or {}).get("avatars") or [])
+        self.emu.settings.save_state(avatars=avatars + saved[count:])
+        seats = self.assignments
+        seats[slot_idx], seats[target] = seats[target], seats[slot_idx]
+        log("INFO", f"Player {slot_idx + 1} <-> Player {target + 1}",
+            f"{seats[target]['name']} / {seats[slot_idx]['name']}")
+        self.sounds.play("move")
+        self.refresh_grid()
+        for index in (target, slot_idx):
+            self.ui.flash_slot(index, 700)
+            self.ui.hop(index)
+        self.update_hints()
+        self.ui.show_toast(t("toast_swapped", a=min(slot_idx, target) + 1, b=max(slot_idx, target) + 1),
+                           player_color(target))
+        self._whoami_until[instance_id] = 0.0
+        self.confirm_player_number(instance_id, target + 1)
+        other = seats[slot_idx]
+        if not other.get("waiting"):
+            other_id = next((i for i, pad in self.pads.items() if pad["path"] == other["path"]), None)
+            if other_id is not None:
+                self.confirm_player_number(other_id, slot_idx + 1, sound=False)
 
     def rumble_all(self, strength, duration_ms):
         if not self.rumble_enabled:
